@@ -1,0 +1,1 @@
+option('sdl3_dir', type: 'string', value: '', description: 'SDL3 development SDK containing include and lib64 (Windows)')
