@@ -1,0 +1,5 @@
+#ifndef SLIPSTREAM5000_RACE_RECORDING_HOST_H
+#define SLIPSTREAM5000_RACE_RECORDING_HOST_H
+#include "race_recording.h"
+extern const SlipRaceRecordingResources SlipRaceRecordingHost_resources;
+#endif

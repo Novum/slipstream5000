@@ -1,0 +1,60 @@
+#ifndef SLIPSTREAM5000_CONFIG_SETTINGS_H
+#define SLIPSTREAM5000_CONFIG_SETTINGS_H
+#include <stdint.h>
+
+enum { SLIP_CONFIG_TRACK_COUNT = 10 };
+
+extern uint16_t SlipConfig_trackProgress;
+extern uint32_t SlipConfig_trackProgressOverride;
+uint32_t SlipConfig_TrackProgress(void);
+void SlipConfig_SetTrackProgress(uint16_t progress);
+
+extern uint16_t SlipConfig_rearMonitor;
+int SlipConfig_RearMonitor(void);
+void SlipConfig_ToggleRearMonitor(void);
+extern uint16_t SlipConfig_weaponsMonitor;
+int SlipConfig_WeaponsMonitor(void);
+void SlipConfig_ToggleWeaponsMonitor(void);
+extern uint16_t SlipConfig_language;
+int SlipConfig_Language(void);
+uint8_t SlipConfig_LanguageInitial(void);
+void SlipConfig_CycleLanguage(void);
+extern uint16_t SlipConfig_trackMap;
+int SlipConfig_TrackMapEnabled(void);
+int SlipConfig_ToggleTrackMap(void);
+extern uint16_t SlipConfig_speedDisplay;
+int SlipConfig_SpeedDisplay(void);
+void SlipConfig_ToggleSpeedDisplay(void);
+extern uint16_t SlipConfig_soundEffects;
+int SlipConfig_SoundEffects(void);
+void SlipConfig_ToggleSoundEffects(void);
+extern uint16_t SlipConfig_engineSounds;
+int SlipConfig_EngineSounds(void);
+void SlipConfig_CycleEngineSounds(void);
+extern uint16_t SlipConfig_speech;
+int SlipConfig_Speech(void);
+void SlipConfig_ToggleSpeech(void);
+extern uint16_t SlipConfig_music;
+int SlipConfig_Music(void);
+void SlipConfig_CycleMusic(void);
+extern uint16_t SlipConfig_environmentDetail;
+int SlipConfig_EnvironmentDetail(void);
+void SlipConfig_CycleEnvironmentDetail(void);
+extern uint16_t SlipConfig_clouds;
+int SlipConfig_CloudsEnabled(void);
+void SlipConfig_ToggleClouds(void);
+extern uint16_t SlipConfig_shading;
+int SlipConfig_Shading(void);
+void SlipConfig_CycleShading(void);
+extern uint16_t SlipConfig_textures;
+int SlipConfig_Textures(void);
+void SlipConfig_CycleTextures(void);
+extern uint16_t SlipConfig_windowSize;
+int SlipConfig_WindowSize(void);
+void SlipConfig_ToggleWindowSize(void);
+extern uint16_t SlipConfig_shadows;
+int SlipConfig_Shadows(void);
+void SlipConfig_ToggleShadows(void);
+const char *SlipConfig_LanguageName(void);
+const char *SlipConfig_EnvironmentName(void);
+#endif

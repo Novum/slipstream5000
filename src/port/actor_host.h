@@ -1,0 +1,9 @@
+#ifndef SLIPSTREAM5000_ACTOR_HOST_H
+#define SLIPSTREAM5000_ACTOR_HOST_H
+#include "actor_construction.h"
+
+extern SlipActorPool SlipActorHost_pool;
+extern SlipActorConstruction SlipActorHost_construction;
+extern const SlipActorPoolCalls SlipActorHost_poolCalls;
+extern const SlipActorConstructionCalls SlipActorHost_constructionCalls;
+#endif

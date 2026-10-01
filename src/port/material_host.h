@@ -1,0 +1,9 @@
+#ifndef SLIPSTREAM5000_MATERIAL_HOST_H
+#define SLIPSTREAM5000_MATERIAL_HOST_H
+#include "material_frames.h"
+#include "material_install.h"
+extern SlipMaterialResidency SlipMaterialHost_residency;
+extern SlipMaterialInstallState SlipMaterialHost_install;
+extern const SlipMaterialInstallCalls SlipMaterialHost_installCalls;
+extern const SlipMaterialResidencyCalls SlipMaterialHost_residencyCalls;
+#endif
