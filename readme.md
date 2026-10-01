@@ -52,8 +52,9 @@ The Windows SDK build copies `SDL3.dll` beside the executable.
 ## Controls and support
 
 Configure controls through the game's Configuration menu. Keyboard and SDL3
-game controllers are supported. The window can be resized; Alt+Enter toggles
-borderless fullscreen.
+game controllers are supported. The game starts in borderless fullscreen on
+first launch; Alt+Enter toggles windowed mode. The display mode and windowed
+size are remembered in the preferences folder. The window can be resized.
 
 Serial, modem, and IPX multiplayer are unavailable and their menu entries are
 disabled. Local split-screen multiplayer is supported.

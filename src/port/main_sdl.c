@@ -9,6 +9,7 @@
 #include "hmi_digital.h"
 #include "hmi_mixer_1000.h"
 #include "hmi_sdl_output.h"
+#include "host_file.h"
 #include "input.h"
 #include "menu.h"
 #include "menu_music.h"
@@ -44,11 +45,74 @@ uint64_t SlipSdl_TicksMs(void) { return SlipDebug_fixedClock ? SlipDebug_clockMi
 
 void SlipSdl_DelayMs(uint32_t ms) { SDL_Delay(ms); }
 
+static struct {
+	bool fullscreen;
+	int width, height;
+} displaySettings = {true, SLIP_OUT_WIDTH, SLIP_OUT_HEIGHT};
+
+static void SlipSdl_LoadDisplaySettings(void) {
+
+	char *const path = SlipHostFile_PreferencePath("display-settings.txt");
+	if (path == NULL)
+		return;
+	FILE *const file = SlipHostFile_OpenStream(path, "rb");
+	SDL_free(path);
+	if (file == NULL)
+		return;
+	int fullscreen, width, height;
+	if (fscanf(file, "%d %d %d", &fullscreen, &width, &height) == 3 && (fullscreen == 0 || fullscreen == 1) &&
+	    width > 0 && height > 0) {
+		displaySettings.fullscreen = fullscreen != 0;
+		displaySettings.width = width;
+		displaySettings.height = height;
+	}
+	fclose(file);
+}
+
+static void SlipSdl_SaveDisplaySettings(void) {
+
+	char *const path = SlipHostFile_PreferencePath("display-settings.txt");
+	if (path == NULL)
+		return;
+	FILE *const file = SlipHostFile_OpenStream(path, "wb");
+	SDL_free(path);
+	if (file == NULL)
+		return;
+	fprintf(file, "%d %d %d\n", displaySettings.fullscreen, displaySettings.width, displaySettings.height);
+	fclose(file);
+}
+
+static void SlipSdl_ObserveDisplayEvent(const SDL_Event *event) {
+
+	if (event->type != SDL_EVENT_WINDOW_RESIZED && event->type != SDL_EVENT_WINDOW_ENTER_FULLSCREEN &&
+	    event->type != SDL_EVENT_WINDOW_LEAVE_FULLSCREEN)
+		return;
+	SDL_Window *const window = SDL_GetWindowFromID(event->window.windowID);
+	if (window == NULL)
+		return;
+	const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
+	if (event->type == SDL_EVENT_WINDOW_RESIZED) {
+		const SDL_WindowFlags nonWindowedSizeFlags =
+		    SDL_WINDOW_FULLSCREEN | SDL_WINDOW_MAXIMIZED | SDL_WINDOW_MINIMIZED;
+		if (displaySettings.fullscreen || (flags & nonWindowedSizeFlags))
+			return;
+		int width, height;
+		if (!SDL_GetWindowSize(window, &width, &height) || width <= 0 || height <= 0)
+			return;
+		displaySettings.width = width;
+		displaySettings.height = height;
+	} else {
+		displaySettings.fullscreen = (flags & SDL_WINDOW_FULLSCREEN) != 0;
+	}
+	SlipSdl_SaveDisplaySettings();
+}
+
 bool SlipSdl_PollEvent(SDL_Event *event) {
 	static bool fullscreenEnterHeld[2];
 	SlipControllerSdl_Poll();
 	while (SDL_PollEvent(event)) {
 		SlipControllerSdl_ObserveEvent(event);
+		SlipSdl_ObserveDisplayEvent(event);
 		if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
 			if (event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER) {
 				const unsigned index = event->key.key == SDLK_KP_ENTER;
@@ -382,13 +446,20 @@ static int SlipSdl_Run(int argc, char **argv) {
 	 * pixels (1.2x tall), so the window is 4:3 and the framebuffer is
 	 * stretched into a 320x240 logical space, nearest filtered.
 	 */
-	window = SDL_CreateWindow("Slipstream 5000 SDL Port", SLIP_OUT_WIDTH, SLIP_OUT_HEIGHT, SDL_WINDOW_RESIZABLE);
+	SlipSdl_LoadDisplaySettings();
+	window = SDL_CreateWindow("Slipstream 5000 SDL Port", displaySettings.width, displaySettings.height,
+	                          SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
 	if (window == NULL) {
 		fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
 		SlipControllerSdl_Shutdown();
 		SDL_Quit();
 		return 1;
 	}
+	if (displaySettings.fullscreen && !SDL_SetWindowFullscreen(window, true)) {
+		fprintf(stderr, "SDL_SetWindowFullscreen failed: %s\n", SDL_GetError());
+		displaySettings.fullscreen = false;
+	}
+	SDL_ShowWindow(window);
 
 	rendererProperties = SDL_CreateProperties();
 	if (rendererProperties != 0 &&
