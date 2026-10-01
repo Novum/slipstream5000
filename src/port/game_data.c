@@ -1,6 +1,7 @@
 #include "game_data.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -85,6 +86,51 @@ static bool SlipGameData_FileExists(const char *path) {
 static bool SlipGameData_FindInDirectory(const char *directory, char *path, size_t capacity) {
 
 	return SlipGameData_Join(path, capacity, directory, resourceFile) && SlipGameData_FileExists(path);
+}
+
+static char *SlipGameData_PreferenceFile(void) {
+
+	char *const directory = SDL_GetPrefPath(NULL, "slipstream5000");
+	if (directory == NULL)
+		return NULL;
+	char *path = NULL;
+	SDL_asprintf(&path, "%sgame-data-path.txt", directory);
+	SDL_free(directory);
+	return path;
+}
+
+const char *SlipGameData_FindSaved(void) {
+
+	char *const preferenceFile = SlipGameData_PreferenceFile();
+	if (preferenceFile == NULL)
+		return NULL;
+	SDL_IOStream *const file = SDL_IOFromFile(preferenceFile, "rb");
+	SDL_free(preferenceFile);
+	if (file == NULL)
+		return NULL;
+	const Sint64 length = SDL_GetIOSize(file);
+	const bool validSize = length > 0 && (Uint64)length < sizeof(resourcePath);
+	const bool read = validSize && SDL_ReadIO(file, resourcePath, (size_t)length) == (size_t)length;
+	SDL_CloseIO(file);
+	if (!read || memchr(resourcePath, '\0', (size_t)length) != NULL)
+		return NULL;
+	resourcePath[length] = '\0';
+	return SlipGameData_FileExists(resourcePath) ? resourcePath : NULL;
+}
+
+static bool SlipGameData_SaveSelectedPath(void) {
+
+	char *const preferenceFile = SlipGameData_PreferenceFile();
+	if (preferenceFile == NULL)
+		return false;
+	SDL_IOStream *const file = SDL_IOFromFile(preferenceFile, "wb");
+	SDL_free(preferenceFile);
+	if (file == NULL)
+		return false;
+	const size_t length = SDL_strlen(resourcePath);
+	const bool written = SDL_WriteIO(file, resourcePath, length) == length;
+	const bool closed = SDL_CloseIO(file);
+	return written && closed;
 }
 
 static bool SlipGameData_TrySteamLibrary(const char *library, char *path, size_t capacity) {
@@ -281,5 +327,7 @@ const char *SlipGameData_SelectFile(SDL_Window *window) {
 		return NULL;
 	}
 	SDL_strlcpy(resourcePath, selection.path, sizeof(resourcePath));
+	if (!SlipGameData_SaveSelectedPath())
+		fprintf(stderr, "Could not save the game data location: %s\n", SDL_GetError());
 	return resourcePath;
 }

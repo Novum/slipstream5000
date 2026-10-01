@@ -12,7 +12,8 @@ pixel divergence.
 You need the original game's data files; they are not included in this repository.
 Steam installations are detected automatically. On Windows, GOG installations
 are detected too. If no installation is found, a file picker lets you select
-`SLIPSTRM.RES`. You can also pass its path directly:
+`SLIPSTRM.RES`. The selection is remembered in the application's preferences
+folder (AppData on Windows). You can also pass its path directly:
 
 ```sh
 ./build/slipstream5000 /path/to/game/SLIPSTRM.RES

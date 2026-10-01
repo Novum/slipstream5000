@@ -405,6 +405,10 @@ static const char *SlipMenu_FindResPathInternal(int argc, char **argv) {
 		return "SLIPSTRM.RES";
 	}
 
+	const char *const savedPath = SlipGameData_FindSaved();
+	if (savedPath != NULL)
+		return savedPath;
+
 	return SlipGameData_FindInstalled();
 }
 

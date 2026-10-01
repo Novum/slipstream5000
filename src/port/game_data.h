@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 bool SlipGameData_FindInSteam(const char *steamDirectory, char *path, size_t capacity);
+const char *SlipGameData_FindSaved(void);
 const char *SlipGameData_FindInstalled(void);
 const char *SlipGameData_SelectFile(SDL_Window *window);
 
