@@ -5,6 +5,7 @@
 #include "controller_sdl.h"
 #include "debug.h"
 #include "frame_timer.h"
+#include "game_data.h"
 #include "hmi_digital.h"
 #include "hmi_mixer_1000.h"
 #include "hmi_sdl_output.h"
@@ -19,6 +20,7 @@
 #include "vga_dac.h"
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -342,7 +344,7 @@ bool SlipSdl_RunStartupIntro(const char *resourcePath) {
 	return SlipStartupIntro_Run(resourcePath, SlipSdl_startupIntroHost) && context->running;
 }
 
-int main(int argc, char **argv) {
+static int SlipSdl_Run(int argc, char **argv) {
 	SDL_Window *window = NULL;
 	SDL_Renderer *renderer = NULL;
 	SDL_Texture *texture = NULL;
@@ -447,6 +449,17 @@ int main(int argc, char **argv) {
 	SlipMenu_BindSoundHost(&gameSound, SlipSdl_RaceLockSound, SlipSdl_RaceUnlockSound, &soundOutput);
 
 	resPath = SlipMenu_FindResPath(argc, argv);
+	if (resPath == NULL)
+		resPath = SlipGameData_SelectFile(window);
+	if (resPath == NULL) {
+		HmiSdlOutput_Close(&soundOutput);
+		SDL_DestroyTexture(texture);
+		SDL_DestroyRenderer(renderer);
+		SDL_DestroyWindow(window);
+		SlipControllerSdl_Shutdown();
+		SDL_Quit();
+		return 0;
+	}
 	SlipVgaDac_InitializeHostBiosDefaults();
 	SlipVgaDac_RefreshArgbPalette(g_palette);
 
@@ -510,4 +523,14 @@ int main(int argc, char **argv) {
 	SlipControllerSdl_Shutdown();
 	SDL_Quit();
 	return 0;
+}
+
+int main(int argc, char **argv) {
+#ifdef _WIN32
+	(void)argc;
+	(void)argv;
+	return SDL_RunApp(0, NULL, SlipSdl_Run, NULL);
+#else
+	return SDL_RunApp(argc, argv, SlipSdl_Run, NULL);
+#endif
 }

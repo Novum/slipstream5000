@@ -3,6 +3,7 @@
 #include "config_menu_host.h"
 #include "frame_timer.h"
 #include "game_errors.h"
+#include "host_file.h"
 #include "input_bios_host.h"
 #include "input_zone.h"
 #include "menu.h"
@@ -65,7 +66,7 @@ static bool SlipSavedGamesHost_LoadFile(void *context, const char *name, uint16_
 	char path[512];
 	if (!SlipSavedGamesHost_Path(context, name, path))
 		return false;
-	FILE *const file = fopen(path, "rb");
+	FILE *const file = SlipHostFile_OpenStream(path, "rb");
 	if (file == NULL)
 		return false;
 	bool ok = fseek(file, 0, SEEK_END) == 0;
@@ -252,7 +253,7 @@ static bool SlipSavedGamesHost_Open(void *context, const char *name, uint8_t mod
 	char path[512];
 	if (!SlipSavedGamesHost_Path(host->archive, name, path))
 		return false;
-	host->file = fopen(path, mode == 0 ? "rb" : "r+b");
+	host->file = SlipHostFile_OpenStream(path, mode == 0 ? "rb" : "r+b");
 	*file = 0;
 	return host->file != NULL;
 }
@@ -262,7 +263,7 @@ static bool SlipSavedGamesHost_Create(void *context, const char *name, int32_t *
 	char path[512];
 	if (!SlipSavedGamesHost_Path(host->archive, name, path))
 		return false;
-	host->file = fopen(path, "wb");
+	host->file = SlipHostFile_OpenStream(path, "wb");
 	*file = 0;
 	return host->file != NULL;
 }
@@ -297,7 +298,7 @@ static bool SlipSavedGamesHost_Rewrite(void *context, const char *name, const Sl
 	char path[512];
 	if (!SlipSavedGamesHost_Path(host->archive, name, path))
 		return false;
-	FILE *const file = fopen(path, "wb");
+	FILE *const file = SlipHostFile_OpenStream(path, "wb");
 	if (file == NULL)
 		return false;
 	bool ok = fwrite(data, 1, bytes, file) == bytes;

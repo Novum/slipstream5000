@@ -1,4 +1,5 @@
 #include "resource_host.h"
+#include "host_file.h"
 #include "resource_anonymous.h"
 #include "resource_load.h"
 #include "resource_platform.h"
@@ -11,14 +12,12 @@
 #include <stdlib.h>
 #ifdef _WIN32
 #include <io.h>
-#define host_open _open
 #define host_close _close
 #define host_seek _lseek
 #define host_read _read
 #define HOST_READ_FLAGS (_O_RDONLY | _O_BINARY)
 #else
 #include <unistd.h>
-#define host_open open
 #define host_close close
 #define host_seek lseek
 #define host_read read
@@ -38,7 +37,7 @@ static const SlipResourceNameAllocationCalls nameStorageCalls = {.allocate = Sli
 
 static bool SlipResourceHost_FileOpen(void *context, const char *path, int32_t *file) {
 	(void)context;
-	*file = host_open(path, HOST_READ_FLAGS);
+	*file = SlipHostFile_OpenDescriptor(path, HOST_READ_FLAGS, 0);
 	return *file >= 0;
 }
 

@@ -1,4 +1,5 @@
 #include "resource.h"
+#include "host_file.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -281,7 +282,7 @@ static int SlipResource_LoadPayload(const char *resPath, const char *name, SlipR
 	payload->ownsData = false;
 	SlipResource_PackResourceName(name, packedName);
 
-	fp = fopen(resPath, "rb");
+	fp = SlipHostFile_OpenStream(resPath, "rb");
 	if (fp == NULL) {
 		return 0;
 	}

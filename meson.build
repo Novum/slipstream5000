@@ -22,6 +22,10 @@ else
   endif
 endif
 math = cc.find_library('m', required: false)
+platform_dependencies = [sdl3, math]
+if host_machine.system() == 'windows'
+  platform_dependencies += cc.find_library('advapi32')
+endif
 
 sources = files(
   'src/port/actor_access.c',
@@ -59,6 +63,7 @@ sources = files(
   'src/port/frame_timer.c',
   'src/port/game_errors.c',
   'src/port/game_music.c',
+  'src/port/game_data.c',
   'src/port/game_sound.c',
   'src/port/game_timer.c',
   'src/port/guided_projectile_creation.c',
@@ -71,6 +76,7 @@ sources = files(
   'src/port/hmi_opl_output.c',
   'src/port/hmi_sdl_output.c',
   'src/port/hmi_timer.c',
+  'src/port/host_file.c',
   'src/port/input.c',
   'src/port/input_bios_host.c',
   'src/port/input_bios_translation.c',
@@ -202,4 +208,4 @@ sources = files(
 
 executable('slipstream5000', sources,
   include_directories: include_directories('src', 'src/port'),
-  dependencies: [sdl3, math], install: true)
+  dependencies: platform_dependencies, install: true)

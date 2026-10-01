@@ -1,4 +1,5 @@
 #include "file_write.h"
+#include "host_file.h"
 #include "runtime.h"
 #include <fcntl.h>
 #include <stdio.h>
@@ -11,9 +12,9 @@
 
 static int SlipFile_Create(const char *path) {
 #ifdef _WIN32
-	return _open(path, _O_BINARY | _O_CREAT | _O_TRUNC | _O_RDWR, _S_IREAD | _S_IWRITE);
+	return SlipHostFile_OpenDescriptor(path, _O_BINARY | _O_CREAT | _O_TRUNC | _O_RDWR, _S_IREAD | _S_IWRITE);
 #else
-	return open(path, O_CREAT | O_TRUNC | O_RDWR, 0666);
+	return SlipHostFile_OpenDescriptor(path, O_CREAT | O_TRUNC | O_RDWR, 0666);
 #endif
 }
 

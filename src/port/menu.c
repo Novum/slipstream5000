@@ -4,6 +4,7 @@
 #include "config_menu_host.h"
 #include "config_settings.h"
 #include "config_state_file.h"
+#include "host_file.h"
 #include "input_bios_host.h"
 #include "input_navigation.h"
 #include "material_host.h"
@@ -48,6 +49,7 @@
 #include "vga_dac.h"
 #include "view3d.h"
 
+#include "game_data.h"
 #include <SDL3/SDL.h>
 
 #include <stdbool.h>
@@ -57,8 +59,6 @@
 #include <string.h>
 
 uint32_t g_palette[256];
-
-static const char *kDefaultResPath = "E:\\SteamLibrary\\steamapps\\common\\Slipstream 5000\\SLIPSTRM.RES";
 
 static SlipGameSoundState *menuSound;
 static SlipSoundEffectLock menuSoundLock;
@@ -381,7 +381,7 @@ static int g_garageTurboMarkerCenters[kGarageTurboActionCount][2] = {{64, 119}, 
 static int g_garageSystemsMarkerCenters[kGarageSystemsActionCount - 1][2] = {{54, 138}, {122, 138}, {190, 138}};
 
 static bool SlipMenu_FileExists(const char *path) {
-	FILE *const fp = fopen(path, "rb");
+	FILE *const fp = SlipHostFile_OpenStream(path, "rb");
 	if (fp == NULL) {
 		return false;
 	}
@@ -396,7 +396,7 @@ static const char *SlipMenu_FindResPathInternal(int argc, char **argv) {
 		return argv[1];
 	}
 
-	envPath = getenv("SLIPSTREAM5000_RES");
+	envPath = SDL_getenv("SLIPSTREAM5000_RES");
 	if (envPath != NULL && SlipMenu_FileExists(envPath)) {
 		return envPath;
 	}
@@ -405,11 +405,7 @@ static const char *SlipMenu_FindResPathInternal(int argc, char **argv) {
 		return "SLIPSTRM.RES";
 	}
 
-	if (SlipMenu_FileExists(kDefaultResPath)) {
-		return kDefaultResPath;
-	}
-
-	return NULL;
+	return SlipGameData_FindInstalled();
 }
 
 bool SlipMenu_DrawSpriteFromRes(const char *resPath, const char *name, bool applyPalette) {
