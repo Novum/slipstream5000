@@ -24,6 +24,7 @@
 #include "font.h"
 #include "frame_timer.h"
 #include "input.h"
+#include "input_navigation.h"
 #include "menu.h"
 #include "menu_music.h"
 #include "port_app_bridge.h"

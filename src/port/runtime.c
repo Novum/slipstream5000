@@ -1,6 +1,6 @@
 #include "runtime.h"
 
-#include <intrin.h>
+#include <SDL3/SDL.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -92,6 +92,6 @@ SLIP_RUNTIME_NORETURN void SlipRuntime_Fatal(const char *message) {
 	SlipRuntime_Shutdown();
 	fputs(buffer, stderr);
 	fputs("\r\n", stderr);
-	__debugbreak();
-	quick_exit(0);
+	SDL_TriggerBreakpoint();
+	_Exit(0);
 }

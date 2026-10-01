@@ -108,7 +108,7 @@ typedef struct SlipArticSlotMainBounds {
 
 typedef struct SlipArticSlotResourceCalls {
 	void *context;
-	bool (*allocate)(void *, uint32_t, uint16_t, uint16_t *);
+	bool (*allocate)(void *, uint32_t, uint32_t, uint16_t *);
 	const uint8_t *(*lock)(void *, uint16_t);
 	SlipResourcePayload (*payload)(uint16_t);
 	void (*unlock)(void *, uint16_t);
