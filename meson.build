@@ -2,7 +2,7 @@ project('slipstream5000', 'c', version: '0.1.0', meson_version: '>=1.3.0',
   default_options: ['c_std=c11', 'warning_level=2'])
 
 cc = meson.get_compiler('c')
-add_project_arguments('-DSLIP_ASSERT_TO_STDERR', '-DSDL_MAIN_HANDLED', language: 'c')
+add_project_arguments('-DSLIP_ASSERT_TO_STDERR', language: 'c')
 if host_machine.system() == 'windows'
   add_project_arguments('-D_CRT_SECURE_NO_WARNINGS', language: 'c')
 endif
@@ -207,5 +207,6 @@ sources = files(
 )
 
 executable('slipstream5000', sources,
+  win_subsystem: 'windows',
   include_directories: include_directories('src', 'src/port'),
   dependencies: platform_dependencies, install: true)

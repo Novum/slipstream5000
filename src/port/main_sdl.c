@@ -527,12 +527,4 @@ static int SlipSdl_Run(int argc, char **argv) {
 	return 0;
 }
 
-int main(int argc, char **argv) {
-#ifdef _WIN32
-	(void)argc;
-	(void)argv;
-	return SDL_RunApp(0, NULL, SlipSdl_Run, NULL);
-#else
-	return SDL_RunApp(argc, argv, SlipSdl_Run, NULL);
-#endif
-}
+int main(int argc, char **argv) { return SlipSdl_Run(argc, argv); }
