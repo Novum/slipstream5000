@@ -22,6 +22,10 @@ folder (AppData on Windows). You can also pass its path directly:
 On Windows, run `build\slipstream5000.exe` instead. You can also set the
 `SLIPSTREAM5000_RES` environment variable to the resource file's path.
 
+Saved games are stored in the same preferences folder. On first launch, an
+existing `SLIPSTRM.SAV` beside the game data is copied there if no save file
+already exists in the preferences folder. The original file is kept.
+
 ## Building
 
 Requirements: a C11 compiler, Meson 1.3 or newer, Ninja, and SDL3 3.2 or newer.

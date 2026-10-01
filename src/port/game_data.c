@@ -1,4 +1,5 @@
 #include "game_data.h"
+#include "host_file.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -88,20 +89,9 @@ static bool SlipGameData_FindInDirectory(const char *directory, char *path, size
 	return SlipGameData_Join(path, capacity, directory, resourceFile) && SlipGameData_FileExists(path);
 }
 
-static char *SlipGameData_PreferenceFile(void) {
-
-	char *const directory = SDL_GetPrefPath(NULL, "slipstream5000");
-	if (directory == NULL)
-		return NULL;
-	char *path = NULL;
-	SDL_asprintf(&path, "%sgame-data-path.txt", directory);
-	SDL_free(directory);
-	return path;
-}
-
 const char *SlipGameData_FindSaved(void) {
 
-	char *const preferenceFile = SlipGameData_PreferenceFile();
+	char *const preferenceFile = SlipHostFile_PreferencePath("game-data-path.txt");
 	if (preferenceFile == NULL)
 		return NULL;
 	SDL_IOStream *const file = SDL_IOFromFile(preferenceFile, "rb");
@@ -120,7 +110,7 @@ const char *SlipGameData_FindSaved(void) {
 
 static bool SlipGameData_SaveSelectedPath(void) {
 
-	char *const preferenceFile = SlipGameData_PreferenceFile();
+	char *const preferenceFile = SlipHostFile_PreferencePath("game-data-path.txt");
 	if (preferenceFile == NULL)
 		return false;
 	SDL_IOStream *const file = SDL_IOFromFile(preferenceFile, "wb");

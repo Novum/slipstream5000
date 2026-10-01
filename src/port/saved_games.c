@@ -17,6 +17,7 @@
 #include <string.h>
 
 enum {
+	SAVED_PATH_CAPACITY = 4096,
 	SAVED_CANCEL = 7,
 	SAVED_TOGGLE_FIRST = 0x81,
 	SAVED_TOGGLE_LAST = 0x86,
@@ -49,22 +50,53 @@ static const SlipStringTableResources strings = {.load = SlipResourceHost_Load,
                                                  .unlock = SlipResourceHost_Unlock,
                                                  .release = SlipResourceHost_Release};
 
-static bool SlipSavedGamesHost_Path(const char *archive, const char *name, char path[512]) {
-	const char *slash = strrchr(archive, '/'), *backslash = strrchr(archive, '\\');
-	if (backslash != NULL && (slash == NULL || backslash > slash))
-		slash = backslash;
-	const size_t directory = slash != NULL ? (size_t)(slash + 1 - archive) : 0;
-	if (directory + strlen(name) + 1 > 512)
+static bool SlipSavedGamesHost_Path(const char *name, char path[SAVED_PATH_CAPACITY]) {
+	char *const preferencePath = SlipHostFile_PreferencePath(name);
+	if (preferencePath == NULL)
 		return false;
-	memcpy(path, archive, directory);
-	strcpy(path + directory, name);
-	return true;
+	const bool fits = SDL_strlcpy(path, preferencePath, SAVED_PATH_CAPACITY) < SAVED_PATH_CAPACITY;
+	SDL_free(preferencePath);
+	return fits;
 }
 
-/* Native filesystem binding: use the game directory, as for SLIPSTRM.CFG. */
+void SlipSavedGamesHost_ImportLegacySave(const char *resourcePath) {
+	char *const destination = SlipHostFile_PreferencePath("SLIPSTRM.SAV");
+	if (destination == NULL)
+		return;
+	SDL_PathInfo info;
+	if (SDL_GetPathInfo(destination, &info)) {
+		SDL_free(destination);
+		return;
+	}
+	const char *slash = strrchr(resourcePath, '/');
+	const char *const backslash = strrchr(resourcePath, '\\');
+	if (backslash != NULL && (slash == NULL || backslash > slash))
+		slash = backslash;
+	char *source = NULL;
+	SDL_asprintf(&source, "%.*sSLIPSTRM.SAV", slash != NULL ? (int)(slash + 1 - resourcePath) : 0, resourcePath);
+	size_t bytes = 0;
+	void *const data = source != NULL ? SDL_LoadFile(source, &bytes) : NULL;
+	SDL_free(source);
+	if (data != NULL) {
+		FILE *const file = SlipHostFile_OpenStream(destination, "wbx");
+		if (file != NULL) {
+			const bool written = fwrite(data, 1, bytes, file) == bytes;
+			const bool closed = fclose(file) == 0;
+			if (!written || !closed) {
+				SDL_RemovePath(destination);
+				fprintf(stderr, "Could not import existing saved games into the preferences folder.\n");
+			}
+		}
+		SDL_free(data);
+	}
+	SDL_free(destination);
+}
+
+/* Native filesystem binding: store saved games in the application's preferences folder. */
 static bool SlipSavedGamesHost_LoadFile(void *context, const char *name, uint16_t *resource) {
-	char path[512];
-	if (!SlipSavedGamesHost_Path(context, name, path))
+	(void)context;
+	char path[SAVED_PATH_CAPACITY];
+	if (!SlipSavedGamesHost_Path(name, path))
 		return false;
 	FILE *const file = SlipHostFile_OpenStream(path, "rb");
 	if (file == NULL)
@@ -241,7 +273,6 @@ bool SlipSavedGames_Run(const char *resourcePath, SlipRaceRacerTable *racers, ui
 }
 
 typedef struct SlipSavedGamesFileHost {
-	const char *archive;
 	const SlipRaceRacerTable *racers;
 	uint32_t stage;
 	FILE *file;
@@ -250,8 +281,8 @@ typedef struct SlipSavedGamesFileHost {
 
 static bool SlipSavedGamesHost_Open(void *context, const char *name, uint8_t mode, int32_t *file) {
 	SlipSavedGamesFileHost *const host = context;
-	char path[512];
-	if (!SlipSavedGamesHost_Path(host->archive, name, path))
+	char path[SAVED_PATH_CAPACITY];
+	if (!SlipSavedGamesHost_Path(name, path))
 		return false;
 	host->file = SlipHostFile_OpenStream(path, mode == 0 ? "rb" : "r+b");
 	*file = 0;
@@ -260,8 +291,8 @@ static bool SlipSavedGamesHost_Open(void *context, const char *name, uint8_t mod
 
 static bool SlipSavedGamesHost_Create(void *context, const char *name, int32_t *file) {
 	SlipSavedGamesFileHost *const host = context;
-	char path[512];
-	if (!SlipSavedGamesHost_Path(host->archive, name, path))
+	char path[SAVED_PATH_CAPACITY];
+	if (!SlipSavedGamesHost_Path(name, path))
 		return false;
 	host->file = SlipHostFile_OpenStream(path, "wb");
 	*file = 0;
@@ -285,18 +316,18 @@ static bool SlipSavedGamesHost_Close(void *context, int32_t file) {
 }
 
 static bool SlipSavedGamesHost_Size(void *context, const char *name, uint32_t *bytes) {
-	SlipSavedGamesFileHost *const host = context;
-	char path[512];
-	if (!SlipSavedGamesHost_Path(host->archive, name, path))
+	(void)context;
+	char path[SAVED_PATH_CAPACITY];
+	if (!SlipSavedGamesHost_Path(name, path))
 		return false;
 	return SlipFile_Size(path, bytes, &SlipResourceHost_fileCalls);
 }
 
 static bool SlipSavedGamesHost_Rewrite(void *context, const char *name, const SlipChampionshipSaveDirectory *data,
                                        uint32_t bytes) {
-	SlipSavedGamesFileHost *const host = context;
-	char path[512];
-	if (!SlipSavedGamesHost_Path(host->archive, name, path))
+	(void)context;
+	char path[SAVED_PATH_CAPACITY];
+	if (!SlipSavedGamesHost_Path(name, path))
 		return false;
 	FILE *const file = SlipHostFile_OpenStream(path, "wb");
 	if (file == NULL)
@@ -398,8 +429,7 @@ bool SlipSavedGames_Save(const char *resourcePath, const SlipRaceRacerTable *rac
 	SlipConfigHost_calls.selectFont(NULL, SlipMenu_resources.smallFont);
 	Raster_SetClipRect(0, 0, 319, 199);
 	SlipSavedGames_Initialize();
-	SlipSavedGamesFileHost host = {.archive = resourcePath,
-	                               .racers = racers,
+	SlipSavedGamesFileHost host = {.racers = racers,
 	                               .stage = stage,
 	                               .directory = {.context = (void *)resourcePath,
 	                                             .load = SlipSavedGamesHost_LoadFile,

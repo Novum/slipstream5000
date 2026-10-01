@@ -15,6 +15,7 @@
 #include "port_app_bridge.h"
 #include "race_session.h"
 #include "raster.h"
+#include "saved_games.h"
 #include "sound_effects.h"
 #include "startup_intro.h"
 #include "vga_dac.h"
@@ -460,6 +461,7 @@ static int SlipSdl_Run(int argc, char **argv) {
 		SDL_Quit();
 		return 0;
 	}
+	SlipSavedGamesHost_ImportLegacySave(resPath);
 	SlipVgaDac_InitializeHostBiosDefaults();
 	SlipVgaDac_RefreshArgbPalette(g_palette);
 

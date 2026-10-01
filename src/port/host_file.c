@@ -1,8 +1,8 @@
 #include "host_file.h"
+#include <SDL3/SDL.h>
 #include <fcntl.h>
 
 #ifdef _WIN32
-#include <SDL3/SDL.h>
 #include <errno.h>
 #include <io.h>
 
@@ -16,6 +16,17 @@ static wchar_t *SlipHostFile_WidePath(const char *path) {
 #else
 #include <unistd.h>
 #endif
+
+char *SlipHostFile_PreferencePath(const char *name) {
+
+	char *const directory = SDL_GetPrefPath(NULL, "slipstream5000");
+	if (directory == NULL)
+		return NULL;
+	char *path = NULL;
+	SDL_asprintf(&path, "%s%s", directory, name);
+	SDL_free(directory);
+	return path;
+}
 
 FILE *SlipHostFile_OpenStream(const char *path, const char *mode) {
 
