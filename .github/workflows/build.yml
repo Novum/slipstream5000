@@ -12,13 +12,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2025-vs2026, ubuntu-24.04, macos-14]
+        os: [windows-2025-vs2026, ubuntu-22.04, macos-14]
         configuration: [debug, release]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
+      - name: Determine package version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="${GITHUB_SHA:0:8}"
+          fi
+          echo "VERSION=${version//\//-}" >> "$GITHUB_ENV"
       - name: Install build tools
         run: python -m pip install meson ninja
       - name: Set up MSVC
@@ -36,7 +45,7 @@ jobs:
         env:
           PKG_CONFIG_PATH: ${{ steps.sdl.outputs.prefix }}/lib/pkgconfig
           CMAKE_PREFIX_PATH: ${{ steps.sdl.outputs.prefix }}
-        run: meson setup build --buildtype=${{ matrix.configuration }} --cmake-prefix-path="${{ steps.sdl.outputs.prefix }}"
+        run: meson setup build --buildtype=${{ matrix.configuration }} -Ddebug=true --cmake-prefix-path="${{ steps.sdl.outputs.prefix }}"
       - name: Build
         run: meson compile -C build
       - name: Copy Windows runtime
@@ -47,6 +56,7 @@ jobs:
           if ($null -eq $dll) { throw 'SDL3.dll was not found' }
           Copy-Item -LiteralPath $dll.FullName -Destination build/SDL3.dll
       - name: Upload executable
+        if: matrix.configuration == 'debug'
         uses: actions/upload-artifact@v7
         with:
           name: slipstream5000-${{ runner.os }}-${{ matrix.configuration }}
@@ -59,3 +69,51 @@ jobs:
             readme.md
             src/opal/LICENSE*
           if-no-files-found: error
+      - name: Package Windows release
+        if: runner.os == 'Windows' && matrix.configuration == 'release'
+        run: python Packaging/package-windows.py
+      - name: Package Linux AppImage
+        if: runner.os == 'Linux' && matrix.configuration == 'release'
+        env:
+          SDL_PREFIX: ${{ steps.sdl.outputs.prefix }}
+        run: bash Packaging/AppImage/package.sh
+      - name: Package macOS release
+        if: runner.os == 'macOS' && matrix.configuration == 'release'
+        env:
+          SDL_PREFIX: ${{ steps.sdl.outputs.prefix }}
+        run: |
+          brew install dylibbundler
+          mkdir -p dist build/package
+          cp build/slipstream5000 LICENSE readme.md build/package/
+          cp src/opal/LICENSE build/package/Opal-LICENSE
+          dylibbundler -b -cd -x build/package/slipstream5000 -d build/package/lib -p '@executable_path/lib/' -s "$SDL_PREFIX/lib"
+          find build/package/lib -type f -name '*.dylib' -exec codesign --force --sign - {} \;
+          codesign --force --sign - build/package/slipstream5000
+          tar -czf "dist/slipstream5000-${VERSION}-macos-$(uname -m).tar.gz" -C build/package .
+      - name: Upload release packages
+        if: matrix.configuration == 'release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-package-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Attach packages to draft release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-package-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          fail_on_unmatched_files: true
+          files: dist/*

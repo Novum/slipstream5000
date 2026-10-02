@@ -206,6 +206,13 @@ sources = files(
   'src/opal/opal.c',
 )
 
+if host_machine.system() == 'windows'
+  windows = import('windows')
+  sources += windows.compile_resources('Packaging/windows.rc',
+    include_directories: include_directories('Packaging'),
+    depend_files: files('Packaging/icons/slipstream5000.ico'))
+endif
+
 executable('slipstream5000', sources,
   win_subsystem: 'windows',
   include_directories: include_directories('src', 'src/port'),

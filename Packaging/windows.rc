@@ -1,0 +1,2 @@
+// SDL defaults to the first embedded icon for its native window and taskbar.
+SLIPSTREAM_ICON ICON "icons/slipstream5000.ico"

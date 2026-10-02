@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Slipstream 5000
+Exec=slipstream5000
+Icon=slipstream5000
+Categories=Game;SportsGame;
+Terminal=false
