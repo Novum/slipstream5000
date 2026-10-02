@@ -72,6 +72,7 @@ typedef struct SlipConfigMenuCalls {
 	void (*drawDetail)(void *, SlipConfigMenuState *);
 	void (*drawSound)(void *, SlipConfigMenuState *);
 	void (*generalOptions[5])(void *);
+	void (*toggleHighRes)(void *);
 	void (*detailOptions[6])(void *);
 	void (*soundOptions[4])(void *);
 	void (*cycleLanguage)(void *);

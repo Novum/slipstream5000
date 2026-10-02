@@ -28,7 +28,7 @@ already exists in the preferences folder. The original file is kept.
 
 ## Building
 
-Requirements: a C11 compiler, Meson 1.3 or newer, Ninja, and SDL3 3.2 or newer.
+Requirements: a C11 compiler, Meson 1.3 or newer, Ninja, and SDL3 3.4 or newer.
 Opal is included in `src/opal`.
 
 With SDL3 installed and discoverable through pkg-config or CMake:
@@ -59,6 +59,11 @@ size are remembered in the preferences folder. The window can be resized.
 Serial, modem, and IPX multiplayer are unavailable and their menu entries are
 disabled. Local split-screen multiplayer is supported.
 
+High Res in Configuration > General (or F12 during a race) draws the race at
+the native window resolution with SDL3 GPU. Textures use nearest filtering
+and CPU-generated mipmaps from stb_image_resize2; menus retain the DOS art
+and software renderer.
+
 ## Development
 
 Format `src/port` with Clang-format 22 using the checked-in `.clang-format`.
@@ -68,5 +73,6 @@ macOS, and check formatting.
 ## License
 
 The port is available under the [MIT license](LICENSE). Vendored Opal retains
-its own [licenses](src/opal/LICENSE) and attribution. The original game and its
+its own [licenses](src/opal/LICENSE) and attribution. stb_image_resize2 retains
+its [public-domain/MIT licensing](src/third_party/stb_image_resize2.h). The original game and its
 data remain the property of their respective owners.

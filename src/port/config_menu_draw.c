@@ -92,8 +92,8 @@ void SlipConfigMenu_DrawDifficulty(const SlipConfigMenuState *state, const SlipC
 }
 
 const SlipConfigMenuRectangle SlipConfigMenu_generalRectangles[7] = {
-    {25, 43, 281, 59},   {25, 63, 281, 79},    {25, 83, 281, 99}, {25, 103, 281, 119},
-    {25, 123, 281, 139}, {100, 169, 195, 187}, {100, 10, 220, 28}};
+    {25, 63, 281, 79},   {25, 83, 281, 99},    {25, 103, 281, 119}, {25, 123, 281, 139},
+    {25, 143, 281, 159}, {100, 169, 195, 187}, {100, 10, 220, 28}};
 const uint32_t SlipConfigMenu_generalTags[7] = {0x0u, 0x0u, 0x0u, 0x0u, 0x0u, 0x42555431u, 0x5449544cu};
 const uint32_t *SlipConfigMenu_generalTagCursor;
 
@@ -118,25 +118,25 @@ void SlipConfigMenu_DrawGeneral(const SlipConfigMenuState *state, const SlipConf
 	const char *text;
 	tag = calls->rearMonitor(context) + 0x4f464630u;
 	text = calls->string(context, state->generalStrings, tag);
-	calls->text(context, text, NULL, (SlipTextPosition){0, 47});
+	calls->text(context, text, NULL, (SlipTextPosition){0, 67});
 	calls->unlockStrings(context, state->generalStrings);
 	tag = calls->weaponsMonitor(context) + 0x4f464630u;
 	text = calls->string(context, state->generalStrings, tag);
-	calls->text(context, text, NULL, (SlipTextPosition){0, 67});
+	calls->text(context, text, NULL, (SlipTextPosition){0, 87});
 	calls->unlockStrings(context, state->generalStrings);
 	text = calls->language(context);
-	calls->text(context, text, NULL, (SlipTextPosition){0, 87});
+	calls->text(context, text, NULL, (SlipTextPosition){0, 107});
 	tag = calls->trackMap(context) + 0x4f464630u;
 	text = calls->string(context, state->generalStrings, tag);
-	calls->text(context, text, NULL, (SlipTextPosition){0, 107});
+	calls->text(context, text, NULL, (SlipTextPosition){0, 127});
 	calls->unlockStrings(context, state->generalStrings);
 	const uint32_t speed = calls->speedDisplay(context);
 	text = "mph";
 	if (speed != 0)
 		text = "km/h";
-	calls->text(context, text, NULL, (SlipTextPosition){0, 127});
+	calls->text(context, text, NULL, (SlipTextPosition){0, 147});
 	calls->style(context, 0, UINT16_MAX, 25, 200);
-	int16_t y = 46;
+	int16_t y = 66;
 	tag = 0x43415431u;
 	for (unsigned row = 0; row < 5; ++row) {
 		text = calls->string(context, state->generalStrings, tag);

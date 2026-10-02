@@ -1,6 +1,6 @@
 #include "race_records_screen.h"
 #include "frame_timer.h"
-#include "raster.h"
+#include "raster/raster.h"
 
 uint16_t SlipLapRecords_CreateRow(int16_t x, int16_t y, const SlipLapRecordsScreenCalls *calls) {
 	uint16_t resource;

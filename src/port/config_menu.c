@@ -163,7 +163,10 @@ void SlipConfigMenu_General(SlipConfigMenuState *state, const SlipConfigMenuCall
 				if (selection != 0) {
 					if (selection == 6)
 						break;
-					calls->generalOptions[selection - 1](context);
+					if (selection == 8 && calls->toggleHighRes != NULL)
+						calls->toggleHighRes(context);
+					else if (selection <= 5)
+						calls->generalOptions[selection - 1](context);
 				}
 			}
 		}

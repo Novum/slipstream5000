@@ -30,7 +30,7 @@
 #include "race_records_host.h"
 #include "race_results_host.h"
 #include "race_session.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "resource.h"
 #include "resource_host.h"
 #include "runtime.h"

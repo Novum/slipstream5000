@@ -1,9 +1,11 @@
 #include "draw3d.h"
 #include "byte_order.h"
+#include "gpu/clip.h"
+#include "gpu/renderer.h"
+#include "raster/raster.h"
 #include "renderer_flags.h"
 #include "shape_format.h"
 
-#include "raster.h"
 #include "runtime.h"
 
 #include <limits.h>
@@ -2161,6 +2163,31 @@ int SlipDraw3D_RefreshMode1Projection(uint32_t mode, uint32_t scale, uint32_t mi
 	return 1;
 }
 
+int32_t SlipDraw3D_HorizontalProjectionScale(const SlipDraw3DProjectState *state) {
+	return state->squarePixels ? state->projectionScale * 5 / 6 : state->projectionScale;
+}
+
+int SlipDraw3D_RefreshProjectFrustum(const SlipDraw3DProjectState *state, uint32_t mode,
+                                     SlipDraw3DRefreshMode0Projection *result) {
+	if (!SlipDraw3D_RefreshMode0Projection(mode, state->projectionScale, state->minX, state->maxX, state->minY,
+	                                       state->maxY, state->centerX, state->centerY, result))
+		return 0;
+	if (state->squarePixels) {
+		SlipDraw3DRefreshMode0Projection horizontal;
+		if (!SlipDraw3D_RefreshMode0Projection(mode, SlipDraw3D_HorizontalProjectionScale(state), state->minX,
+		                                       state->maxX, state->minY, state->maxY, state->centerX, state->centerY,
+		                                       &horizontal))
+			return 0;
+		result->maxXStep = horizontal.maxXStep;
+		result->minXStep = horizontal.minXStep;
+		result->minXPlaneDepthQ = horizontal.minXPlaneDepthQ;
+		result->minXPlaneNegXQ = horizontal.minXPlaneNegXQ;
+		result->maxXPlaneNegDepthQ = horizontal.maxXPlaneNegDepthQ;
+		result->maxXPlaneXQ = horizontal.maxXPlaneXQ;
+	}
+	return 1;
+}
+
 static void SlipDraw3D_RefreshPerspectiveScale(SlipDraw3DProjectState *state) {
 	uint32_t projectionScale = (uint32_t)(((uint64_t)state->perspectiveScale * state->projectionScaleFactor) >> 16);
 
@@ -2175,16 +2202,16 @@ static void SlipDraw3D_RefreshPerspectiveScale(SlipDraw3DProjectState *state) {
 
 static void SlipDraw3D_RefreshProjectionState(SlipDraw3DProjectState *state) {
 	if (state->projectionMode == 0) {
-		if (state->projectionScale == 0x100) {
+		const int32_t horizontalScale = SlipDraw3D_HorizontalProjectionScale(state);
+		if (state->projectionScale == 0x100 && !state->squarePixels) {
 			state->projectPrimary = SlipDraw3D_ProjectPerspective32Callback;
 			state->projectSecondary = SlipDraw3D_ProjectPerspective16Callback;
 		} else {
 			state->projectPrimary = SlipDraw3D_ProjectCheckedPerspectiveCallback;
 			state->projectSecondary = SlipDraw3D_ProjectCheckedPerspectiveCallback;
 		}
-		state->rightSlope =
-		    (int32_t)(((uint32_t)state->maxX + 1u - (uint32_t)state->centerX) << 16) / state->projectionScale;
-		state->leftSlope = (int32_t)(((uint32_t)state->minX - (uint32_t)state->centerX) << 16) / state->projectionScale;
+		state->rightSlope = (int32_t)(((uint32_t)state->maxX + 1u - (uint32_t)state->centerX) << 16) / horizontalScale;
+		state->leftSlope = (int32_t)(((uint32_t)state->minX - (uint32_t)state->centerX) << 16) / horizontalScale;
 		state->bottomSlope =
 		    (int32_t)(0u - (uint32_t)((int32_t)(((uint32_t)state->maxY + 1u - (uint32_t)state->centerY) << 16) /
 		                              state->projectionScale));
@@ -2192,12 +2219,12 @@ static void SlipDraw3D_RefreshProjectionState(SlipDraw3DProjectState *state) {
 		    (int32_t)(0u - (uint32_t)((int32_t)(((uint32_t)state->minY - (uint32_t)state->centerY) << 16) /
 		                              state->projectionScale));
 		SlipDraw3DNormalizeVector2D normal;
-		SlipDraw3D_NormalizeVector2D((uint32_t)state->minX - (uint32_t)state->centerX, (uint32_t)state->projectionScale,
+		SlipDraw3D_NormalizeVector2D((uint32_t)state->minX - (uint32_t)state->centerX, (uint32_t)horizontalScale,
 		                             &normal);
 		state->leftNormalX = normal.unitYQ14;
 		state->leftNormalZ = (int16_t)(uint16_t)(0u - (uint16_t)normal.unitXQ14);
-		SlipDraw3D_NormalizeVector2D((uint32_t)state->maxX + 1u - (uint32_t)state->centerX,
-		                             (uint32_t)state->projectionScale, &normal);
+		SlipDraw3D_NormalizeVector2D((uint32_t)state->maxX + 1u - (uint32_t)state->centerX, (uint32_t)horizontalScale,
+		                             &normal);
 		state->rightNormalX = (int16_t)(uint16_t)(0u - (uint16_t)normal.unitYQ14);
 		state->rightNormalZ = normal.unitXQ14;
 		SlipDraw3D_NormalizeVector2D((uint32_t)state->maxY + 1u - (uint32_t)state->centerY,
@@ -2428,7 +2455,10 @@ void SlipDraw3D_DrawPoint(SlipDraw3DVec32 point, uint16_t color, const SlipDraw3
 	state->projectPrimary(point, &x, &y, (void *)state);
 	if (x < state->minX || x > state->maxX || y < state->minY || y > state->maxY)
 		return;
-	Raster_PutPixelClipped((uint8_t)SlipDraw3D_pointColor, (int16_t)y, (int16_t)x);
+	if (SlipRaceGpu_Active())
+		Raster_DrawLineClipped((uint8_t)SlipDraw3D_pointColor, (int16_t)x, (int16_t)y, (int16_t)x, (int16_t)y);
+	else
+		Raster_PutPixelClipped((uint8_t)SlipDraw3D_pointColor, (int16_t)y, (int16_t)x);
 }
 
 int SlipDraw3D_ProjectVisiblePoint(SlipDraw3DVec32 point, const SlipDraw3DProjectState *state, int32_t *screenX,
@@ -2455,7 +2485,7 @@ int SlipDraw3D_ProjectScreen(SlipDraw3DVec32 world, const SlipDraw3DProjectState
 		return 0;
 	}
 
-	projectedX = ((int64_t)world.x * state->projectionScale) / world.z;
+	projectedX = ((int64_t)world.x * SlipDraw3D_HorizontalProjectionScale(state)) / world.z;
 	projectedY = ((int64_t)world.y * state->projectionScale) / world.z;
 	if (projectedX < INT32_MIN || projectedX > INT32_MAX || projectedY < INT32_MIN || projectedY > INT32_MAX) {
 		return 0;
@@ -6794,6 +6824,9 @@ int SlipDraw3D_InterpolateDepthAndExtra32(uint8_t *recordBase, size_t recordByte
 int SlipDraw3D_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint32_t targetOffset, uint32_t otherOffset,
                                   uint32_t projectionMode, int32_t clipPlaneX, int32_t limitYMin, int32_t limitYMax,
                                   SlipDraw3DSplitScreenX *result) {
+	if (SlipRaceGpu_Active())
+		return SlipRaceGpu_SplitScreenXRecord(recordBase, recordBytes, targetOffset, otherOffset, projectionMode,
+		                                      clipPlaneX, limitYMin, limitYMax, result);
 	SlipDraw3DDrawRecord *target;
 	const SlipDraw3DDrawRecord *other;
 	uint32_t targetFlags;
@@ -6912,6 +6945,9 @@ int SlipDraw3D_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint3
 
 int SlipDraw3D_SplitScreenYRecord(uint8_t *recordBase, size_t recordBytes, uint32_t targetOffset, uint32_t otherOffset,
                                   uint32_t projectionMode, int32_t clipPlaneY, SlipDraw3DSplitScreenY *result) {
+	if (SlipRaceGpu_Active())
+		return SlipRaceGpu_SplitScreenYRecord(recordBase, recordBytes, targetOffset, otherOffset, projectionMode,
+		                                      clipPlaneY, result);
 	SlipDraw3DDrawRecord *target;
 	const SlipDraw3DDrawRecord *other;
 	uint32_t targetFlags;
@@ -7321,7 +7357,12 @@ int SlipDraw3D_ScreenPlaneExecute(uint8_t *recordBase, size_t recordBytes, uint3
 	result->freeHeadOffset = freeHeadOffset;
 	dispatch = &result->dispatch;
 	dispatch->returned = true;
-	dispatch->hasScreenClipFlags = (anyFlagsEntry & SLIP_CLIP_SCREEN) != 0;
+	/* Keep the original ring for GPU triangulation. Clipping a quad first changes
+	 * its diagonal as the camera moves, changing the texture mapping. Portal
+	 * bounds still require a viewport-clipped ring in the DOS visibility path. */
+	dispatch->hasScreenClipFlags =
+	    !(SlipRaceGpu_Active() && !hasPostPlanes && (projectionMode & SLIP_INTERPOLATE_TEXTURE)) &&
+	    (anyFlagsEntry & SLIP_CLIP_SCREEN) != 0;
 	if (dispatch->hasScreenClipFlags) {
 		anyClipFlags = anyFlagsEntry;
 		dispatch->anyFlagsInitial = anyClipFlags;

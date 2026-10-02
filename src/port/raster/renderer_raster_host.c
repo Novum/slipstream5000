@@ -1,3 +1,4 @@
+#include "raster/raster.h"
 #include "renderer_host.h"
 
 enum { RASTER_POINT_CAPACITY = 32 };

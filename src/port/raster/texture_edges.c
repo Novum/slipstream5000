@@ -1,4 +1,4 @@
-#include "raster_texture_edges.h"
+#include "texture_edges.h"
 
 enum { EDGE_FRACTION_BITS = 16, EDGE_HALF_PIXEL = 1u << (EDGE_FRACTION_BITS - 1) };
 

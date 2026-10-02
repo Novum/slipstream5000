@@ -11,6 +11,7 @@
 #include "menu_music.h"
 #include "menu_resources.h"
 #include "port_app_bridge.h"
+#include "race_display.h"
 #include "race_player.h"
 #include "resource_host.h"
 #include "runtime.h"
@@ -181,6 +182,8 @@ static uint32_t SlipConfigHost_HitTest(void *context, SlipConfigMenuTable table,
 	                                                 &button,
 	                                                 &button};
 	static const uint16_t counts[9] = {7, 4, 7, 8, 6, 7, 10, 1, 1};
+	if (table == SLIP_CONFIG_GENERAL_TABLE && point.x >= 25 && point.x <= 281 && point.y >= 43 && point.y <= 59)
+		return 8;
 	return SlipInput_HitTest(rectangles[table], counts[table], point.x, point.y);
 }
 
@@ -430,6 +433,15 @@ static void SlipConfigHost_DrawDifficulty(void *context, SlipConfigMenuState *st
 static void SlipConfigHost_DrawGeneral(void *context, SlipConfigMenuState *state) {
 	(void)context;
 	SlipConfigMenu_DrawGeneral(state, &drawCalls);
+	const SlipConfigMenuRectangle rectangle = {25, 43, 281, 59};
+	SlipMenu_DrawPanel(rectangle, state->generalSelection == 8 ? state->background : state->inactiveBackground,
+	                   state->generalStrings, 0, &drawCalls);
+	SlipText_SetStyle(&SlipText_state, 0, UINT16_MAX, 25, 200);
+	SlipTextPosition label = {31, 46};
+	SlipText_Draw(&SlipText_state, "High Res", NULL, &label);
+	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 204, 281);
+	SlipTextPosition value = {0, 47};
+	SlipText_Draw(&SlipText_state, SlipRaceDisplay_highRes ? "On" : "Off", NULL, &value);
 }
 
 static void SlipConfigHost_DrawDetail(void *context, SlipConfigMenuState *state) {
@@ -606,6 +618,7 @@ const SlipConfigMenuCalls SlipConfigHost_calls = {
     .toggleDamage = SlipConfigHost_ChangeDamage,
     .save = SlipConfigHost_Save,
     .drawGeneral = SlipConfigHost_DrawGeneral,
+    .toggleHighRes = SlipRaceDisplay_Toggle,
     .drawDetail = SlipConfigHost_DrawDetail,
     .drawSound = SlipConfigHost_DrawSound,
     .generalOptions = {SlipConfigHost_ChangeRear, SlipConfigHost_ChangeWeapons, SlipConfigHost_LanguageOption,

@@ -1,4 +1,6 @@
 #include "software_cursor_pixels.h"
+#include "raster/overlay.h"
+#include "raster/raster.h"
 #include <string.h>
 
 static const uint8_t defaultCursorPixels[] = {16, 0, 0, 0,  16, 0,  16, 0,  16, 0, 0, 0, 0,
@@ -47,6 +49,7 @@ void SlipCursor_Draw(SlipCursorPixels *state, const SlipSoftwareCursor *cursor, 
 	if (sprite->transparentColor == 0xffff) {
 		do {
 			memcpy(destination, source, state->drawWidth);
+			RasterOverlay_MarkWritten(destination, state->drawWidth);
 			destination += 320;
 			source += sprite->width;
 		} while (--remainingRows != 0);
@@ -58,8 +61,10 @@ void SlipCursor_Draw(SlipCursorPixels *state, const SlipSoftwareCursor *cursor, 
 			uint32_t remainingColumns = state->drawWidth;
 			do {
 				const uint8_t color = *pixel++;
-				if (color != transparent)
+				if (color != transparent) {
 					*output = color;
+					RasterOverlay_MarkWritten(output, 1);
+				}
 				++output;
 			} while (--remainingColumns != 0);
 			destination += 320;

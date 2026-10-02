@@ -1,6 +1,7 @@
 #ifndef SLIPSTREAM5000_RASTER_H
 #define SLIPSTREAM5000_RASTER_H
 
+#include "sprite.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -1230,5 +1231,8 @@ int Raster_DrawMaskedLongTexturedSpanSegment3(const RasterTexturedMaskedLongSpan
                                               RasterTexturedMaskedLongSpanSegment3 *result);
 
 void Raster_Clear(uint8_t color, size_t byteCount);
+
+void Raster_DrawTexturedPolygon(uint16_t texture, RasterTexturedPoint *points, uint32_t count, bool perspective,
+                                bool opaque);
 
 #endif

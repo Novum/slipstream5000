@@ -1,6 +1,7 @@
 #include "font.h"
 #include "byte_order.h"
-#include "raster.h"
+#include "raster/overlay.h"
+#include "raster/raster.h"
 #include "runtime.h"
 
 #include <stddef.h>
@@ -145,8 +146,10 @@ void SlipFont_DrawString(const SlipFont *font, const char *text, int16_t *x, int
 			uint32_t columns = font->glyphWidth;
 			do {
 				const uint8_t pixel = *glyph++;
-				if (pixel != 0)
+				if (pixel != 0) {
 					*destination = pixel;
+					RasterOverlay_MarkWritten(destination, 1);
+				}
 				++destination;
 			} while (--columns != 0);
 			destination += g_screenPitch - font->glyphWidth;
@@ -178,8 +181,10 @@ void SlipFont_DrawStringColor(const SlipFont *font, const char *text, int16_t *x
 			uint32_t columns = font->glyphWidth;
 			do {
 				const uint8_t pixel = *glyph++;
-				if (pixel != 0)
+				if (pixel != 0) {
 					*destination = (uint8_t)color;
+					RasterOverlay_MarkWritten(destination, 1);
+				}
 				++destination;
 			} while (--columns != 0);
 			destination += g_screenPitch - font->glyphWidth;
@@ -210,8 +215,10 @@ uint16_t SlipFont_DrawCharacter(const SlipFont *font, uint8_t character, int16_t
 		uint32_t columns = font->glyphWidth;
 		do {
 			const uint8_t pixel = *glyph++;
-			if (pixel != 0)
+			if (pixel != 0) {
 				*destination = pixel;
+				RasterOverlay_MarkWritten(destination, 1);
+			}
 			++destination;
 		} while (--columns != 0);
 		destination += g_screenPitch - font->glyphWidth;
@@ -241,8 +248,10 @@ uint16_t SlipFont_DrawCharacterColor(const SlipFont *font, uint8_t character, in
 		uint32_t columns = font->glyphWidth;
 		do {
 			const uint8_t pixel = *glyph++;
-			if (pixel != 0)
+			if (pixel != 0) {
 				*destination = (uint8_t)color;
+				RasterOverlay_MarkWritten(destination, 1);
+			}
 			++destination;
 		} while (--columns != 0);
 		destination += g_screenPitch - font->glyphWidth;

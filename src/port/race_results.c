@@ -1,7 +1,7 @@
 #include "race_results.h"
 #include "game_errors.h"
 #include "race_hud.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "resource_host.h"
 #include "runtime.h"
 #include "text_layout.h"

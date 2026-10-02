@@ -2,7 +2,7 @@
 #define SLIPSTREAM5000_PORT_APP_BRIDGE_H
 
 #include "font.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "sprite.h"
 #include "view3d.h"
 

@@ -8,6 +8,8 @@ extern bool SlipDebug_fixedClock;
 extern uint64_t SlipDebug_clockMilliseconds;
 extern uint64_t SlipDebug_biosClockOrigin;
 
+#ifdef SLIP_DEBUG
 int SlipDebug_RunDumpCommand(int argc, char **argv);
+#endif
 
 #endif

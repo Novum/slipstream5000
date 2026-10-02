@@ -1,4 +1,5 @@
 #include "raster.h"
+#include "software.h"
 #include "byte_order.h"
 
 #include <stdlib.h>
@@ -547,7 +548,7 @@ void Raster_PutPixelClipped(uint8_t color, int16_t y, int16_t x) {
 	}
 }
 
-void Raster_DrawLineSolid(uint8_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+void RasterSoftware_DrawLineSolid(uint8_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
 	uint16_t startX = (uint16_t)x0;
 	uint16_t endX = (uint16_t)x1;
 	uint16_t startY = (uint16_t)y0;
@@ -641,9 +642,9 @@ void Raster_DrawLineSolid(uint8_t color, int16_t x0, int16_t y0, int16_t x1, int
 	} while (--count != 0u);
 }
 
-void Raster_DrawLineClipped(uint8_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+void RasterSoftware_DrawLineClipped(uint8_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
 	if (Raster_ClipLineToViewport(&x0, &y0, &x1, &y1)) {
-		Raster_DrawLineSolid(color, x0, y0, x1, y1);
+		RasterSoftware_DrawLineSolid(color, x0, y0, x1, y1);
 	}
 }
 
@@ -655,7 +656,7 @@ void Raster_FillSolidSpan(uint8_t color, int16_t y, int16_t x0, int16_t x1) {
 	memset(g_screenRowPtrs[y] + x0, color, (size_t)(x1 - x0 + 1));
 }
 
-void Raster_FillRectClipped(uint8_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+void RasterSoftware_FillRectClipped(uint8_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
 	int16_t y;
 
 	if (x1 < x0) {
@@ -683,15 +684,15 @@ void Raster_FillRectClipped(uint8_t color, int16_t x0, int16_t y0, int16_t x1, i
 	}
 }
 
-void Raster_FillRectUnchecked(uint16_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
+void RasterSoftware_FillRectUnchecked(uint16_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
 	int16_t y;
 
 	if ((color & 0x8000u) != 0) {
 		color &= 0x7fffu;
-		Raster_DrawLineSolid((uint8_t)color, x1, y0, x1, y1);
-		Raster_DrawLineSolid((uint8_t)color, x0, y1, x1, y1);
-		Raster_DrawLineSolid((uint8_t)color, x0, y0, x0, y1);
-		Raster_DrawLineSolid((uint8_t)color, x0, y0, x1, y0);
+		RasterSoftware_DrawLineSolid((uint8_t)color, x1, y0, x1, y1);
+		RasterSoftware_DrawLineSolid((uint8_t)color, x0, y1, x1, y1);
+		RasterSoftware_DrawLineSolid((uint8_t)color, x0, y0, x0, y1);
+		RasterSoftware_DrawLineSolid((uint8_t)color, x0, y0, x1, y0);
 		return;
 	}
 
@@ -704,7 +705,7 @@ static uint32_t scaledSpriteHorizontalStep, scaledSpriteVerticalStep;
 static uint32_t scaledSpriteSourceWidth;
 static uint16_t scaledSpriteColumns, scaledSpriteTransparent;
 
-void Raster_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, const uint8_t *pixels, size_t pixelBytes,
+void RasterSoftware_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, const uint8_t *pixels, size_t pixelBytes,
                              int16_t left, int16_t top, int16_t right, int16_t bottom) {
 	(void)recordBytes;
 	(void)pixelBytes;
@@ -801,7 +802,7 @@ void Raster_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, const ui
 	}
 }
 
-void Raster_DrawSolidFlatPolygon(uint8_t color, const RasterPoint *points, uint16_t pointCount) {
+void RasterSoftware_DrawSolidFlatPolygon(uint8_t color, const RasterPoint *points, uint16_t pointCount) {
 	int i;
 	int topY;
 	int bottomY;
@@ -881,7 +882,7 @@ void Raster_DrawSolidFlatPolygon(uint8_t color, const RasterPoint *points, uint1
 	                     (int16_t)Raster_FixedXInt(right.xAccumulator));
 }
 
-void Raster_DrawShadedFlatPolygon(const RasterShadedPoint *points, uint16_t pointCount) {
+void RasterSoftware_DrawShadedFlatPolygon(const RasterShadedPoint *points, uint16_t pointCount) {
 	int i;
 	int topY;
 	int bottomY;
@@ -963,7 +964,7 @@ void Raster_DrawShadedFlatPolygon(const RasterShadedPoint *points, uint16_t poin
 	                      (int16_t)Raster_FixedXInt(left.xAccumulator), (int16_t)Raster_FixedXInt(right.xAccumulator));
 }
 
-void Raster_DrawDitheredFlatPolygon(uint8_t color, uint8_t ditherBits, const RasterPoint *points, uint16_t pointCount) {
+void RasterSoftware_DrawDitheredFlatPolygon(uint8_t color, uint8_t ditherBits, const RasterPoint *points, uint16_t pointCount) {
 	int i;
 	int topY;
 	int bottomY;
@@ -5327,3 +5328,15 @@ int Raster_DrawOpaquePerspectiveTexturedPolygon(const RasterOpaquePerspectiveTex
 }
 
 void Raster_Clear(uint8_t color, size_t byteCount) { memset(g_screenBufferBase, color, byteCount); }
+
+const RasterDrawBackend RasterSoftware_backend = {
+    .drawLineSolid = RasterSoftware_DrawLineSolid,
+    .drawLineClipped = RasterSoftware_DrawLineClipped,
+    .fillRectClipped = RasterSoftware_FillRectClipped,
+    .fillRectUnchecked = RasterSoftware_FillRectUnchecked,
+    .drawSolidFlatPolygon = RasterSoftware_DrawSolidFlatPolygon,
+    .drawShadedFlatPolygon = RasterSoftware_DrawShadedFlatPolygon,
+    .drawDitheredFlatPolygon = RasterSoftware_DrawDitheredFlatPolygon,
+    .drawSpriteScaled = RasterSoftware_DrawSpriteScaled,
+    .drawTexturedPolygon = RasterSoftware_DrawTexturedPolygon,
+};

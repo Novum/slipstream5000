@@ -1,4 +1,4 @@
-#include "raster.h"
+#include "raster/raster.h"
 #include "text_layout.h"
 #include "vehicle_select.h"
 

@@ -3,7 +3,7 @@
 #include "byte_order.h"
 #include "frame_timer.h"
 #include "race_collision.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "resource_host.h"
 #include "resource_storage.h"
 #include "runtime.h"

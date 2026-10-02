@@ -1,10 +1,10 @@
 #include "race_map.h"
+#include "gpu/map.h"
+#include "gpu/renderer.h"
+#include "race_display.h"
+#include "raster/raster.h"
 #include "renderer_host.h"
 #include "renderer_projection.h"
-
-#include "raster.h"
-
-#include <string.h>
 
 typedef struct SlipRaceMapProjection {
 	SlipView3DMatrix matrix;
@@ -27,6 +27,8 @@ static SlipDraw3DVec32 SlipRaceMap_Transform(const SlipRaceMapProjection *projec
 	transformed.z = (int32_t)(0u - (uint32_t)deltaY);
 	return transformed;
 }
+
+void SlipRaceMap_Reset(void) { SlipRaceGpu_ResetMap(); }
 
 static void SlipRaceMap_DrawObject(const SlipRaceMapProjection *projection, const SlipObject *objectTable,
                                    size_t objectTableBytes, uint16_t objectOffset, uint8_t color) {
@@ -57,10 +59,17 @@ static void SlipRaceMap_DrawObject(const SlipRaceMapProjection *projection, cons
 	Raster_DrawLineClipped(0, x, (int16_t)(y + 1), x, (int16_t)(y + 3));
 	Raster_DrawLineClipped(0, (int16_t)(x + 4), (int16_t)(y + 1), (int16_t)(x + 4), (int16_t)(y + 3));
 	Raster_FillRectClipped(color, (int16_t)(x + 1), (int16_t)(y + 1), (int16_t)(x + 3), (int16_t)(y + 3));
-	Raster_PutPixelClipped(0, (int16_t)(y + 1), (int16_t)(x + 1));
-	Raster_PutPixelClipped(0, (int16_t)(y + 3), (int16_t)(x + 1));
-	Raster_PutPixelClipped(0, (int16_t)(y + 1), (int16_t)(x + 3));
-	Raster_PutPixelClipped(0, (int16_t)(y + 3), (int16_t)(x + 3));
+	if (SlipRaceGpu_Active()) {
+		Raster_FillRectClipped(0, x + 1, y + 1, x + 1, y + 1);
+		Raster_FillRectClipped(0, x + 1, y + 3, x + 1, y + 3);
+		Raster_FillRectClipped(0, x + 3, y + 1, x + 3, y + 1);
+		Raster_FillRectClipped(0, x + 3, y + 3, x + 3, y + 3);
+	} else {
+		Raster_PutPixelClipped(0, (int16_t)(y + 1), (int16_t)(x + 1));
+		Raster_PutPixelClipped(0, (int16_t)(y + 3), (int16_t)(x + 1));
+		Raster_PutPixelClipped(0, (int16_t)(y + 1), (int16_t)(x + 3));
+		Raster_PutPixelClipped(0, (int16_t)(y + 3), (int16_t)(x + 3));
+	}
 }
 
 void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finishColor, uint16_t objectColor,
@@ -135,6 +144,8 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 	SlipDraw3D_SetCameraDistance(projectState, (uint32_t)cameraDistance);
 	projection.projectState = projectState;
 
+	const bool nativeMap = SlipRaceDisplay_BeginMap();
+
 	if (trkData != NULL && trkBytes >= 6u &&
 	    (uint16_t)((uint16_t)trkData[4] | (uint16_t)((uint16_t)trkData[5] << 8)) != 0 && trdData != NULL &&
 	    trdBytes >= 10u) {
@@ -144,7 +155,10 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 			                                       (uint16_t)((uint16_t)trdData[(size_t)routeOffset + 1u] << 8));
 			size_t recordOffset = (size_t)routeOffset + 2u;
 
-			for (uint16_t index = 0; index < routeCount && recordOffset + 0x32u <= trdBytes;
+			if (nativeMap)
+				SlipRaceGpu_DrawMapRoute(&projection.matrix, &projection.camera, projection.projectState, trdData,
+				                         trdBytes, recordOffset, routeCount, routeColor);
+			for (uint16_t index = 0; !nativeMap && index < routeCount && recordOffset + 0x32u <= trdBytes;
 			     ++index, recordOffset += 0x32u) {
 				SlipView3DVec32 position;
 				SlipDraw3DVec32 transformedPosition;
@@ -244,11 +258,16 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 					                     ((uint32_t)trdData[(size_t)finishOffset + 0x15u] << 8) |
 					                     ((uint32_t)trdData[(size_t)finishOffset + 0x16u] << 16) |
 					                     ((uint32_t)trdData[(size_t)finishOffset + 0x17u] << 24));
-					transformedFinish = SlipRaceMap_Transform(&projection, finish);
-					if (SlipDraw3D_ProjectVisiblePoint(transformedFinish, projection.projectState, &projectedX,
-					                                   &projectedY)) {
-						Raster_FillRectClipped(finishColor, (int16_t)(projectedX - 1), (int16_t)(projectedY - 1),
-						                       (int16_t)(projectedX + 1), (int16_t)(projectedY + 1));
+					if (nativeMap) {
+						SlipRaceGpu_DrawMapFinish(&projection.matrix, &projection.camera, projection.projectState,
+						                          finish, finishColor);
+					} else {
+						transformedFinish = SlipRaceMap_Transform(&projection, finish);
+						if (SlipDraw3D_ProjectVisiblePoint(transformedFinish, projection.projectState, &projectedX,
+						                                   &projectedY)) {
+							Raster_FillRectClipped(finishColor, (int16_t)(projectedX - 1), (int16_t)(projectedY - 1),
+							                       (int16_t)(projectedX + 1), (int16_t)(projectedY + 1));
+						}
 					}
 				}
 			}
@@ -279,6 +298,9 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 		SlipRaceMap_DrawObject(&projection, objectTable, objectTableBytes, rivalObject, (uint8_t)rivalColor);
 	}
 	SlipRaceMap_DrawObject(&projection, objectTable, objectTableBytes, playerObject, (uint8_t)playerColor);
+
+	if (nativeMap)
+		SlipRaceDisplay_EndMap();
 
 	SlipDraw3D_SetProjectionMode(projectState, 0);
 	SlipDraw3D_SetViewport(projectState, (int16_t)savedViewport.clipMinX, (uint16_t)savedViewport.clipMinY,

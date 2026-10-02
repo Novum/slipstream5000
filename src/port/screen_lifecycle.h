@@ -1,6 +1,6 @@
 #ifndef SLIP_SCREEN_LIFECYCLE_H
 #define SLIP_SCREEN_LIFECYCLE_H
-#include "raster.h"
+#include "raster/raster.h"
 #include "runtime.h"
 #include "software_cursor.h"
 

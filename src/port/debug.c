@@ -1,5 +1,7 @@
 #include "debug.h"
 #include "byte_order.h"
+#include "gpu/renderer.h"
+#include "race_display.h"
 #ifdef SLIP_REPLAY_HARNESS
 #include "../testing/ui_capture.h"
 #endif
@@ -33,7 +35,7 @@
 #include "race_results.h"
 #include "race_session.h"
 #include "race_voice.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "runtime.h"
 #include "sound_effects.h"
 #include "string_table.h"
@@ -52,14 +54,6 @@ static SlipRaceFrameResult SlipDebug_RunRaceFixtureFrame(uint32_t tick, const Sl
 	SlipRace_controlBindings[1] = bindings[1];
 	SlipRace_reverseAccelerator = reverseAccelerator ? 1 : 0;
 	return SlipRaceSession_RunFrame(tick, held, pressed, windowSize, mouseX, mouseY);
-}
-
-bool SlipDebug_fixedClock;
-uint64_t SlipDebug_clockMilliseconds;
-uint64_t SlipDebug_biosClockOrigin;
-
-uint8_t SlipDebug_BiosTickLow(void) {
-	return (uint8_t)(((SlipSdl_TicksMs() - SlipDebug_biosClockOrigin) * UINT64_C(1193182)) / UINT64_C(65536000));
 }
 
 typedef struct SlipDebugRecordingClock {
@@ -1651,9 +1645,90 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 			return 3;
 	}
 	return SlipRaceSession_lastRenderSucceeded && SlipRaceSession_lastRawBspCallbacks != 0u &&
-	               SlipRaceSession_lastRasterizedPrimitives != 0u && nonzeroPixelCount != 0u
+	               SlipRaceSession_lastRasterizedPrimitives != 0u && (nonzeroPixelCount != 0u || SlipRaceDisplay_ready)
 	           ? 0
 	           : 2;
+}
+
+static int SlipDebug_gpuWidth = 1280, SlipDebug_gpuHeight = 720;
+
+static bool SlipDebug_GpuSize(int *width, int *height) {
+	*width = SlipDebug_gpuWidth;
+	*height = SlipDebug_gpuHeight;
+	return true;
+}
+
+static int SlipDebug_VerifyRaceGpu(int argc, char **argv) {
+	if ((argc != 4 && argc != 5) || strcmp(argv[1], "--verify-race-gpu") != 0)
+		return -1;
+	if (!SDL_Init(SDL_INIT_VIDEO))
+		return 4;
+	const char *size = getenv("SLIP_GPU_VERIFY_SIZE");
+	if (size && (sscanf(size, "%dx%d", &SlipDebug_gpuWidth, &SlipDebug_gpuHeight) != 2 || SlipDebug_gpuWidth < 2 ||
+	             SlipDebug_gpuHeight < 2 || SlipDebug_gpuWidth > 8192 || SlipDebug_gpuHeight > 8192))
+		return 4;
+	SDL_Window *window =
+	    SDL_CreateWindow("Race GPU verification", SlipDebug_gpuWidth, SlipDebug_gpuHeight, SDL_WINDOW_HIDDEN);
+	SDL_Renderer *renderer = window ? SDL_CreateRenderer(window, "gpu") : NULL;
+	if (!renderer || !SlipRaceGpu_Initialize(renderer)) {
+		fprintf(stderr, "Race GPU initialization: %s\n", SDL_GetError());
+		return 4;
+	}
+	SlipRaceDisplay_Configure(SlipDebug_GpuSize, NULL);
+	SlipRaceDisplay_highRes = true;
+	char *fixture[] = {argv[0], argc == 5 ? argv[4] : "--verify-race-render", argv[2]};
+	int result = SlipDebug_VerifyRaceRender(3, fixture);
+	if (result == 0 && strcmp(fixture[1], "--verify-race-cameras") == 0) {
+		SlipRaceControlBinding bindings[2] = {{0}};
+		bool held[256] = {false}, pressed[256] = {false};
+		SlipConfig_rearMonitor = 1;
+		SlipConfig_weaponsMonitor = 0;
+		if (SlipDebug_RunRaceFixtureFrame(4000, bindings, held, pressed, false, 0, -1, -1) !=
+		        SLIP_RACE_FRAME_CONTINUE ||
+		    !SlipRaceSession_lastRenderSucceeded)
+			result = 4;
+	}
+	if (result == 0 && strcmp(fixture[1], "--verify-race-fly-in") == 0) {
+		SlipRaceControlBinding bindings[2] = {{0}};
+		bool held[256] = {false}, pressed[256] = {false};
+		SlipRaceDisplay_Toggle(NULL);
+		if (SlipDebug_RunRaceFixtureFrame(2600, bindings, held, pressed, false, 0, -1, -1) !=
+		        SLIP_RACE_FRAME_CONTINUE ||
+		    SlipRaceDisplay_ready)
+			result = 4;
+		SlipRaceDisplay_Toggle(NULL);
+		if (SlipDebug_RunRaceFixtureFrame(2614, bindings, held, pressed, false, 0, -1, -1) !=
+		        SLIP_RACE_FRAME_CONTINUE ||
+		    !SlipRaceDisplay_ready)
+			result = 4;
+		pressed[SLIP_INPUT_SCAN_ESCAPE] = true;
+		if (SlipDebug_RunRaceFixtureFrame(2628, bindings, held, pressed, false, 0, -1, -1) !=
+		        SLIP_RACE_FRAME_CONTINUE ||
+		    !SlipRaceSession_IsPaused())
+			result = 4;
+		if (SlipDebug_RunRaceFixtureFrame(2642, bindings, held, pressed, false, 0, -1, -1) !=
+		        SLIP_RACE_FRAME_CONTINUE ||
+		    !SlipRaceSession_IsPaused())
+			result = 4;
+		printf("GPU live toggle and Escape pause result=%d\n", result);
+	}
+	if (!SlipRaceDisplay_ready || !SlipRaceGpu_Present())
+		result = 4;
+	else {
+		SlipRaceDisplay_DrawOverlay();
+		SDL_Surface *capture = SDL_RenderReadPixels(renderer, NULL);
+		if (!capture || !SDL_SaveBMP(capture, argv[3]))
+			result = 4;
+		SDL_DestroySurface(capture);
+		SDL_RenderPresent(renderer);
+	}
+	SlipRaceDisplay_EndFrame();
+	SlipRaceGpu_Shutdown();
+	SDL_DestroyRenderer(renderer);
+	SDL_DestroyWindow(window);
+	SDL_Quit();
+	printf("race_gpu result=%d capture=%s\n", result, argv[3]);
+	return result;
 }
 
 static int SlipDebug_VerifySpeedHud(int argc, char **argv) {
@@ -5025,6 +5100,9 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		}
 		return 0;
 	}
+	const int gpuResult = SlipDebug_VerifyRaceGpu(argc, argv);
+	if (gpuResult >= 0)
+		return gpuResult;
 	const int cameraResult = SlipDebug_VerifyCameraKeys(argc, argv);
 	if (cameraResult >= 0)
 		return cameraResult;

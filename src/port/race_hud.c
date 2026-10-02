@@ -1,8 +1,8 @@
 #include "race_hud.h"
+#include "raster/raster.h"
 
 #include "byte_order.h"
 #include "menu_resources.h"
-#include "raster.h"
 #include "resource_host.h"
 #include "sprite_resource_host.h"
 #include "text_layout.h"

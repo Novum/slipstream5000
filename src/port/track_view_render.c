@@ -1,9 +1,11 @@
 #include "track_view_render.h"
 #include "byte_order.h"
 #include "config_settings.h"
+#include "gpu/renderer.h"
 #include "material_frames.h"
 #include "material_host.h"
 #include "menu_resources.h"
+#include "raster/raster.h"
 #include "renderer_allocation.h"
 #include "renderer_bounds.h"
 #include "renderer_flags.h"
@@ -20,8 +22,8 @@
 #include "game_errors.h"
 #include "port_app_bridge.h"
 #include "race.h"
+#include "race_display.h"
 #include "race_player.h"
-#include "raster.h"
 #include "refuel_beams.h"
 #include "renderer_culling.h"
 #include "resource.h"
@@ -1052,11 +1054,7 @@ static bool TrackView_StoreClipBounds(TrackViewRawBspContext *context, uint32_t 
 	if (context->mode != 0u) {
 		return true;
 	}
-	if (!SlipDraw3D_RefreshMode0Projection(context->mode, (uint32_t)context->projectState->projectionScale,
-	                                       (uint32_t)context->projectState->minX, (uint32_t)context->projectState->maxX,
-	                                       (uint32_t)context->projectState->minY, (uint32_t)context->projectState->maxY,
-	                                       (uint32_t)context->projectState->centerX,
-	                                       (uint32_t)context->projectState->centerY, &refresh)) {
+	if (!SlipDraw3D_RefreshProjectFrustum(context->projectState, context->mode, &refresh)) {
 		return false;
 	}
 	context->frustum = (SlipTrackWorldProjectFrustum){refresh.maxXStep,
@@ -3466,6 +3464,69 @@ static SlipDraw3DVec32 TrackView_TransformVertex(uint32_t sourceX, uint32_t sour
 	return (SlipDraw3DVec32){transformed.x, transformed.y, transformed.z};
 }
 
+static bool TrackView_DrawGpuWorldTexture(TrackViewRawBspContext *context,
+                                          const TrackViewPrimitiveCallbackContext *primitiveContext,
+                                          const uint8_t *primitiveRecord, size_t recordBytesRemaining,
+                                          uint16_t countAndFlags, uint32_t rowScroll, uint32_t textureHandle,
+                                          bool *rejected) {
+	SlipDraw3DPolygonStatusVisit statusVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+	/* Use immutable model vertices/UVs, not the DOS clipped draw ring. */
+	uint32_t count = countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
+	uint32_t uvOffset = (countAndFlags & SLIP_PRIMITIVE_VERTEX_NORMALS) ? count * 8 : count * 2;
+	SlipRaceGpuWorldPoint points[128];
+	SlipDraw3DPolygonStatus status;
+	*rejected = false;
+	if (count > 128 || recordBytesRemaining < 12u + uvOffset + count * 4u ||
+	    !SlipDraw3D_PolygonStatus(context->vertexRecords, context->vertexRecordCount, primitiveRecord + 12,
+	                              recordBytesRemaining - 12, countAndFlags, context->projectState,
+	                              TrackView_TransformVertex, TrackView_PrimitiveProjectMask, (void *)primitiveContext,
+	                              statusVisits, sizeof(statusVisits) / sizeof(statusVisits[0]), &status))
+		return false;
+	if (status.clipClassification == -1) {
+		*rejected = true;
+		return true;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		uint16_t index = SlipBytes_ReadLE16(primitiveRecord + 12 + i * 2);
+		if (index >= context->vertexRecordCount)
+			return false;
+		SlipDraw3DVertexRecord *r = &context->vertexRecords[index];
+		SlipDraw3D_ProjectVertex(r, context->projectState, TrackView_TransformVertex, TrackView_ProjectScreenPrimary,
+		                         TrackView_ProjectScreenSecondary, (void *)primitiveContext);
+		points[i] = (SlipRaceGpuWorldPoint){.source = {r->sourceX, r->sourceY, r->sourceZ},
+		                                    .view = r->world,
+		                                    .u = SlipBytes_ReadLE16(primitiveRecord + 12 + uvOffset + i * 4),
+		                                    .v = SlipBytes_ReadLE16(primitiveRecord + 12 + uvOffset + i * 4 + 2)};
+	}
+	SlipResourcePayload texture = {0};
+	if (!TrackView_LockResourceHandlePayload(context->resourceRegistry, textureHandle, &texture))
+		return false;
+	SlipRaceGpu_WorldTexture(texture.data, texture.size, rowScroll, points, count, context->projectState);
+	TrackView_UnlockResourceHandlePayload(context->resourceRegistry, textureHandle);
+	return true;
+}
+
+static bool TrackView_CompleteTexturedCallback(TrackViewRawBspContext *context, uint32_t savedRenderFlags,
+                                               bool rejected, bool *handled, uint32_t *callbackResult, bool *carryOut) {
+	context->rendererFlags = savedRenderFlags;
+	*handled = true;
+	*callbackResult = savedRenderFlags & 0xffffu;
+	*carryOut = rejected;
+	return true;
+}
+
+static void TrackView_DrawGpuTexturedDispatch(const SlipResourcePayload *texture, uint32_t rowScroll,
+                                              const SlipDraw3DTexturedDispatch *dispatch,
+                                              const SlipDraw3DTexturedDispatchPoint *points) {
+	RasterTexturedPoint gpuPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+	for (size_t i = 0; i < dispatch->pointCount; ++i) {
+		const SlipDraw3DTexturedDispatchPoint *p = &points[i];
+		gpuPoints[i] = (RasterTexturedPoint){
+		    .x = p->screenX, .y = p->screenY, .u = p->textureU, .v = p->textureV, .depth = p->depth};
+	}
+	SlipRaceGpu_Texture(texture->data, texture->size, rowScroll, gpuPoints, (uint32_t)dispatch->pointCount);
+}
+
 static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *context,
                                                   const TrackViewPrimitiveCallbackContext *primitiveContext,
                                                   const uint8_t *primitiveRecord, size_t recordBytesRemaining,
@@ -3598,6 +3659,15 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 			return false;
 		}
 		TrackViewPostPlaneArgs postPlaneArgs = TrackView_PostPlaneArgs(context);
+		if (SlipRaceGpu_Active() && !primitiveContext->shapePath && !postPlaneArgs.hasPostPlanes &&
+		    !(context->projectState->renderFlags & SLIP_SHAPE_CLIP_AUXILIARY)) {
+			bool rejected;
+			if (!TrackView_DrawGpuWorldTexture(context, primitiveContext, primitiveRecord, recordBytesRemaining,
+			                                   countAndFlags, rowScroll, texturedEmitGate.textureHandle, &rejected))
+				return false;
+			return TrackView_CompleteTexturedCallback(context, savedRenderFlags, rejected, handled, callbackResult,
+			                                          carryOut);
+		}
 		if (!SlipDraw3D_BuildTexturedRingExecute(
 		        context->drawRecordPool, context->vertexRecords, context->vertexRecordCount, primitiveRecord + 0x0cu,
 		        recordBytesRemaining - 0x0cu, countAndFlags, texturedEmitGate.textureHandle, context->projectState,
@@ -3803,6 +3873,14 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 				return false;
 			}
 			++context->directCallbackHighTextureLoadCount;
+			if (SlipRaceGpu_Active()) {
+				TrackView_DrawGpuTexturedDispatch(&texturePayload, rowScroll, &texturedDispatch,
+				                                  texturedDispatchPoints);
+				TrackView_UnlockResourceHandlePayload(context->resourceRegistry, texturedDispatch.textureHandle);
+				return TrackView_CompleteTexturedCallback(context, savedRenderFlags, texturedRing.carryOut, handled,
+				                                          callbackResult, carryOut);
+			}
+
 			if (texturePayload.size < 4u) {
 				context->failureAddress = 0x0001ae47u;
 				context->failed = true;
@@ -4147,13 +4225,9 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 				free(textureRows);
 			}
 		}
-		context->rendererFlags = savedRenderFlags;
-		*handled = true;
-		*callbackResult = savedRenderFlags & 0xffffu;
-
-		*carryOut = texturedRing.carryOut;
+		return TrackView_CompleteTexturedCallback(context, savedRenderFlags, texturedRing.carryOut, handled,
+		                                          callbackResult, carryOut);
 	}
-	return true;
 }
 
 static SlipDraw3DVec32 TrackView_MaterialMidpoint(uint32_t sourceX, uint32_t sourceY, uint32_t sourceZ,
@@ -8747,6 +8821,23 @@ static void TrackView_UnlockResourceHandlePayload(const TrackViewResourceHandleR
 		SlipResourceHost_Unlock(NULL, (uint16_t)handle);
 }
 
+static void TrackView_ProjectCloudCorner(int16_t side, int16_t offset, int32_t originX, int32_t originY, int16_t *outX,
+                                         int16_t *outY) {
+	if (!SlipRaceDisplay_ready || !SlipRaceGpu_Active()) {
+		SlipDraw3D_ProjectSpriteCorner(side, offset, (uint16_t)originX, (uint16_t)originY, outX, outY);
+		return;
+	}
+	int16_t x, y;
+	SlipDraw3D_ProjectSpriteCorner(side, offset, 0, 0, &x, &y);
+	const int32_t scaledX = originX + (int32_t)((int64_t)SlipRaceDisplay_ScaleWorldOffset(x) * 5 / 6);
+	const int32_t scaledY = originY + SlipRaceDisplay_ScaleWorldOffset(y);
+	/* The sprite clipper takes signed words; saturate offscreen corners instead
+	 * of wrapping a very large sky
+	 * sprite back into the viewport. */
+	*outX = (int16_t)(scaledX < INT16_MIN ? INT16_MIN : scaledX > INT16_MAX ? INT16_MAX : scaledX);
+	*outY = (int16_t)(scaledY < INT16_MIN ? INT16_MIN : scaledY > INT16_MAX ? INT16_MAX : scaledY);
+}
+
 static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const SlipResourcePayload *sprite,
                                       uint16_t spriteHandle, SlipView3DVec32 view, int16_t *screenX, int16_t *screenY,
                                       bool resourceOwned) {
@@ -8764,18 +8855,15 @@ static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const Sli
 	const int16_t negativeHeight = (int16_t)(0u - SlipBytes_ReadLE16(dimensionBytes + 2));
 	if (resourceOwned)
 		SlipResourceHost_Unlock(NULL, spriteHandle);
-	SlipDraw3D_ProjectSpriteCorner((int16_t)-halfWidth, negativeHeight, (uint16_t)projectedX, (uint16_t)projectedY,
-	                               &corners[0].x, &corners[0].y);
-	SlipDraw3D_ProjectSpriteCorner(halfWidth, negativeHeight, (uint16_t)projectedX, (uint16_t)projectedY, &corners[1].x,
-	                               &corners[1].y);
+	TrackView_ProjectCloudCorner((int16_t)-halfWidth, negativeHeight, projectedX, projectedY, &corners[0].x,
+	                             &corners[0].y);
+	TrackView_ProjectCloudCorner(halfWidth, negativeHeight, projectedX, projectedY, &corners[1].x, &corners[1].y);
 
 	bool axisAligned = corners[1].y == corners[0].y && corners[1].x > corners[0].x;
-	SlipDraw3D_ProjectSpriteCorner(halfWidth, 0, (uint16_t)projectedX, (uint16_t)projectedY, &corners[2].x,
-	                               &corners[2].y);
+	TrackView_ProjectCloudCorner(halfWidth, 0, projectedX, projectedY, &corners[2].x, &corners[2].y);
 	if (corners[2].x != corners[1].x)
 		axisAligned = false;
-	SlipDraw3D_ProjectSpriteCorner((int16_t)-halfWidth, 0, (uint16_t)projectedX, (uint16_t)projectedY, &corners[3].x,
-	                               &corners[3].y);
+	TrackView_ProjectCloudCorner((int16_t)-halfWidth, 0, projectedX, projectedY, &corners[3].x, &corners[3].y);
 
 	if (corners[3].y != corners[2].y || corners[3].x != corners[0].x || corners[3].y < corners[0].y)
 		axisAligned = false;
@@ -8846,7 +8934,8 @@ static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const Sli
 				rasterPoints[i].y = dispatchPoints[i].screenY;
 				rasterPoints[i].u = dispatchPoints[i].textureU;
 				rasterPoints[i].v = dispatchPoints[i].textureV;
-				rasterPoints[i].depth = dispatchPoints[i].depth;
+				/* Screen-space cloud corners have no world depth in the recycled records. */
+				rasterPoints[i].depth = SlipRaceGpu_Active() ? 1 : dispatchPoints[i].depth;
 			}
 			SlipResourcePayload rasterPayload;
 			if (resourceOwned) {
@@ -8854,11 +8943,17 @@ static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const Sli
 				rasterPayload = SlipResourceHost_Payload(spriteHandle);
 				sprite = &rasterPayload;
 			}
-			RasterAffineScanlineLoopVisit *const visits = calloc(512, sizeof(*visits));
-			size_t pixels;
-			ok = visits != NULL &&
-			     Raster_DrawAffineTexturedPolygon(sprite->data, sprite->size, rasterPoints,
-			                                      (uint32_t)dispatch.pointCount, 0, visits, 512, &pixels);
+			RasterAffineScanlineLoopVisit *visits = NULL;
+			if (SlipRaceGpu_Active()) {
+				SlipRaceGpu_Texture(sprite->data, sprite->size, 0, (const RasterTexturedPoint *)rasterPoints,
+				                    (uint32_t)dispatch.pointCount);
+			} else {
+				visits = calloc(512, sizeof(*visits));
+				size_t pixels;
+				ok = visits != NULL &&
+				     Raster_DrawAffineTexturedPolygon(sprite->data, sprite->size, rasterPoints,
+				                                      (uint32_t)dispatch.pointCount, 0, visits, 512, &pixels);
+			}
 			if (resourceOwned)
 				SlipResourceHost_Unlock(NULL, spriteHandle);
 			free(visits);
@@ -8955,11 +9050,17 @@ bool TrackView_DrawSprite(TrackViewRawBspContext *context, SlipView3DVec32 view,
 					rasterPoints[i].v = dispatchPoints[i].textureV;
 					rasterPoints[i].depth = dispatchPoints[i].depth;
 				}
-				RasterAffineScanlineLoopVisit *const visits = calloc(512, sizeof(*visits));
-				size_t pixels;
-				drawn = visits != NULL &&
-				        Raster_DrawAffineTexturedPolygon(sprite.data, sprite.size, rasterPoints,
-				                                         (uint32_t)dispatch.pointCount, 0, visits, 512, &pixels);
+				RasterAffineScanlineLoopVisit *visits = NULL;
+				if (SlipRaceGpu_Active()) {
+					SlipRaceGpu_Texture(sprite.data, sprite.size, 0, rasterPoints, (uint32_t)dispatch.pointCount);
+					drawn = true;
+				} else {
+					visits = calloc(512, sizeof(*visits));
+					size_t pixels;
+					drawn = visits != NULL &&
+					        Raster_DrawAffineTexturedPolygon(sprite.data, sprite.size, rasterPoints,
+					                                         (uint32_t)dispatch.pointCount, 0, visits, 512, &pixels);
+				}
 				TrackView_UnlockResourceHandlePayload(context->resourceRegistry, (uint16_t)polygon.textureHandle);
 				free(visits);
 			}
@@ -9986,11 +10087,7 @@ static uint32_t TrackView_VehicleViewProjectMask(SlipDraw3DVec32 point, void *us
 	SlipTrackWorldProjectFrustum frustum;
 	uint32_t mask = 0;
 
-	if (ctx == NULL ||
-	    !SlipDraw3D_RefreshMode0Projection(
-	        0, (uint32_t)ctx->projectState.projectionScale, (uint32_t)ctx->projectState.minX,
-	        (uint32_t)ctx->projectState.maxX, (uint32_t)ctx->projectState.minY, (uint32_t)ctx->projectState.maxY,
-	        (uint32_t)ctx->projectState.centerX, (uint32_t)ctx->projectState.centerY, &refresh)) {
+	if (ctx == NULL || !SlipDraw3D_RefreshProjectFrustum(&ctx->projectState, 0, &refresh)) {
 		return 0;
 	}
 	frustum = (SlipTrackWorldProjectFrustum){
@@ -12065,10 +12162,7 @@ bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DM
 	cameraPosition.z = actorPosition.z + cameraOffset.z;
 
 	SlipDraw3D_SetViewport(&projectState, 31, 14, 287, 183, 159, 98 + g_vehicleViewParams[driver].centerYOffset);
-	if (!SlipDraw3D_RefreshMode0Projection(0, (uint32_t)projectState.projectionScale, (uint32_t)projectState.minX,
-	                                       (uint32_t)projectState.maxX, (uint32_t)projectState.minY,
-	                                       (uint32_t)projectState.maxY, (uint32_t)projectState.centerX,
-	                                       (uint32_t)projectState.centerY, &refresh) ||
+	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh) ||
 	    !SlipDraw3D_InitRecordPool(&drawRecordPool, &drawRecordPoolInit)) {
 		if (materialTable != NULL) {
 			TrackView_VehicleViewMaterialsFreeTextures(&materials);
@@ -12428,10 +12522,7 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
 	}
 	SlipDraw3D_SetViewport(&projectState, 0, 0, 319, 199, 0x5b, 0x6d);
 	projectState.renderFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	if (!SlipDraw3D_RefreshMode0Projection(0, (uint32_t)projectState.projectionScale, (uint32_t)projectState.minX,
-	                                       (uint32_t)projectState.maxX, (uint32_t)projectState.minY,
-	                                       (uint32_t)projectState.maxY, (uint32_t)projectState.centerX,
-	                                       (uint32_t)projectState.centerY, &refresh)) {
+	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh)) {
 		if (globeResource == 0)
 			free(materialTable);
 		return false;
@@ -12799,10 +12890,7 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	projectState.maxZ = 0x7fffffff;
 	SlipDraw3D_SetViewport(&projectState, 0, 0, 319, 199, 0x104, 0x28);
 	projectState.renderFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	if (!SlipDraw3D_RefreshMode0Projection(0, (uint32_t)projectState.projectionScale, (uint32_t)projectState.minX,
-	                                       (uint32_t)projectState.maxX, (uint32_t)projectState.minY,
-	                                       (uint32_t)projectState.maxY, (uint32_t)projectState.centerX,
-	                                       (uint32_t)projectState.centerY, &refresh)) {
+	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh)) {
 		SlipRuntime_Fatal("Invalid host startup projection view");
 	}
 	drawStateRecords = SlipResourceStorage_DrawStateRecords(

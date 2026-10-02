@@ -6,8 +6,10 @@
 #include "guided_projectile_creation.h"
 #include "material_host.h"
 #include "menu_resources.h"
+#include "race_display.h"
 #include "race_voice.h"
 #include "race_voice_host.h"
+#include "raster/raster.h"
 #include "renderer_allocation.h"
 #include "renderer_host.h"
 #include "renderer_lifecycle.h"
@@ -1085,6 +1087,7 @@ static void SlipRaceSession_ShutdownTrackDraw(void) {
 
 static void SlipRaceSession_ShutdownWorld(void) {
 
+	SlipRaceMap_Reset();
 	SlipTrackAssets_FreeBundle(&SlipRaceSession_trackBundle, TrackView_ReleaseResource,
 	                           &SlipRaceSession_resourceRegistry);
 	SlipRaceSession_ShutdownTrackDraw();
@@ -2065,6 +2068,7 @@ static uint32_t SlipRaceSession_HitTestPauseMenu(int mouseX, int mouseY) {
 }
 
 static SlipRacePauseAction SlipRaceSession_UpdatePauseMenu(bool inputPressed[256], int mouseX, int mouseY) {
+	const bool wasRunning = SlipRaceSession_pauseState == SLIP_RACE_PAUSE_RUNNING;
 	if ((SlipRace_controls.actions & SLIP_ACTION_PAUSE) != 0) {
 		if (SlipRaceSession_pauseState != SLIP_RACE_PAUSE_REMOTE) {
 			if (SlipRaceSession_pauseState == SLIP_RACE_PAUSE_RUNNING) {
@@ -2122,6 +2126,16 @@ static SlipRacePauseAction SlipRaceSession_UpdatePauseMenu(bool inputPressed[256
 		}
 	}
 	SlipRaceSession_TickCameraTimers();
+	if (wasRunning && SlipRaceSession_pauseState == SLIP_RACE_PAUSE_LOCAL) {
+		/* A press left over from entering the race must not activate a pause option. */
+		inputPressed[SLIP_INPUT_SCAN_ENTER] = false;
+		inputPressed[SLIP_INPUT_MOUSE_LEFT] = false;
+		SlipRaceSession_pauseNavigation.currentItem = 0;
+		SlipRaceSession_menuMouseX = (int32_t)SlipRaceSession_pauseNavigation.centers[0][0] << 16;
+		SlipRaceSession_menuMouseY = (int32_t)SlipRaceSession_pauseNavigation.centers[0][1] << 16;
+		SlipRaceSession_pauseSelection = 1;
+		return SLIP_RACE_PAUSE_ACTION_NONE;
+	}
 	if (SlipRaceSession_pauseState != SLIP_RACE_PAUSE_LOCAL) {
 		return SLIP_RACE_PAUSE_ACTION_NONE;
 	}
@@ -2222,6 +2236,7 @@ static bool SlipRaceSession_LoadWorld(uint16_t axTrack, const char *const *archi
 	SlipRaceSession_currentTrackRecordAddress = 0;
 	SlipRaceSession_primitiveFlagsReady = 0;
 	SlipRaceSession_underSeaColor = 0;
+	SlipRaceMap_Reset();
 	SlipTrackAssets_FreeBundle(&SlipRaceSession_trackBundle, TrackView_ReleaseResource,
 	                           &SlipRaceSession_resourceRegistry);
 	if (!SlipTrackAssets_LoadBundle(SlipRace_trackNames[axTrack - 1u], &SlipRaceSession_trackBundle,
@@ -2598,6 +2613,7 @@ void SlipRaceSession_Begin(const char *resPath, uint16_t axTrack, SlipRaceRacerT
 	SlipRaceSession_currentTrackRecordAddress = 0;
 	SlipRaceSession_primitiveFlagsReady = 0;
 	SlipRaceSession_underSeaColor = 0;
+	SlipRaceMap_Reset();
 	SlipTrackAssets_FreeBundle(&SlipRaceSession_trackBundle, TrackView_ReleaseResource,
 	                           &SlipRaceSession_resourceRegistry);
 	if (!SlipTrackAssets_LoadBundle(SlipRace_trackNames[axTrack - 1u], &SlipRaceSession_trackBundle,
@@ -3423,8 +3439,21 @@ static bool SlipRaceSession_RenderFrame(void) {
 	uint16_t overlayEnable = 0;
 	if (SlipRaceSession_frameBoundsEnabled != 0)
 		overlayEnable = SLIP_RACE_FRAME_BOUNDS_COLOR;
+	SlipRaceDisplayView savedView;
+	const bool native = SlipRaceDisplay_BeginWorld(&SlipRendererHost_state.projection, &savedView, SlipRace_gameMode);
 	bool rendered = SlipRaceSession_DrawTrackFrame(overlayEnable);
+	if (native)
+		SlipRaceDisplay_EndWorld(&savedView);
 	SlipRaceSession_PostRender();
+	return rendered;
+}
+
+static bool SlipRaceSession_DrawMonitorScene(SlipDraw3DProjectState *project) {
+	SlipRaceDisplayView savedView;
+	const bool native = SlipRaceDisplay_BeginMonitor(project, &savedView);
+	const bool rendered = SlipRaceSession_DrawTrackFrame(0);
+	if (native)
+		SlipRaceDisplay_EndMonitor(&savedView);
 	return rendered;
 }
 
@@ -3460,7 +3489,7 @@ static bool SlipRaceSession_WeaponMonitor(int minX, int minY, int maxX, int maxY
 	    &SlipRendererHost_state,
 	    (SlipView3DVec32){(int32_t)position.positionX, (int32_t)position.positionY, (int32_t)position.positionZ},
 	    &matrix);
-	(void)SlipRaceSession_DrawTrackFrame(0);
+	(void)SlipRaceSession_DrawMonitorScene(project);
 	SlipText_SelectResourceFont(&SlipText_state, SlipRaceSession_hudAssets.timeFont, &SlipRaceHud_fontResources);
 	SlipText_SetStyle(&SlipText_state, SLIP_RACE_MONITOR_TEXT_CENTERED, UINT16_MAX, (int16_t)project->minX,
 	                  (int16_t)project->maxX);
@@ -3496,7 +3525,7 @@ static bool SlipRaceSession_RearMonitor(uint16_t car, int minX, int minY, int ma
 	    &SlipRendererHost_state,
 	    (SlipView3DVec32){(int32_t)position.positionX, (int32_t)position.positionY, (int32_t)position.positionZ},
 	    &matrix);
-	rendered = SlipRaceSession_DrawTrackFrame(0);
+	rendered = SlipRaceSession_DrawMonitorScene(project);
 	SlipText_SelectResourceFont(&SlipText_state, SlipRaceSession_hudAssets.timeFont, &SlipRaceHud_fontResources);
 	SlipText_SetStyle(&SlipText_state, SLIP_RACE_MONITOR_TEXT_CENTERED, UINT16_MAX, (int16_t)project->minX,
 	                  (int16_t)project->maxX);
@@ -3553,6 +3582,7 @@ bool SlipRaceSession_DebugRenderCapturedState(const uint32_t cameraPosition[3], 
 	                              &matrixInstall)) {
 		return false;
 	}
+	SlipRaceDisplay_BeginFrame(g_framebuffer);
 	return SlipRaceSession_RenderFrame();
 }
 
@@ -3711,6 +3741,12 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 
 	SlipRace_PreCameraInput(inputHeld, inputPressed, &SlipRace_controls);
 
+	SlipRaceDisplay_BeginFrame(g_framebuffer);
+	if (SlipRaceDisplay_highRes) {
+		SlipRaceSession_hudState.playerOneConsoleRedrawFrames = 2;
+		if (SlipRace_gameMode == 1)
+			SlipRaceSession_hudState.playerTwoConsoleRedrawFrames = 2;
+	}
 	SlipRaceSession_DrawView(1u, windowSize, inputHeld);
 	if (SlipRace_gameMode == 1)
 		SlipRaceSession_DrawView(2u, windowSize, inputHeld);
@@ -3786,7 +3822,8 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 			                                     SlipRaceSession_hudState.playerOneLowerConsoleY);
 		}
 
-		if (SlipRaceSession_hudState.playerTwoConsoleRedrawFrames != 0) {
+		if ((!SlipRaceDisplay_ready || SlipRace_gameMode == 1) &&
+		    SlipRaceSession_hudState.playerTwoConsoleRedrawFrames != 0) {
 			(void)SlipRaceCamera_MainViewport(2u, SlipRace_gameMode, windowSize, SlipRaceSession_cameraState.shake[0],
 			                                  SlipRaceSession_cameraState.shake[1], &SlipRendererHost_state.projection);
 			SlipRaceHud_DrawLowerConsole(&SlipRaceSession_hudState, &SlipRaceSession_hudAssets, g_framebuffer,
@@ -3797,7 +3834,9 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 				                                     SlipRaceSession_hudState.playerTwoLowerConsoleY);
 		}
 	}
-	SlipRaceHud_DrawBorders(&SlipRaceSession_hudState, SlipRace_gameMode, windowSize, SlipRaceSession_hudAssets.flags);
+	if (!SlipRaceDisplay_ready)
+		SlipRaceHud_DrawBorders(&SlipRaceSession_hudState, SlipRace_gameMode, windowSize,
+		                        SlipRaceSession_hudAssets.flags);
 
 	SlipRaceSession_DrawPauseMenu();
 
@@ -4273,6 +4312,12 @@ void SlipRaceSession_PlayIntro(const char *resPath, uint16_t axTrack, uint16_t s
 		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
 		if (!SlipMenu_PollInput())
 			break;
+		SlipRaceDisplay_BeginFrame(g_framebuffer);
+		if (SlipRaceDisplay_highRes) {
+			SlipRaceSession_hudState.playerOneConsoleRedrawFrames = 2;
+			if (SlipRace_gameMode == 1)
+				SlipRaceSession_hudState.playerTwoConsoleRedrawFrames = 2;
+		}
 		SlipRaceSession_DrawView(1u, windowSize, inputHeld);
 
 		if (SlipConfig_TrackMapEnabled() != 0 && SlipRacePlayer_track > 0 && SlipRacePlayer_track < 11u) {
@@ -4297,8 +4342,9 @@ void SlipRaceSession_PlayIntro(const char *resPath, uint16_t axTrack, uint16_t s
 			SlipRaceSession_DrawCaption(caption);
 			SlipStringTable_Unlock(strings, &introStringResources);
 		}
-		SlipRaceHud_DrawBorders(&SlipRaceSession_hudState, SlipRace_gameMode, windowSize,
-		                        SlipRaceSession_hudAssets.flags);
+		if (!SlipRaceDisplay_ready)
+			SlipRaceHud_DrawBorders(&SlipRaceSession_hudState, SlipRace_gameMode, windowSize,
+			                        SlipRaceSession_hudAssets.flags);
 		SlipMenu_PresentFrame();
 		SlipRaceCamera_PollKeys(&SlipRaceSession_cameraState, SlipRace_gameMode, inputPressed,
 		                        SlipRaceSession_ActivateCamera, NULL);

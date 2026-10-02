@@ -1,6 +1,6 @@
 #ifndef SLIPSTREAM5000_VEHICLE_SELECTOR_HOST_H
 #define SLIPSTREAM5000_VEHICLE_SELECTOR_HOST_H
-#include "raster.h"
+#include "raster/raster.h"
 #include "vehicle_selector.h"
 
 /* Host views needed by the original surface/font callees. The caller supplies

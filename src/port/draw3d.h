@@ -13,7 +13,7 @@ extern uint32_t SlipDraw3D_materialCallbackCount;
 void SlipDraw3D_BindPointBuffer(uint8_t *points);
 uint8_t *SlipDraw3D_PointBuffer(void);
 
-#include "raster.h"
+#include "raster/raster.h"
 #include "view3d.h"
 
 extern uint32_t SlipDraw3D_minimumDepth;
@@ -164,6 +164,7 @@ typedef struct SlipDraw3DProjectState {
 	int32_t centerX;
 	int32_t centerY;
 	int32_t projectionScale;
+	bool squarePixels;
 	uint32_t projectionMode;
 	uint32_t perspectiveScale;
 	uint32_t projectionScaleFactor;
@@ -188,6 +189,8 @@ typedef struct SlipDraw3DProjectState {
 	int16_t leftNormalX, leftNormalZ, rightNormalX, rightNormalZ;
 	int16_t bottomNormalY, bottomNormalZ, topNormalY, topNormalZ;
 } SlipDraw3DProjectState;
+
+int32_t SlipDraw3D_HorizontalProjectionScale(const SlipDraw3DProjectState *state);
 
 bool SlipDraw3D_SphereOutsidePerspective(SlipDraw3DVec32, int32_t radius, const SlipDraw3DProjectState *);
 bool SlipDraw3D_SphereOutsideOrthographic(SlipDraw3DVec32, int32_t radius, const SlipDraw3DProjectState *);
@@ -361,6 +364,9 @@ typedef struct SlipDraw3DRefreshMode0Projection {
 	int16_t minYPlaneNegYQ;
 	bool returned;
 } SlipDraw3DRefreshMode0Projection;
+
+int SlipDraw3D_RefreshProjectFrustum(const SlipDraw3DProjectState *state, uint32_t mode,
+                                     SlipDraw3DRefreshMode0Projection *result);
 
 typedef struct SlipDraw3DBuildResult {
 	uint32_t allClipFlags;

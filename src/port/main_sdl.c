@@ -6,6 +6,7 @@
 #include "debug.h"
 #include "frame_timer.h"
 #include "game_data.h"
+#include "gpu/renderer.h"
 #include "hmi_digital.h"
 #include "hmi_mixer_1000.h"
 #include "hmi_sdl_output.h"
@@ -14,8 +15,9 @@
 #include "menu.h"
 #include "menu_music.h"
 #include "port_app_bridge.h"
+#include "race_display.h"
 #include "race_session.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "saved_games.h"
 #include "sound_effects.h"
 #include "startup_intro.h"
@@ -34,6 +36,10 @@ uint32_t g_presentPixels[SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT];
 bool g_presentPixelsReady;
 static const SlipStartupIntroHost *SlipSdl_startupIntroHost;
 
+bool SlipDebug_fixedClock;
+uint64_t SlipDebug_clockMilliseconds;
+uint64_t SlipDebug_biosClockOrigin;
+
 static bool SlipSdl_Init(void) {
 	if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD))
 		return false;
@@ -42,6 +48,10 @@ static bool SlipSdl_Init(void) {
 }
 
 uint64_t SlipSdl_TicksMs(void) { return SlipDebug_fixedClock ? SlipDebug_clockMilliseconds : (uint64_t)SDL_GetTicks(); }
+
+uint8_t SlipDebug_BiosTickLow(void) {
+	return (uint8_t)(((SlipSdl_TicksMs() - SlipDebug_biosClockOrigin) * UINT64_C(1193182)) / UINT64_C(65536000));
+}
 
 void SlipSdl_DelayMs(uint32_t ms) { SDL_Delay(ms); }
 
@@ -59,12 +69,13 @@ static void SlipSdl_LoadDisplaySettings(void) {
 	SDL_free(path);
 	if (file == NULL)
 		return;
-	int fullscreen, width, height;
-	if (fscanf(file, "%d %d %d", &fullscreen, &width, &height) == 3 && (fullscreen == 0 || fullscreen == 1) &&
-	    width > 0 && height > 0) {
+	int fullscreen, width, height, highRes = 0;
+	if (fscanf(file, "%d %d %d %d", &fullscreen, &width, &height, &highRes) >= 3 &&
+	    (fullscreen == 0 || fullscreen == 1) && width > 0 && height > 0) {
 		displaySettings.fullscreen = fullscreen != 0;
 		displaySettings.width = width;
 		displaySettings.height = height;
+		SlipRaceDisplay_highRes = highRes == 1;
 	}
 	fclose(file);
 }
@@ -78,7 +89,8 @@ static void SlipSdl_SaveDisplaySettings(void) {
 	SDL_free(path);
 	if (file == NULL)
 		return;
-	fprintf(file, "%d %d %d\n", displaySettings.fullscreen, displaySettings.width, displaySettings.height);
+	fprintf(file, "%d %d %d %d\n", displaySettings.fullscreen, displaySettings.width, displaySettings.height,
+	        SlipRaceDisplay_highRes);
 	fclose(file);
 }
 
@@ -116,6 +128,11 @@ bool SlipSdl_PollEvent(SDL_Event *event) {
 		if (event->type == SDL_EVENT_WINDOW_FOCUS_GAINED || event->type == SDL_EVENT_WINDOW_FOCUS_LOST)
 			SlipMenu_UpdateSystemCursor();
 		if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
+			if (event->key.key == SDLK_F12) {
+				if (event->type == SDL_EVENT_KEY_DOWN && !event->key.repeat)
+					SlipRaceDisplay_Toggle(NULL);
+				continue;
+			}
 			if (event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER) {
 				const unsigned index = event->key.key == SDLK_KP_ENTER;
 				if (fullscreenEnterHeld[index]) {
@@ -237,6 +254,26 @@ static void SlipSdl_UpscaleBandlimited(void) {
 	}
 }
 
+static SDL_Renderer *raceRenderer;
+
+static bool SlipSdl_RaceOutputSize(int *width, int *height) {
+	return raceRenderer != NULL && SDL_GetRenderOutputSize(raceRenderer, width, height);
+}
+
+static bool SlipSdl_PresentRace(SDL_Renderer *renderer) {
+	if (!SlipRaceDisplay_ready)
+		return false;
+	SDL_SetRenderLogicalPresentation(renderer, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+	SDL_RenderClear(renderer);
+	if (!SlipRaceGpu_Present())
+		return false;
+	SlipRaceDisplay_DrawOverlay();
+	SDL_RenderPresent(renderer);
+	/* Input still uses the centered 4:3 HUD/menu coordinate space. */
+	SDL_SetRenderLogicalPresentation(renderer, SLIP_OUT_WIDTH, SLIP_OUT_HEIGHT, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+	return true;
+}
+
 typedef struct SlipSdlPresentContext {
 	SDL_Texture *texture;
 	SDL_Renderer *renderer;
@@ -279,6 +316,12 @@ static void SlipSdl_PresentFrame(void *context) {
 		}
 	}
 	g_presentPixelsReady = false;
+	if (SlipSdl_PresentRace(renderer)) {
+		SlipRaceDisplay_EndFrame();
+		return;
+	}
+	SlipRaceDisplay_EndFrame();
+	SDL_SetRenderLogicalPresentation(renderer, SLIP_OUT_WIDTH, SLIP_OUT_HEIGHT, SDL_LOGICAL_PRESENTATION_LETTERBOX);
 
 	SlipSdl_UpscaleBandlimited();
 	SDL_UpdateTexture(texture, NULL, g_outPixels, SLIP_OUT_WIDTH * (int)sizeof(uint32_t));
@@ -420,7 +463,6 @@ static int SlipSdl_Run(int argc, char **argv) {
 	const char *resPath;
 	bool running = true;
 	int rendererVSync = SDL_RENDERER_VSYNC_DISABLED;
-	int dumpResult;
 	SlipSdlPresentContext presentContext;
 	SlipSdlStartupIntroContext introContext = {0};
 	SlipStartupIntroHost introHost;
@@ -431,10 +473,12 @@ static int SlipSdl_Run(int argc, char **argv) {
 	uint8_t digitalDmaBuffer[0x400];
 
 	SlipFrameTimer_InitializeHostRate(0x46u);
-	dumpResult = SlipDebug_RunDumpCommand(argc, argv);
+#ifdef SLIP_DEBUG
+	const int dumpResult = SlipDebug_RunDumpCommand(argc, argv);
 	if (dumpResult >= 0) {
 		return dumpResult;
 	}
+#endif
 #ifdef SLIP_REPLAY_HARNESS
 	SlipUiCapture_Configure();
 #endif
@@ -468,6 +512,7 @@ static int SlipSdl_Run(int argc, char **argv) {
 	rendererProperties = SDL_CreateProperties();
 	if (rendererProperties != 0 &&
 	    SDL_SetPointerProperty(rendererProperties, SDL_PROP_RENDERER_CREATE_WINDOW_POINTER, window) &&
+	    SDL_SetStringProperty(rendererProperties, SDL_PROP_RENDERER_CREATE_NAME_STRING, "gpu") &&
 	    SDL_SetNumberProperty(rendererProperties, SDL_PROP_RENDERER_CREATE_PRESENT_VSYNC_NUMBER, 1)) {
 		renderer = SDL_CreateRendererWithProperties(rendererProperties);
 	}
@@ -485,6 +530,9 @@ static int SlipSdl_Run(int argc, char **argv) {
 		return 1;
 	}
 
+	if (!SlipRaceGpu_Initialize(renderer))
+		fprintf(stderr, "High Res GPU unavailable: %s\n", SDL_GetError());
+
 	if ((!SDL_GetRenderVSync(renderer, &rendererVSync) || rendererVSync != 1) && !SDL_SetRenderVSync(renderer, 1)) {
 		fprintf(stderr, "SDL_SetRenderVSync failed: %s\n", SDL_GetError());
 	}
@@ -492,6 +540,8 @@ static int SlipSdl_Run(int argc, char **argv) {
 		fprintf(stderr, "SDL renderer=%s vsync=%d\n", SDL_GetRendererName(renderer), rendererVSync);
 	}
 	SDL_SetRenderLogicalPresentation(renderer, SLIP_OUT_WIDTH, SLIP_OUT_HEIGHT, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+	raceRenderer = renderer;
+	SlipRaceDisplay_Configure(SlipSdl_RaceOutputSize, SlipSdl_SaveDisplaySettings);
 	texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, SLIP_OUT_WIDTH,
 	                            SLIP_OUT_HEIGHT);
 	if (texture != NULL) {
@@ -591,6 +641,8 @@ static int SlipSdl_Run(int argc, char **argv) {
 		}
 	}
 
+	SlipRaceGpu_Shutdown();
+	SlipRaceDisplay_EndFrame();
 	HmiSdlOutput_Close(&soundOutput);
 	SlipMenuMusic_Close();
 	SlipRaceSession_BindSoundHost(NULL, 0u, NULL, NULL, NULL);

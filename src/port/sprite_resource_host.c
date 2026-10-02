@@ -1,6 +1,6 @@
 #include "sprite_resource_host.h"
 #include "game_errors.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "resource_host.h"
 
 static void SlipSpriteResourceHost_AllocationError(void *context) {

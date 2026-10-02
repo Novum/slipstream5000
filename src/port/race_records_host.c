@@ -4,7 +4,7 @@
 #include "game_errors.h"
 #include "material_host.h"
 #include "race_hud.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "renderer_host.h"
 #include "renderer_projection.h"
 #include "renderer_state.h"

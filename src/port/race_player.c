@@ -10,7 +10,7 @@
 #include "race_effects.h"
 #include "race_session.h"
 #include "race_voice_host.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "runtime.h"
 #include "track_view_render.h"
 

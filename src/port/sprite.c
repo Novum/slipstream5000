@@ -1,7 +1,8 @@
 #include "sprite.h"
 #include "byte_order.h"
+#include "raster/overlay.h"
 
-#include "raster.h"
+#include "raster/raster.h"
 #include "vga_dac.h"
 
 #include <stddef.h>
@@ -57,6 +58,7 @@ void SlipSprite_Draw(const SlipSprite *sprite, uint8_t *dst, int dstPitch, int x
 			const uint8_t pixel = src[(size_t)row * sprite->width + col];
 			if ((int)pixel != sprite->transparentColor) {
 				out[col] = pixel;
+				RasterOverlay_MarkWritten(out + col, 1);
 			}
 		}
 	}
@@ -112,8 +114,10 @@ void SlipSprite_DrawDissolve(const SlipSprite *sprite, uint8_t *dst, int dstPitc
 			random = (uint16_t)(incremented >> 1);
 			if ((incremented & 1u) != 0)
 				random ^= 0xb400u;
-			if (random < level)
+			if (random < level) {
 				out[col] = sourceRow[col];
+				RasterOverlay_MarkWritten(out + col, 1);
+			}
 		}
 	}
 }
@@ -165,11 +169,13 @@ void SlipSprite_DrawClipped(const SlipSprite *sprite, uint8_t *dst, int dstPitch
 
 		if (sprite->transparentColor < 0) {
 			memcpy(out, src, (size_t)copyWidth);
+			RasterOverlay_MarkWritten(out, (size_t)copyWidth);
 			continue;
 		}
 		for (col = 0; col < copyWidth; ++col) {
 			if ((int)src[col] != sprite->transparentColor) {
 				out[col] = src[col];
+				RasterOverlay_MarkWritten(out + col, 1);
 			}
 		}
 	}

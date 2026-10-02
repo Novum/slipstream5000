@@ -2,7 +2,7 @@
 #define SLIPSTREAM5000_RENDERER_LIFECYCLE_H
 #include "draw3d.h"
 #include "material_residency.h"
-#include "raster.h"
+#include "raster/raster.h"
 #include "renderer_flags.h"
 #include "resource.h"
 

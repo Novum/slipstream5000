@@ -1,6 +1,6 @@
 #include "race_records_draw.h"
 #include "race_hud.h"
-#include "raster.h"
+#include "raster/raster.h"
 
 void SlipLapRecords_DrawRow(SlipLapRecord *record, const SlipLapRecordNameInput *input, const SlipSprite *row,
                             uint8_t *rowPixels, const SlipLapRecordRowAssets *assets, const SlipView3DMatrix *matrix,
