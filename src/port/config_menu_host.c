@@ -19,7 +19,7 @@
 #include <string.h>
 
 static char configurationPath[1024];
-static uint16_t currentFont, boundSprite;
+static uint16_t boundSprite;
 static RasterSurfaceBinding savedSurface;
 static const SlipStringTableResources strings = {.load = SlipResourceHost_Load,
                                                  .lock = SlipResourceHost_Lock,
@@ -72,7 +72,7 @@ static void SlipConfigHost_UnclippedSprite(void *context, uint16_t handle, int16
 }
 
 static void SlipConfigHost_Font(void *context, uint16_t handle) {
-	currentFont = handle;
+	SlipText_state.fontResource = handle;
 	bool heightNeeded = SlipText_state.requestedSpacing == UINT16_MAX;
 	if (heightNeeded)
 		SlipResourceHost_Lock(context, handle);
@@ -87,7 +87,7 @@ static void SlipConfigHost_Font(void *context, uint16_t handle) {
 
 static uint16_t SlipConfigHost_GetFont(void *context) {
 	(void)context;
-	return currentFont;
+	return SlipText_state.fontResource;
 }
 
 static void SlipConfigHost_Color(void *context, uint16_t value) {
