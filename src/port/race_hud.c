@@ -1,4 +1,5 @@
 #include "race_hud.h"
+#include "race_display.h"
 #include "raster/raster.h"
 
 #include "byte_order.h"
@@ -417,7 +418,8 @@ void SlipRaceHud_DrawLowerConsole(SlipRaceHudState *state, const SlipRaceHudAsse
 	} else if (bottomIndex < 0) {
 		if (view != 1 || (assets->flags & SLIP_RACE_HUD_INTRO_PRESENTATION) == 0) {
 
-			Raster_DrawLineClipped(0, 0, (int16_t)y, SLIPSTREAM_SCREEN_WIDTH - 1, (int16_t)y);
+			if (!SlipRaceDisplay_ready)
+				Raster_DrawLineClipped(0, 0, (int16_t)y, SLIPSTREAM_SCREEN_WIDTH - 1, (int16_t)y);
 			SlipRaceHud_DrawSpriteResourceClipped(assets->consoleExtensionSprite, framebuffer, pitch,
 			                                      SLIP_RACE_HUD_BORDER_WIDTH, (int)y + 1);
 		} else {
