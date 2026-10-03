@@ -158,6 +158,11 @@ enum {
 	kCampaignMinimumDepth = 12,
 	kCampaignAmbientLightQ14 = 3 * SLIP_Q14_ONE / 8,
 	kCampaignDirectLightQ14 = 5 * SLIP_Q14_ONE / 8,
+	kTrackSelectorVertexCapacity = 150,
+	kTrackSelectorMinimumDepth = 12,
+	kTrackSelectorAmbientLightQ14 = 0x1800,
+	kTrackSelectorDirectLightQ14 = 0x2800,
+	kTrackSelectorLightAxisQ14 = 0x24f3,
 	kCampaignCaptionShadowColour = 0x84,
 	kCampaignCaptionColour = 0x8d,
 	kCampaignCaptionLeft = 185,
@@ -286,12 +291,10 @@ static uint16_t g_garageBackground, g_garageInactiveBackground, g_garageMarker;
 static SlipStringTableSlot *g_garageStrings;
 static uint16_t g_garageStatusZoom, g_garageStatusZoomTarget;
 
-static int g_hoveredTrack = -1;
 static int g_hoveredGarageAction = -1;
 static int g_hoveredGaragePanelItem = -1;
 static int g_garagePanel = -1;
 
-static FocusSource g_trackFocus = FOCUS_NONE;
 static FocusSource g_garageActionFocus = FOCUS_NONE;
 static FocusSource g_garagePanelFocus = FOCUS_NONE;
 static char g_trackTitleLabel[SLIP_MENU_LABEL_BYTES];
@@ -949,8 +952,53 @@ static uint16_t trackButtonResources[2][SLIP_CONFIG_TRACK_COUNT];
 static uint16_t trackBlockerResource;
 static uint16_t trackFontResource;
 static uint16_t trackTitleResource;
+static uint16_t trackStarsResource, trackGlobeResource, trackFlagResource;
 static SlipStringTableSlot *trackMenuStrings;
 static uint32_t SlipMenu_TrackLimit(void);
+static SlipInputNavigationTable trackNavigation = {10,
+                                                   0,
+                                                   {-1, 0, 1, 2, 3, 4, 5, 6, 7, 8},
+                                                   {1, 2, 3, 4, 5, 6, 7, 8, 9, -1},
+                                                   {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+                                                   {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1}};
+
+static void SlipMenu_TrackRendererSetup(void) {
+	uint16_t materialResource;
+	const SlipView3DMatrix identity = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
+	SlipRenderer_Initialize(&SlipRendererHost_state, kTrackSelectorVertexCapacity, &SlipRendererHost_lifecycleCalls);
+	SlipDraw3D_SetMinimumDepth(kTrackSelectorMinimumDepth);
+	SlipDraw3D_SetMaximumDepth(INT32_MAX);
+	SlipDraw3D_ResetLighting();
+	SlipDraw3D_SetAmbientLight(kTrackSelectorAmbientLightQ14);
+	SlipDraw3D_SetLightVector(kTrackSelectorLightAxisQ14, -kTrackSelectorLightAxisQ14, kTrackSelectorLightAxisQ14,
+	                          kTrackSelectorDirectLightQ14);
+	SlipDraw3D_SetDepthFade(0, 0, 0);
+	SlipRenderer_SetFlags(&SlipRendererHost_state, SLIP_RENDER_ALTERNATE_TEXTURE_RASTER);
+	SlipRenderer_SetCamera(&SlipRendererHost_state, (SlipView3DVec32){0, 0, 0}, &identity);
+	SlipShape3D_Initialize();
+	if (!SlipResourceHost_Load(NULL, "GLOBE.MAT", &materialResource))
+		SlipGame_ResourceFailure();
+	const uint8_t *const source = SlipResourceHost_Lock(NULL, materialResource);
+	SlipMaterial_Install(&SlipMaterialHost_install, source, &SlipMaterialHost_installCalls);
+	SlipMaterial_MakeResident(&SlipMaterialHost_residency, &SlipMaterialHost_residencyCalls);
+	SlipResourceHost_Unlock(NULL, materialResource);
+	SlipResourceHost_Release(NULL, materialResource);
+}
+
+static void SlipMenu_TrackGlobeResourcesSetup(void) {
+	/* Retain the stars and shapes for the duration of the selector. */
+	if (!SlipResourceHost_Load(NULL, "STARS.SPR", &trackStarsResource) ||
+	    !SlipResourceHost_Load(NULL, "GLOBE.SHP", &trackGlobeResource) ||
+	    !SlipResourceHost_Load(NULL, "FLAG.SHP", &trackFlagResource))
+		SlipGame_ResourceFailure();
+	SlipResourceHost_Lock(NULL, trackStarsResource);
+	SlipResourcePayload payload = SlipResourceHost_Payload(trackStarsResource);
+	SlipSprite sprite;
+	if (!SlipSprite_FromPayload(&payload, &sprite))
+		SlipGame_ResourceFailure();
+	SlipSprite_ApplyPalette(&sprite);
+	SlipResourceHost_Unlock(NULL, trackStarsResource);
+}
 
 static void SlipMenu_TrackButtonSetup(void) {
 
@@ -969,7 +1017,7 @@ static void SlipMenu_TrackButtonSetup(void) {
 	SlipResourceModifyResult title = SlipResourceHost_Modify(NULL, trackTitleResource);
 
 	if (title.exit == SLIP_RESOURCE_MODIFY_DISPLACED_RETURN)
-		SlipRuntime_Fatal("DOS ResModify bug: malformed failure continuation at 0005ae71 is unsupported");
+		SlipRuntime_Fatal("Track title resource modification failed");
 	trackTitleResource = SlipResourceHost_ModifyReturnedSI(title);
 	const char *const titleText = SlipStringTable_Get(trackMenuStrings, SLIP_STRING_TITLE, &menuStringResources);
 	SlipMenu_BakeResourceSprite(trackTitleResource, titleText, kMenuTitleTextInsetY);
@@ -985,7 +1033,7 @@ static void SlipMenu_TrackButtonSetup(void) {
 			SlipResourceModifyResult modified = SlipResourceHost_Modify(NULL, resource);
 
 			if (modified.exit == SLIP_RESOURCE_MODIFY_DISPLACED_RETURN)
-				SlipRuntime_Fatal("DOS ResModify bug: malformed failure continuation at 0005aee0 is unsupported");
+				SlipRuntime_Fatal("Track button resource modification failed");
 			resource = SlipResourceHost_ModifyReturnedSI(modified);
 			trackButtonResources[variant][trackIndex] = resource;
 
@@ -1042,32 +1090,46 @@ static void SlipMenu_TrackButtonRelease(void) {
 	for (unsigned variant = 0; variant < 2; ++variant)
 		for (unsigned trackIndex = 0; trackIndex < SLIP_CONFIG_TRACK_COUNT; ++trackIndex)
 			SlipResourceHost_Release(NULL, trackButtonResources[variant][trackIndex]);
+	SlipResourceHost_Release(NULL, trackGlobeResource);
+	SlipResourceHost_Release(NULL, trackFlagResource);
 	SlipResourceHost_Release(NULL, trackBlockerResource);
 	SlipResourceHost_Release(NULL, trackTitleResource);
+	SlipResourceHost_Release(NULL, trackStarsResource);
 	SlipResourceHost_Release(NULL, trackFontResource);
 	SlipStringTable_Release(trackMenuStrings, &menuStringResources);
+	SlipShape3D_Shutdown();
+	SlipRenderer_Shutdown(&SlipRendererHost_state, &SlipRendererHost_lifecycleCalls);
 }
 
-static bool SlipMenu_DrawTrackSelect(const char *resPath) {
+static bool SlipMenu_DrawTrackSelect(const char *resPath, uint16_t fadeLevel, uint16_t acceptedTrack) {
 	const uint16_t resourceTrack = SlipMenu_TrackSelectResourceTrack(g_trackHover);
 	int trackIndex;
 
 	Raster_Clear(0, sizeof(g_framebuffer));
 	Raster_SetClipRect(0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 
-	if (!SlipMenu_DrawSpriteFromRes(resPath, "STARS.SPR", true)) {
+	if (!SlipMenu_DrawVehicleResource(trackStarsResource, 0, 0, true, false)) {
 		return false;
 	}
-	SlipTrackGlobe_Draw(resPath, resourceTrack, g_trackGlobeGrow);
+	if (!SlipTrackGlobe_DrawRetained(resPath, resourceTrack, g_trackGlobeGrow, trackGlobeResource, trackFlagResource))
+		return false;
 	if (!SlipMenu_DrawVehicleResource(trackTitleResource, 0, 0, true, false)) {
 		return false;
 	}
 
 	for (trackIndex = 0; trackIndex < kDriverCount; ++trackIndex) {
 		const unsigned variant = trackIndex + 1 == g_trackHover ? 1u : 0u;
-		if (!SlipMenu_DrawVehicleResource(trackButtonResources[variant][trackIndex], 0, 0, true, false)) {
-			return false;
-		}
+		const uint16_t resource = trackButtonResources[variant][trackIndex];
+		SlipResourceHost_Lock(NULL, resource);
+		SlipResourcePayload payload = SlipResourceHost_Payload(resource);
+		SlipSprite sprite;
+		if (!SlipSprite_FromPayload(&payload, &sprite))
+			SlipGame_ResourceFailure();
+		if ((uint16_t)(trackIndex + 1) == acceptedTrack)
+			SlipSprite_DrawClipped(&sprite, g_framebuffer, SLIPSTREAM_SCREEN_WIDTH, sprite.x, sprite.y);
+		else
+			SlipSprite_DrawDissolve(&sprite, g_framebuffer, SLIPSTREAM_SCREEN_WIDTH, sprite.x, sprite.y, fadeLevel);
+		SlipResourceHost_Unlock(NULL, resource);
 	}
 
 	return true;
@@ -1075,29 +1137,27 @@ static bool SlipMenu_DrawTrackSelect(const char *resPath) {
 
 enum { SLIP_TRACK_SELECT_GLOBE_GROW_RATE_Q14 = 3 * SLIP_Q14_ONE / 4 };
 
-static bool SlipMenu_DrawTrackSelectFrame(const char *resPath, int selectedTrack, int hoveredTrack, FocusSource focus) {
-	uint16_t menuTrackOneBased;
-	uint32_t growStep;
-	bool drewFrame;
-
+static void SlipMenu_AdvanceTrackGlobe(void) {
+	/* Advance the animation before sampling the pointer. */
 	TrackView_TrackGlobeFrameTimerUpdate();
 	if (g_trackGlobeGrow != SLIP_Q14_ONE) {
-		growStep = SLIP_TRACK_SELECT_GLOBE_GROW_RATE_Q14 * (uint16_t)SlipFrameTimer_Step();
+		const uint32_t growStep = SLIP_TRACK_SELECT_GLOBE_GROW_RATE_Q14 * (uint16_t)SlipFrameTimer_Step();
 		g_trackGlobeGrow = (uint16_t)(g_trackGlobeGrow + (growStep >> SLIP_Q14_FRACTION_BITS));
-		if ((int16_t)g_trackGlobeGrow > SLIP_Q14_ONE) {
+		if ((int16_t)g_trackGlobeGrow > SLIP_Q14_ONE)
 			g_trackGlobeGrow = SLIP_Q14_ONE;
-		}
+	}
+}
+
+static bool SlipMenu_DrawTrackSelectFrame(const char *resPath, uint16_t acceptedTrack) {
+	const uint32_t hostTicks =
+	    (uint32_t)((SlipSdl_TicksMs() - g_menuFade.hostStartMs) * HMI_TIMER_PIT_CLOCK_HZ /
+	               (MENU_MILLISECONDS_PER_SECOND * (HMI_TIMER_PIT_CLOCK_HZ / g_menuFade.hostRate)));
+	while (g_menuFade.hostTicksApplied < hostTicks) {
+		SlipMenuFade_Tick();
+		++g_menuFade.hostTicksApplied;
 	}
 
-	menuTrackOneBased = (uint16_t)(SlipMenu_FocusedItemIndex(focus, selectedTrack, hoveredTrack) + 1);
-	if (menuTrackOneBased != g_trackHover) {
-		g_trackHover = menuTrackOneBased;
-		g_trackGlobeGrow = 0;
-	}
-
-	drewFrame = SlipMenu_DrawTrackSelect(resPath);
-	SlipTrackGlobe_UpdateMatrix(resPath, SlipMenu_TrackSelectResourceTrack(g_trackHover));
-	return drewFrame;
+	return SlipMenu_DrawTrackSelect(resPath, (uint16_t)g_menuFade.fadeValue, acceptedTrack);
 }
 
 static bool SlipMenu_DrawGarageSprite(uint16_t resource, int x, int y);
@@ -1218,16 +1278,16 @@ static void SlipMenu_InitializeGarageResources(int driver) {
 }
 
 static void SlipMenu_ReleaseGarageResources(void) {
-	SlipResourceHost_Release(NULL, g_garageFont);
-	SlipResourceHost_Release(NULL, g_garageResultsFont);
-	SlipResourceHost_Release(NULL, g_garageWeaponFont);
-	SlipResourceHost_Release(NULL, g_garageBackground);
-	SlipResourceHost_Release(NULL, g_garageInactiveBackground);
 	SlipResourceHost_Release(NULL, g_garageStatusCopy);
 	SlipResourceHost_Release(NULL, g_garageStatusOriginal);
 	SlipResourceHost_Release(NULL, g_garageWeapons);
 	SlipResourceHost_Release(NULL, g_garageTurboPanel);
 	SlipResourceHost_Release(NULL, g_garageSystemsPanel);
+	SlipResourceHost_Release(NULL, g_garageFont);
+	SlipResourceHost_Release(NULL, g_garageResultsFont);
+	SlipResourceHost_Release(NULL, g_garageWeaponFont);
+	SlipResourceHost_Release(NULL, g_garageBackground);
+	SlipResourceHost_Release(NULL, g_garageInactiveBackground);
 	SlipResourceHost_Release(NULL, g_garageMarker);
 	SlipStringTable_Release(g_garageStrings, &menuStringResources);
 }
@@ -1344,29 +1404,26 @@ static void SlipMenu_DrawGarageRectText(const SpriteButton *button, const char *
 	SlipText_Draw(&SlipText_state, text, arguments, &position);
 }
 
+static void SlipMenu_UpdateGarageStatusZoom(void) {
+	const uint16_t step = (uint16_t)(((uint32_t)(uint16_t)SlipFrameTimer_Values().stepQ14 * kGarageStatusZoomRate) >>
+	                                 kGarageStatusZoomFractionBits);
+	if (g_garageStatusZoomTarget != g_garageStatusZoom) {
+		if ((int16_t)g_garageStatusZoomTarget > (int16_t)g_garageStatusZoom) {
+			g_garageStatusZoom = (uint16_t)(g_garageStatusZoom + step);
+			if ((int16_t)g_garageStatusZoom > (int16_t)g_garageStatusZoomTarget)
+				g_garageStatusZoom = g_garageStatusZoomTarget;
+		} else {
+			g_garageStatusZoom = (uint16_t)(g_garageStatusZoom - step);
+			if ((int16_t)g_garageStatusZoom < (int16_t)g_garageStatusZoomTarget)
+				g_garageStatusZoom = g_garageStatusZoomTarget;
+		}
+	}
+}
+
 static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selectedAction, int hoveredAction, int panel,
                                     int selectedPanelItem, int hoveredPanelItem) {
 	int activeItem;
 	int itemIndex;
-
-	if (panel == GARAGE_PANEL_NONE) {
-
-		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
-		const uint16_t step =
-		    (uint16_t)(((uint32_t)(uint16_t)SlipFrameTimer_Values().stepQ14 * kGarageStatusZoomRate) >>
-		               kGarageStatusZoomFractionBits);
-		if (g_garageStatusZoomTarget != g_garageStatusZoom) {
-			if ((int16_t)g_garageStatusZoomTarget > (int16_t)g_garageStatusZoom) {
-				g_garageStatusZoom = (uint16_t)(g_garageStatusZoom + step);
-				if ((int16_t)g_garageStatusZoom > (int16_t)g_garageStatusZoomTarget)
-					g_garageStatusZoom = g_garageStatusZoomTarget;
-			} else {
-				g_garageStatusZoom = (uint16_t)(g_garageStatusZoom - step);
-				if ((int16_t)g_garageStatusZoom < (int16_t)g_garageStatusZoomTarget)
-					g_garageStatusZoom = g_garageStatusZoomTarget;
-			}
-		}
-	}
 	Raster_Clear(0, sizeof(g_framebuffer));
 	Raster_SetClipRect(0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 
@@ -2030,7 +2087,7 @@ static int SlipMainMenu_Show(MainMenuFirstLabel firstLabel, uint16_t buttonCount
 		SlipMenu_PresentFrame();
 		inputCode = SlipInput_PopMenuPressed(SlipInput_pressed);
 		if (inputCode == SLIP_INPUT_SCAN_ESCAPE) {
-			break;
+			goto cleanup;
 		}
 		if ((inputCode == SLIP_INPUT_SCAN_ENTER || inputCode == SLIP_INPUT_MOUSE_LEFT) && hoveredItem != 0) {
 			selection = (int16_t)hoveredItem;
@@ -2055,7 +2112,7 @@ static int SlipMainMenu_Show(MainMenuFirstLabel firstLabel, uint16_t buttonCount
 			selection = -1;
 			break;
 		}
-	} while (selection == 0 || SlipTimedValues_Active(&menuTimedValues, MENU_FADE_OUTPUT_TOKEN));
+	} while (selection == 0 || g_menuFade.fadeValue != 0);
 
 	if (selection > 0 && !quitRequested) {
 		SlipMainMenu_DrawFrame(g_mainMenuResPath, menuPage, hoveredItem == 0 ? -1 : (int)hoveredItem - 1);
@@ -2063,6 +2120,7 @@ static int SlipMainMenu_Show(MainMenuFirstLabel firstLabel, uint16_t buttonCount
 		SlipMainMenu_DrawFrame(g_mainMenuResPath, menuPage, hoveredItem == 0 ? -1 : (int)hoveredItem - 1);
 	}
 
+cleanup:
 	SlipResourceHost_Release(NULL, g_mainMenuBackground);
 	SlipInput_ClearNavigation();
 	SlipTimedValues_Shutdown(&menuTimedValues, &menuTimedValueTimer);
@@ -2187,7 +2245,6 @@ static void SlipMenu_RaceConfiguration(void) {
 }
 
 static void SlipMenu_TrackSelectBegin(void) {
-
 	g_trackHover = 0;
 	g_trackGlobeGrow = 0;
 	TrackView_TrackGlobeResetActorState();
@@ -2195,13 +2252,76 @@ static void SlipMenu_TrackSelectBegin(void) {
 
 static void SlipMenu_EnterTrackSelect(SDL_Window *window, AppMode *mode, bool *redraw) {
 	*mode = APP_MODE_TRACK_SELECT;
-	g_selectedTrack = 0;
-	g_hoveredTrack = -1;
-	g_trackFocus = FOCUS_NONE;
 	*redraw = true;
-	SlipMenu_TrackButtonSetup();
-	SlipMenu_TrackSelectBegin();
 	SlipMenu_SetStatusWindowTitle(window, "Choose Track");
+}
+
+static int SlipMenu_RunTrackSelection(const char *resPath) {
+	uint16_t selected = 0;
+	SlipMenu_TrackRendererSetup();
+	SlipMenu_TrackButtonSetup();
+	for (uint16_t track = 0; track < SLIP_CONFIG_TRACK_COUNT; ++track) {
+		const SpriteButton *const button = &g_trackButtons[track];
+		/* Preserve signed 16-bit wrapping when calculating button centers. */
+		trackNavigation.centers[track][0] =
+		    (int16_t)((int16_t)((uint16_t)(int16_t)button->x + (uint16_t)(int16_t)(button->x + button->width - 1)) >>
+		              1);
+		trackNavigation.centers[track][1] =
+		    (int16_t)((int16_t)((uint16_t)(int16_t)button->y + (uint16_t)(int16_t)(button->y + button->height - 1)) >>
+		              1);
+	}
+	SlipInput_SetNavigation(&trackNavigation);
+	SlipMenu_TrackGlobeResourcesSetup();
+	SlipMenu_TrackSelectBegin();
+	if (!SlipTimedValues_Initialize(&menuTimedValues, menuTimedValueOutputs, MENU_FADE_RATE, 1, &menuTimedValueTimer))
+		SlipGame_UnexpectedFailure();
+	SlipMenuFade_Start(0, UINT16_MAX, MENU_FADE_STEPS, 0);
+	SlipMenuSound_Play();
+	SlipFrameTimer_Reset();
+
+	for (;;) {
+		if (!SlipMenu_PollInput())
+			break;
+		SlipMenu_AdvanceTrackGlobe();
+		SlipInput_UpdatePointer();
+		if (selected == 0) {
+			const SlipInputPointerPosition pointer = SlipInput_Pointer();
+			const uint16_t hovered = (uint16_t)(SlipMenu_HitTestTrackButton(pointer.x, pointer.y) + 1);
+			if (hovered != g_trackHover) {
+				g_trackHover = hovered;
+				g_trackGlobeGrow = 0;
+			}
+		}
+		if (!SlipMenu_DrawTrackSelectFrame(resPath, selected))
+			SlipGame_ResourceFailure();
+		SlipMenu_PresentFrame();
+		SlipTrackGlobe_UpdateMatrix(resPath, SlipMenu_TrackSelectResourceTrack(g_trackHover));
+		if (SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_SCAN_ESCAPE)) {
+			selected = 0;
+			break;
+		}
+		const bool confirmed = SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_SCAN_ENTER) ||
+		                       SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_MOUSE_LEFT);
+		if (confirmed && selected == 0 && g_trackHover != 0) {
+			if (SlipMainMenu_hiddenToggle != 0 || (int16_t)g_trackHover <= (int16_t)(uint16_t)SlipMenu_TrackLimit()) {
+				selected = g_trackHover;
+				SlipMenuFade_Start(UINT16_MAX, 0, MENU_FADE_STEPS, SLIP_TIMED_VALUE_PRESERVE_OUTPUT);
+				SlipMenuSound_Play();
+			}
+		}
+		if (selected != 0 && g_menuFade.fadeValue == 0)
+			break;
+	}
+	/* Present the final frame before releasing the selector resources. */
+	if (!g_sdlQuitRequested) {
+		if (!SlipMenu_DrawTrackSelectFrame(resPath, selected))
+			SlipGame_ResourceFailure();
+		SlipMenu_PresentFrame();
+	}
+	SlipInput_ClearNavigation();
+	SlipTimedValues_Shutdown(&menuTimedValues, &menuTimedValueTimer);
+	SlipMenu_TrackButtonRelease();
+	return selected == 0 ? -1 : (int)selected - 1;
 }
 
 static void SlipMenu_StartSelectedRace(const char *resPath, AppMode *mode) {
@@ -2235,7 +2355,6 @@ static void SlipMenu_AcceptTrackSelection(const char *resPath, SDL_Window *windo
 		if ((int16_t)(uint16_t)(track + 1) > (int16_t)limit)
 			return;
 	}
-	SlipMenu_TrackButtonRelease();
 	g_selectedTrack = track;
 
 	SlipRace_racerTable.racerCount =
@@ -2284,8 +2403,6 @@ static void SlipMenu_EnterGarageView(SDL_Window *window, AppMode *mode, bool *re
 
 	g_garageStatusZoom = 0;
 	g_garageStatusZoomTarget = kGarageStatusZoomComplete;
-	SlipMenu_PrepareGarageStatus();
-	SlipFrameTimer_Reset();
 	SlipMenu_SetStatusWindowTitle(window, "Garage");
 }
 
@@ -2299,7 +2416,6 @@ static void SlipMenu_SelectGarageAction(const char *resPath, SDL_Window *window,
 	g_garagePanelFocus = FOCUS_NONE;
 	if (action == kGarageActionWeapons) {
 		g_garagePanel = GARAGE_PANEL_WEAPON_PODS;
-		SlipMenu_PrepareGarageStatus();
 		SlipMenu_SetStatusWindowTitle(window, g_garageActionLabels[action]);
 	} else if (action == kGarageActionTurbo) {
 		g_garagePanel = GARAGE_PANEL_TURBO;
@@ -2336,14 +2452,10 @@ static void SlipMenu_LeaveGaragePanel(SDL_Window *window, bool *redraw) {
 	g_garageActionFocus = FOCUS_NONE;
 	g_garagePanelFocus = FOCUS_NONE;
 	*redraw = true;
-	SlipMenu_PrepareGarageStatus();
-
-	SlipFrameTimer_Reset();
 	SlipMenu_SetStatusWindowTitle(window, "Garage");
 }
 
 static void SlipMenu_ReturnToGarageWeaponPods(SDL_Window *window) {
-	SlipMenu_PrepareGarageStatus();
 	g_garagePanel = GARAGE_PANEL_WEAPON_PODS;
 	g_selectedGaragePanelItem = g_selectedGarageWeaponPod;
 	g_hoveredGaragePanelItem = -1;
@@ -2425,6 +2537,19 @@ static void SlipMenu_SelectGaragePanelItem(SDL_Window *window, int item, bool *r
 	}
 	g_hoveredGaragePanelItem = -1;
 	*redraw = true;
+}
+
+/* Weapon and turbo panels leave activation input pending when the purchase is unavailable. */
+static bool SlipMenu_GarageCanActivate(int panel, int item) {
+	if (panel == GARAGE_PANEL_WEAPON_GRID && item < kGarageWeaponGridActionCount - 1) {
+		const uint32_t cost = SlipMenu_GarageWeaponPrice(SlipMenu_GarageWeaponRecordFromItem(item));
+		return SlipMainMenu_hiddenToggle != 0 || g_garageCash >= (int32_t)cost;
+	}
+	if (panel == GARAGE_PANEL_TURBO && item < kGarageTurboActionCount - 1) {
+		return SlipMainMenu_hiddenToggle != 0 ||
+		       (g_garageTurbo != item && g_garageCash >= SlipRacePowerup_GetPrice(item));
+	}
+	return true;
 }
 
 bool SlipMenu_PollInput(void) {
@@ -2967,6 +3092,74 @@ static bool redraw = true;
 static AppMode appMode = APP_MODE_MENU;
 static int hoveredButton = -1;
 
+bool SlipMenu_GarageActive(void) { return haveMainMenu && appMode == APP_MODE_GARAGE; }
+
+/* Present, poll input, then act on the hit sampled before drawing.
+ * Only Start Race releases the garage resources. */
+static bool SlipMenu_RunGarage(const char *resPath, SDL_Window *window) {
+	int enteredPanel = GARAGE_PANEL_NONE - 1;
+	while (appMode == APP_MODE_GARAGE) {
+		const int panel = g_garagePanel;
+		SlipInputNavigationTable *const navigation =
+		    &SlipInput_garageNavigation[panel == GARAGE_PANEL_NONE ? SLIP_INPUT_GARAGE_MAIN_TABLE : panel];
+		if (panel != enteredPanel) {
+			if (panel == GARAGE_PANEL_NONE)
+				SlipMenu_PrepareGarageStatus();
+			SlipInput_SetNavigation(navigation);
+			if (panel == GARAGE_PANEL_NONE)
+				SlipFrameTimer_Reset();
+			else if (panel == GARAGE_PANEL_WEAPON_PODS)
+				SlipMenu_PrepareGarageStatus();
+			enteredPanel = panel;
+		}
+		SlipInput_UpdatePointer();
+		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
+		if (panel == GARAGE_PANEL_NONE)
+			SlipMenu_UpdateGarageStatusZoom();
+		const SlipInputPointerPosition pointer = SlipInput_Pointer();
+		const int item = panel == GARAGE_PANEL_NONE ? SlipMenu_HitTestGarageAction(pointer.x, pointer.y)
+		                                            : SlipMenu_HitTestGaragePanelItem(panel, pointer.x, pointer.y);
+		if (panel == GARAGE_PANEL_NONE) {
+			g_hoveredGarageAction = item;
+			g_garageActionFocus = FOCUS_MOUSE;
+		} else {
+			g_hoveredGaragePanelItem = item;
+			g_garagePanelFocus = FOCUS_MOUSE;
+		}
+		SlipMenu_DrawGarageView(resPath, g_selectedDriver, g_selectedGarageAction, g_hoveredGarageAction, panel,
+		                        g_selectedGaragePanelItem, g_hoveredGaragePanelItem);
+		SlipMenu_PresentFrame();
+		if (!SlipMenu_PollInput())
+			return false;
+		if (panel == GARAGE_PANEL_SYSTEMS) {
+			/* Systems consumes activation input even when no item is selected. */
+			if (!SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_SCAN_ENTER) &&
+			    !SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_MOUSE_LEFT))
+				continue;
+			if (item < 0)
+				continue;
+		} else {
+			if (item < 0 || !SlipMenu_GarageCanActivate(panel, item))
+				continue;
+			if (!SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_SCAN_ENTER) &&
+			    !SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_MOUSE_LEFT))
+				continue;
+		}
+		if (panel == GARAGE_PANEL_NONE) {
+			SlipInput_ClearNavigation();
+			SlipMenu_SelectGarageAction(resPath, window, &appMode, item, &redraw);
+			enteredPanel = GARAGE_PANEL_NONE - 1;
+		} else {
+			if ((panel == GARAGE_PANEL_WEAPON_PODS && item == kGarageWeaponPodActionCount - 1) ||
+			    panel == GARAGE_PANEL_WEAPON_GRID || panel == GARAGE_PANEL_TURBO ||
+			    (panel == GARAGE_PANEL_SYSTEMS && item == kGarageSystemsActionCount - 1))
+				SlipInput_ClearNavigation();
+			SlipMenu_SelectGaragePanelItem(window, item, &redraw);
+		}
+	}
+	return true;
+}
+
 void SlipMenu_UpdateSystemCursor(void) {
 	if (appMode == APP_MODE_RACE && !SlipRaceSession_IsPaused() && SDL_GetKeyboardFocus() != NULL)
 		SDL_HideCursor();
@@ -3016,11 +3209,17 @@ void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer 
 		mouseInputCode = SlipMenu_SdlMouseButtonToInputCode(event->button.button);
 	}
 
-	if (haveMainMenu &&
-	    (appMode == APP_MODE_MENU || appMode == APP_MODE_RESULTS || appMode == APP_MODE_VEHICLE_SELECT)) {
+	if (haveMainMenu && (appMode == APP_MODE_MENU || appMode == APP_MODE_RESULTS ||
+	                     appMode == APP_MODE_VEHICLE_SELECT || appMode == APP_MODE_TRACK_SELECT)) {
 		if (quitRequested) {
 			*running = false;
 		}
+		return;
+	}
+	/* Garage input belongs to its draw/present/poll loop. */
+	if (haveMainMenu && appMode == APP_MODE_GARAGE) {
+		if (quitRequested)
+			*running = false;
 		return;
 	}
 	if (quitRequested) {
@@ -3033,128 +3232,12 @@ void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer 
 		if (scanCode == SLIP_INPUT_SCAN_ESCAPE) {
 			if (haveMainMenu && appMode == APP_MODE_RACE) {
 				redraw = true;
-			} else if (haveMainMenu && appMode == APP_MODE_GARAGE) {
-				if (g_garagePanel >= 0) {
-					SlipMenu_LeaveGaragePanel(window, &redraw);
-				} else {
-					appMode = APP_MODE_TRACK_SELECT;
-					SlipMenu_TrackButtonSetup();
-					g_hoveredGarageAction = -1;
-					g_hoveredGaragePanelItem = -1;
-					g_trackFocus = FOCUS_NONE;
-					redraw = true;
-					SlipMenu_SetStatusWindowTitle(window, "Choose Track");
-				}
-			} else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT) {
-				SlipMenu_TrackButtonRelease();
-				appMode = APP_MODE_VEHICLE_SELECT;
-				redraw = true;
 			} else {
 				*running = false;
 			}
-		} else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT && scanCode == SLIP_INPUT_SCAN_ENTER) {
-			const int track = SlipMenu_FocusedItemIndex(g_trackFocus, g_selectedTrack, g_hoveredTrack);
-			if (track >= 0) {
-				SlipMenu_AcceptTrackSelection(resPath, window, &appMode, track, &redraw);
-			}
-		} else if (haveMainMenu && appMode == APP_MODE_GARAGE &&
-		           (scanCode == SLIP_INPUT_SCAN_ENTER || scanCode == SLIP_INPUT_SCAN_SPACE)) {
-			if (g_garagePanel >= 0) {
-				const int item =
-				    SlipMenu_FocusedItemIndex(g_garagePanelFocus, g_selectedGaragePanelItem, g_hoveredGaragePanelItem);
-				if (item >= 0) {
-					SlipMenu_SelectGaragePanelItem(window, item, &redraw);
-				}
-			} else {
-				const int action =
-				    SlipMenu_FocusedItemIndex(g_garageActionFocus, g_selectedGarageAction, g_hoveredGarageAction);
-				if (action >= 0) {
-					SlipMenu_SelectGarageAction(resPath, window, &appMode, action, &redraw);
-				}
-			}
 		}
-		if (!dispatchInputToRace) {
+		if (!dispatchInputToRace)
 			SlipInput_pressed[scanCode] = false;
-		}
-	}
-
-	else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT && event->type == SDL_EVENT_MOUSE_MOTION) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->motion.x, event->motion.y, &x, &y)) {
-			hit = SlipMenu_HitTestTrackButton(x, y);
-			if (g_trackFocus != FOCUS_MOUSE || hit != g_hoveredTrack) {
-				g_trackFocus = FOCUS_MOUSE;
-				g_hoveredTrack = hit;
-				redraw = true;
-			}
-		}
-	} else if (haveMainMenu && appMode == APP_MODE_GARAGE && g_garagePanel < 0 &&
-	           event->type == SDL_EVENT_MOUSE_MOTION) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->motion.x, event->motion.y, &x, &y)) {
-			hit = SlipMenu_HitTestGarageAction(x, y);
-			if (g_garageActionFocus != FOCUS_MOUSE || hit != g_hoveredGarageAction) {
-				g_garageActionFocus = FOCUS_MOUSE;
-				g_hoveredGarageAction = hit;
-				redraw = true;
-			}
-		}
-	} else if (haveMainMenu && appMode == APP_MODE_GARAGE && g_garagePanel >= 0 &&
-	           event->type == SDL_EVENT_MOUSE_MOTION) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->motion.x, event->motion.y, &x, &y)) {
-			hit = SlipMenu_HitTestGaragePanelItem(g_garagePanel, x, y);
-			if (g_garagePanelFocus != FOCUS_MOUSE || hit != g_hoveredGaragePanelItem) {
-				g_garagePanelFocus = FOCUS_MOUSE;
-				g_hoveredGaragePanelItem = hit;
-				redraw = true;
-			}
-		}
-	} else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT && event->type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
-	           mouseInputCode == SLIP_INPUT_MOUSE_LEFT) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->button.x, event->button.y, &x, &y)) {
-			hit = SlipMenu_HitTestTrackButton(x, y);
-			if (hit >= 0) {
-				g_trackFocus = FOCUS_MOUSE;
-				g_hoveredTrack = hit;
-				SlipMenu_AcceptTrackSelection(resPath, window, &appMode, hit, &redraw);
-			}
-		}
-	} else if (haveMainMenu && appMode == APP_MODE_GARAGE && g_garagePanel < 0 &&
-	           event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && mouseInputCode == SLIP_INPUT_MOUSE_LEFT) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->button.x, event->button.y, &x, &y)) {
-			hit = SlipMenu_HitTestGarageAction(x, y);
-			if (hit >= 0) {
-				g_garageActionFocus = FOCUS_MOUSE;
-				g_hoveredGarageAction = hit;
-				SlipMenu_SelectGarageAction(resPath, window, &appMode, hit, &redraw);
-			}
-		}
-	} else if (haveMainMenu && appMode == APP_MODE_GARAGE && g_garagePanel >= 0 &&
-	           event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && mouseInputCode == SLIP_INPUT_MOUSE_LEFT) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->button.x, event->button.y, &x, &y)) {
-			hit = SlipMenu_HitTestGaragePanelItem(g_garagePanel, x, y);
-			if (hit >= 0) {
-				g_garagePanelFocus = FOCUS_MOUSE;
-				g_hoveredGaragePanelItem = hit;
-				SlipMenu_SelectGaragePanelItem(window, hit, &redraw);
-			}
-		}
 	}
 	if (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN && mouseInputCode >= 0 && !dispatchInputToRace) {
 		SlipInput_pressed[mouseInputCode] = false;
@@ -3328,7 +3411,16 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 			SlipMenu_RunVehicleSelection(window, &appMode, &redraw);
 			return !g_sdlQuitRequested;
 		} else if (appMode == APP_MODE_TRACK_SELECT) {
-			SlipMenu_DrawTrackSelectFrame(resPath, g_selectedTrack, g_hoveredTrack, g_trackFocus);
+			const int track = SlipMenu_RunTrackSelection(resPath);
+			if (g_sdlQuitRequested)
+				return false;
+			if (track < 0) {
+				appMode = APP_MODE_VEHICLE_SELECT;
+				redraw = true;
+			} else {
+				SlipMenu_AcceptTrackSelection(resPath, window, &appMode, track, &redraw);
+			}
+			return !g_sdlQuitRequested;
 		} else if (appMode == APP_MODE_RACE) {
 
 			const uint64_t nowMs = SlipSdl_TicksMs();
@@ -3434,21 +3526,7 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 				}
 			}
 		} else if (appMode == APP_MODE_GARAGE) {
-			SlipInputNavigationTable *const navigation =
-			    &SlipInput_garageNavigation[g_garagePanel < 0 ? SLIP_INPUT_GARAGE_MAIN_TABLE : g_garagePanel];
-			if (SlipInput_navigation.active != navigation)
-				SlipInput_SetNavigation(navigation);
-			SlipInput_UpdatePointer();
-			SlipInputPointerPosition pointer = SlipInput_Pointer();
-			if (g_garagePanel < 0) {
-				g_hoveredGarageAction = SlipMenu_HitTestGarageAction(pointer.x, pointer.y);
-				g_garageActionFocus = FOCUS_MOUSE;
-			} else {
-				g_hoveredGaragePanelItem = SlipMenu_HitTestGaragePanelItem(g_garagePanel, pointer.x, pointer.y);
-				g_garagePanelFocus = FOCUS_MOUSE;
-			}
-			SlipMenu_DrawGarageView(resPath, g_selectedDriver, g_selectedGarageAction, g_hoveredGarageAction,
-			                        g_garagePanel, g_selectedGaragePanelItem, g_hoveredGaragePanelItem);
+			return SlipMenu_RunGarage(resPath, window);
 		}
 		if (!raceFrame)
 			SlipMenu_PresentFrame();

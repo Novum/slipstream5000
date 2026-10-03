@@ -13399,6 +13399,12 @@ bool SlipTrackGlobe_Draw(const char *resPath, uint16_t track, uint16_t grow) {
 	return SlipTrackGlobe_DrawGivenMatrix(resPath, track, grow, &g_trackSelectGlobeMatrix);
 }
 
+bool SlipTrackGlobe_DrawRetained(const char *resPath, uint16_t track, uint16_t grow, uint16_t globeResource,
+                                 uint16_t flagResource) {
+	return SlipTrackGlobe_DrawGivenResources(resPath, track, grow, &g_trackSelectGlobeMatrix, globeResource,
+	                                         flagResource);
+}
+
 enum {
 	SLIP_STARTUP_TIMED_CLOCK_HZ = 70,
 	SLIP_STARTUP_TIMED_OUTPUT_COUNT = 2,

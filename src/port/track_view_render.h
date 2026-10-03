@@ -625,6 +625,8 @@ bool SlipTrackGlobe_DrawGivenResources(const char *resPath, uint16_t track, uint
 bool SlipTrackGlobe_DrawGivenMatrix(const char *resPath, uint16_t track, uint16_t grow, const SlipView3DMatrix *matrix);
 bool SlipTrackGlobe_UpdateMatrix(const char *resPath, uint16_t trackResourceHandle);
 bool SlipTrackGlobe_Draw(const char *resPath, uint16_t trackResourceHandle, uint16_t growAmount);
+bool SlipTrackGlobe_DrawRetained(const char *resPath, uint16_t trackResourceHandle, uint16_t growAmount,
+                                 uint16_t globeResource, uint16_t flagResource);
 bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DMatrix *actorObjectMatrix,
                                     uint16_t frameStep);
 

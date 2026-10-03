@@ -290,16 +290,6 @@ typedef struct SlipRacePauseRect {
 	int16_t maxY;
 } SlipRacePauseRect;
 
-typedef struct SlipRacePauseNavigation {
-	uint16_t itemCount;
-	uint16_t currentItem;
-	int16_t up[SLIP_RACE_PAUSE_OPTION_COUNT];
-	int16_t down[SLIP_RACE_PAUSE_OPTION_COUNT];
-	int16_t left[SLIP_RACE_PAUSE_OPTION_COUNT];
-	int16_t right[SLIP_RACE_PAUSE_OPTION_COUNT];
-	int16_t centers[SLIP_RACE_PAUSE_OPTION_COUNT][2];
-} SlipRacePauseNavigation;
-
 typedef enum SlipRacePauseState {
 	SLIP_RACE_PAUSE_RUNNING,
 	SLIP_RACE_PAUSE_LOCAL,
@@ -319,13 +309,13 @@ static const SlipRacePauseRect SlipRaceSession_remotePauseRect = {101, 64, 220, 
 static const SlipRacePauseRect SlipRaceSession_pauseRects[SLIP_RACE_PAUSE_OPTION_COUNT] = {
     {101, 46, 220, 60}, {101, 64, 220, 78}, {101, 83, 220, 96}, {101, 100, 220, 114}};
 
-static SlipRacePauseNavigation SlipRaceSession_pauseNavigation = {SLIP_RACE_PAUSE_OPTION_COUNT,
-                                                                  0,
-                                                                  {-1, 0, 1, 2},
-                                                                  {1, 2, 3, -1},
-                                                                  {-1, -1, -1, -1},
-                                                                  {-1, -1, -1, -1},
-                                                                  {{160, 53}, {160, 71}, {160, 89}, {160, 107}}};
+static SlipInputNavigationTable SlipRaceSession_pauseNavigation = {SLIP_RACE_PAUSE_OPTION_COUNT,
+                                                                   0,
+                                                                   {-1, 0, 1, 2},
+                                                                   {1, 2, 3, -1},
+                                                                   {-1, -1, -1, -1},
+                                                                   {-1, -1, -1, -1},
+                                                                   {{160, 53}, {160, 71}, {160, 89}, {160, 107}}};
 
 enum {
 
@@ -389,8 +379,6 @@ static const SlipStringTableResources SlipRaceSession_pauseStringResources = {.l
 static bool SlipRaceSession_pauseAssetsReady;
 static uint16_t SlipRaceSession_pauseState;
 static uint32_t SlipRaceSession_pauseSelection;
-static int32_t SlipRaceSession_menuMouseX;
-static int32_t SlipRaceSession_menuMouseY;
 static uint16_t SlipRaceSession_countdownTimer;
 static uint16_t SlipRaceSession_finishDelay;
 static bool SlipRaceSession_playerReady;
@@ -2234,8 +2222,6 @@ static void SlipRaceSession_LoadPauseAssets(void) {
 }
 
 enum {
-	SLIP_RACE_PAUSE_COORDINATE_FRACTION_BITS = 16,
-	SLIP_RACE_PAUSE_COORDINATE_ONE = 1 << SLIP_RACE_PAUSE_COORDINATE_FRACTION_BITS,
 	SLIP_RACE_PAUSE_OPTION_BACKGROUND_COLOUR = 0x14,
 	SLIP_RACE_PAUSE_OPTION_SELECTED_COLOUR = 0xfd,
 	SLIP_RACE_PAUSE_OPTION_LIGHT_EDGE_COLOUR = 0x1c,
@@ -2288,49 +2274,6 @@ static void SlipRaceSession_DrawPauseMenu(void) {
 	}
 }
 
-static void SlipRaceSession_MenuNavPoll(bool inputPressed[SLIP_INPUT_CODE_COUNT]) {
-	int16_t nextItem;
-
-	if (inputPressed[SLIP_INPUT_SCAN_UP]) {
-		inputPressed[SLIP_INPUT_SCAN_UP] = false;
-		nextItem = SlipRaceSession_pauseNavigation.up[SlipRaceSession_pauseNavigation.currentItem];
-		if (nextItem >= 0) {
-			SlipRaceSession_pauseNavigation.currentItem = (uint16_t)nextItem;
-		}
-	}
-	if (inputPressed[SLIP_INPUT_SCAN_DOWN]) {
-		inputPressed[SLIP_INPUT_SCAN_DOWN] = false;
-		nextItem = SlipRaceSession_pauseNavigation.down[SlipRaceSession_pauseNavigation.currentItem];
-		if (nextItem >= 0) {
-			SlipRaceSession_pauseNavigation.currentItem = (uint16_t)nextItem;
-		}
-	}
-	if (inputPressed[SLIP_INPUT_SCAN_LEFT]) {
-		inputPressed[SLIP_INPUT_SCAN_LEFT] = false;
-		nextItem = SlipRaceSession_pauseNavigation.left[SlipRaceSession_pauseNavigation.currentItem];
-		if (nextItem >= 0) {
-			SlipRaceSession_pauseNavigation.currentItem = (uint16_t)nextItem;
-		}
-	}
-	if (inputPressed[SLIP_INPUT_SCAN_RIGHT]) {
-		inputPressed[SLIP_INPUT_SCAN_RIGHT] = false;
-		nextItem = SlipRaceSession_pauseNavigation.right[SlipRaceSession_pauseNavigation.currentItem];
-		if (nextItem >= 0) {
-			SlipRaceSession_pauseNavigation.currentItem = (uint16_t)nextItem;
-		}
-	}
-	SlipRaceSession_menuMouseX +=
-	    (((int32_t)SlipRaceSession_pauseNavigation.centers[SlipRaceSession_pauseNavigation.currentItem][0]
-	      << SLIP_RACE_PAUSE_COORDINATE_FRACTION_BITS) -
-	     SlipRaceSession_menuMouseX) >>
-	    1;
-	SlipRaceSession_menuMouseY +=
-	    (((int32_t)SlipRaceSession_pauseNavigation.centers[SlipRaceSession_pauseNavigation.currentItem][1]
-	      << SLIP_RACE_PAUSE_COORDINATE_FRACTION_BITS) -
-	     SlipRaceSession_menuMouseY) >>
-	    1;
-}
-
 static uint32_t SlipRaceSession_HitTestPauseMenu(int mouseX, int mouseY) {
 	size_t optionIndex;
 
@@ -2346,7 +2289,6 @@ static uint32_t SlipRaceSession_HitTestPauseMenu(int mouseX, int mouseY) {
 
 static SlipRacePauseAction SlipRaceSession_UpdatePauseMenu(bool inputPressed[SLIP_INPUT_CODE_COUNT], int mouseX,
                                                            int mouseY) {
-	const bool wasRunning = SlipRaceSession_pauseState == SLIP_RACE_PAUSE_RUNNING;
 	if ((SlipRace_controls.actions & SLIP_ACTION_PAUSE) != 0) {
 		if (SlipRaceSession_pauseState != SLIP_RACE_PAUSE_REMOTE) {
 			if (SlipRaceSession_pauseState == SLIP_RACE_PAUSE_RUNNING) {
@@ -2355,14 +2297,17 @@ static SlipRacePauseAction SlipRaceSession_UpdatePauseMenu(bool inputPressed[SLI
 					SlipRaceSession_pauseState = SLIP_RACE_PAUSE_REMOTE;
 				} else {
 					SlipRaceSession_pauseState = SLIP_RACE_PAUSE_LOCAL;
+					SlipInput_SetNavigation(&SlipRaceSession_pauseNavigation);
 				}
 			} else {
 				SlipRaceSession_pauseState = SLIP_RACE_PAUSE_RUNNING;
+				SlipInput_ClearNavigation();
 			}
 		}
 	} else if ((SlipRacePlayer_thirdControls.actions & SLIP_ACTION_PAUSE) != 0) {
 		if (SlipRaceSession_pauseState == SLIP_RACE_PAUSE_REMOTE) {
 			SlipRaceSession_pauseState = SLIP_RACE_PAUSE_RUNNING;
+			SlipInput_ClearNavigation();
 		} else if (SlipRaceSession_pauseState != SLIP_RACE_PAUSE_LOCAL) {
 			SlipRaceSession_pauseState = SLIP_RACE_PAUSE_REMOTE;
 		}
@@ -2404,31 +2349,17 @@ static SlipRacePauseAction SlipRaceSession_UpdatePauseMenu(bool inputPressed[SLI
 		}
 	}
 	SlipRaceSession_TickCameraTimers();
-	if (wasRunning && SlipRaceSession_pauseState == SLIP_RACE_PAUSE_LOCAL) {
-		/* A press left over from entering the race must not activate a pause option. */
-		inputPressed[SLIP_INPUT_SCAN_ENTER] = false;
-		inputPressed[SLIP_INPUT_MOUSE_LEFT] = false;
-		SlipRaceSession_pauseNavigation.currentItem = 0;
-		SlipRaceSession_menuMouseX = (int32_t)SlipRaceSession_pauseNavigation.centers[0][0]
-		                             << SLIP_RACE_PAUSE_COORDINATE_FRACTION_BITS;
-		SlipRaceSession_menuMouseY = (int32_t)SlipRaceSession_pauseNavigation.centers[0][1]
-		                             << SLIP_RACE_PAUSE_COORDINATE_FRACTION_BITS;
-		SlipRaceSession_pauseSelection = 1;
-		return SLIP_RACE_PAUSE_ACTION_NONE;
-	}
 	if (SlipRaceSession_pauseState != SLIP_RACE_PAUSE_LOCAL) {
 		return SLIP_RACE_PAUSE_ACTION_NONE;
 	}
 
-	if (mouseX >= 0 && mouseY >= 0) {
-		SlipRaceSession_menuMouseX = mouseX * SLIP_RACE_PAUSE_COORDINATE_ONE;
-		SlipRaceSession_menuMouseY = mouseY * SLIP_RACE_PAUSE_COORDINATE_ONE;
-	} else {
-		SlipRaceSession_MenuNavPoll(inputPressed);
+	if (mouseX < 0 || mouseY < 0) {
+		SlipInput_UpdateNavigation(inputPressed);
+		const SlipInputPointerPosition pointer = SlipInput_Pointer();
+		mouseX = pointer.x;
+		mouseY = pointer.y;
 	}
-	SlipRaceSession_pauseSelection =
-	    SlipRaceSession_HitTestPauseMenu(SlipRaceSession_menuMouseX >> SLIP_RACE_PAUSE_COORDINATE_FRACTION_BITS,
-	                                     SlipRaceSession_menuMouseY >> SLIP_RACE_PAUSE_COORDINATE_FRACTION_BITS);
+	SlipRaceSession_pauseSelection = SlipRaceSession_HitTestPauseMenu(mouseX, mouseY);
 	if (SlipRaceSession_pauseSelection == 0) {
 		return SLIP_RACE_PAUSE_ACTION_NONE;
 	}
@@ -2449,6 +2380,7 @@ void SlipRaceSession_ConfigurationReturn(void) {
 	SlipMenuMusic_RaceConfigurationReturn();
 
 	SlipRaceHud_ResetConsole(&SlipRaceSession_hudState);
+	SlipInput_SetNavigation(&SlipRaceSession_pauseNavigation);
 	SlipRaceSession_pauseSelection = 0;
 }
 
@@ -2832,8 +2764,6 @@ void SlipRaceSession_Begin(const char *resPath, uint16_t axTrack, SlipRaceRacerT
 	SlipRaceSession_playerReady = false;
 	SlipRaceSession_pauseState = SLIP_RACE_PAUSE_RUNNING;
 	SlipRaceSession_pauseSelection = 0;
-	SlipRaceSession_menuMouseX = 0;
-	SlipRaceSession_menuMouseY = 0;
 	memset(&SlipRaceSession_hudState, 0, sizeof(SlipRaceSession_hudState));
 
 	SlipRaceSession_textureMode = textures == SLIP_CONFIG_TEXTURE_FINE ? SLIP_RENDER_TEXTURE_MASKING_ENABLED
