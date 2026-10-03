@@ -358,7 +358,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 	SlipRandom_SetState(1u, 1u);
 	SlipRace_BuildRacerTable(&SlipRace_racerTable, 1u, verifySplit ? 2u : 0u);
 	if (verifyLapRun) {
-
 		SlipConfig_mode = -1;
 		SlipConfig_damageOverride = -1;
 		SlipRace_type = SLIP_RACE_TYPE_SINGLE;
@@ -379,7 +378,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 	}
 	HmiDigitalDriver aiHitAudioDriver;
 	if (verifyAiHitAudio || verifyWeaponCamera) {
-
 		HmiDigitalDriver_Reset(&aiHitAudioDriver, SLIP_DEBUG_DIGITAL_DRIVER_VERSION);
 		SlipGameSound_Reset(&musicGame, &aiHitAudioDriver);
 		musicGame.initialized = 1;
@@ -859,7 +857,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 				printf(" %d", door->matrix.m[word]);
 			putchar('\n');
 			if (verifyDoorShapes) {
-
 				SlipShape3DDoorTemplate shape = SlipShape3D_doorTemplate;
 				int32_t width = door->halfWidth;
 				int32_t height = door->halfHeight;
@@ -896,7 +893,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		return 0;
 	}
 	if (capturedFrancePostframe) {
-
 		const uint32_t cameraPosition[3] = {4938620, 1100346, 3804751};
 		const uint32_t playerPosition[3] = {4939866, 1094620, 3861794};
 		const uint16_t matrix[9] = {16380, 0, (uint16_t)-358, 0, 16384, 30, 358, (uint16_t)-31, 16380};
@@ -920,7 +916,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		(void)SlipDebug_RunRaceFixtureFrame(28u, bindings, inputHeld1, inputPressed, false, 0u, -1, -1);
 	}
 	if (verifyRefuelRepair) {
-
 		const uint32_t refuelPosition[3] = {0x004a0c80, 0x000e1680, 0x0009fdc0};
 		const uint16_t identity[9] = {0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000};
 		if (!SlipRaceSession_DebugRenderCapturedState(refuelPosition, identity, refuelPosition, identity))
@@ -946,7 +941,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		return 0;
 	}
 	if (verifyFinishDelay) {
-
 		SlipRace_racerTable.records[0].destroyed = 1;
 		for (uint32_t frame = 1; frame <= 1000; ++frame) {
 			const SlipRaceFrameResult result =
@@ -963,7 +957,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		return 4;
 	}
 	if (verifyFinish) {
-
 		SlipRace_playerOneFinished = 1;
 		SlipRace_playerTwoFinished = 1;
 		SlipRace_playerOneFinishDelay = 0;
@@ -1166,7 +1159,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		memcpy(g_displayFramebuffer, capture, sizeof(capture));
 	}
 	if (verifyFatalDamage) {
-
 		SlipConfig_damageOverride = -1;
 		uint16_t players[] = {SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject};
 		uint32_t tick = 70;
@@ -1285,7 +1277,6 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		puts("debris_caller player_damage=3 quota_remaining=1");
 		for (unsigned i = 0; i < 2; ++i) {
 			if (i == 1) {
-
 				drones[1] = UINT16_MAX;
 				for (unsigned frame = 0; frame < 800 && drones[1] == UINT16_MAX; ++frame) {
 					tick += 14;
@@ -1979,7 +1970,6 @@ static void SlipDebug_PresenterFrame(void *context) {
 	SlipVgaDac_Commit();
 	SlipVgaDac_RefreshArgbPalette(g_palette);
 	if (campaignStream) {
-
 		if (presenterFrames == 1)
 			SlipRandom_SetState(1, 1);
 		if (SlipPresenter_state.active)
@@ -2337,7 +2327,6 @@ static int SlipDebug_VerifyBeamRender(const char *archive, const char *mathArchi
 
 static int SlipDebug_VerifySectionSearch(const char *inputPath, const char *outputPath, bool segmentQueries,
                                          bool refuelQueries) {
-
 	FILE *input = fopen(inputPath, "rb"), *output = fopen(outputPath, "wb");
 	uint32_t header[5];
 	if (!input || !output || fread(header, sizeof(header), 1, input) != 1)
@@ -2455,7 +2444,6 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		return 0;
 	}
 	if (argc == 4 && strcmp(argv[1], "--verify-artic-attachment") == 0) {
-
 		FILE *const output = fopen(argv[3], "wb");
 		if (!output)
 			return 2;

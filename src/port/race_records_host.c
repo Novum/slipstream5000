@@ -203,7 +203,6 @@ void SlipLapRecordsHost_DrawRow(void *context, SlipLapRecordsScreen *screen, uin
 	SlipTextPosition position = {0, SLIP_LAP_RECORDS_ROW_NAME_Y};
 	SlipText_Draw(&SlipText_state, record->name, NULL, &position);
 	if (screen->input.cursorVisible != 0 && record->editing != 0) {
-
 		const char character = record->name[screen->input.cursor];
 		record->name[screen->input.cursor] = '\0';
 		const uint16_t prefixWidth = SlipFont_MeasureResource(screen->rowFont, record->name, &recordFontCalls);
@@ -297,7 +296,6 @@ static void SlipLapRecordsHost_FramePanel(void *context, SlipInputRectangle rect
 }
 
 static void SlipLapRecordsHost_FrameDissolve(void *context, uint16_t resource, int16_t x, uint16_t level) {
-
 	SlipSprite *const sprite = SlipResourceHost_LockGeneratedSprite(context, resource);
 	SlipSprite_DrawDissolve(sprite, g_screenBufferBase, g_screenPitch, x, sprite->y, level);
 	SlipResourceHost_Unlock(context, resource);

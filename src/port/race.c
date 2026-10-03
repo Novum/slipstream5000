@@ -505,7 +505,6 @@ void SlipRace_ReadControls(const SlipRaceControlBinding *binding, const bool inp
 		controls->pitch = axes.pitch;
 	} else if (binding->movementControl == SLIP_MOVEMENT_JOYSTICK_ONE ||
 	           binding->movementControl == SLIP_MOVEMENT_JOYSTICK_TWO) {
-
 		const SlipJoystickAxesExit exit =
 		    SlipJoystick_ReadAxes(binding->movementControl - SLIP_MOVEMENT_JOYSTICK_ONE, JOYSTICK_DEAD_ZONE,
 		                          &controls->steering, &controls->pitch);

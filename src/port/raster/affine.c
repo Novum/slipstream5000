@@ -174,7 +174,6 @@ void Raster_DrawOpaqueAffine(RasterAffineDrawState *state, RasterOpaqueAffineSta
 		(void)Raster_StepAffineRight(&state->right, state->begin, state->end, scanline, bottom);
 		Raster_DrawOpaqueAffineRun(state, opaque, scanline, screenRows, calls);
 		for (;;) {
-
 			if (Raster_AdvanceOpaqueAffine(state, opaque, &scanline))
 				break;
 			if (scanline >= bottom) {
@@ -241,7 +240,6 @@ void Raster_DrawOpaqueAffine(RasterAffineDrawState *state, RasterOpaqueAffineSta
 					break;
 				Raster_DrawOpaqueAffineRun(state, opaque, scanline, screenRows, calls);
 				if ((opaque->extensions & RASTER_SPAN_EXTENDS_LEFT) != 0) {
-
 					for (int32_t pixel = 0; pixel < opaque->extensionLength; ++pixel)
 						opaque->extensionDestination[pixel] = opaque->extensionSource[pixel];
 				}

@@ -67,7 +67,6 @@ uint32_t SlipRaceResults_HitTest(int16_t x, int16_t y) {
 }
 
 SlipRaceResultsAction SlipRaceResults_ReadInput(uint32_t hoveredButton, bool pressed[SLIP_INPUT_CODE_COUNT]) {
-
 	if (pressed[SLIP_INPUT_SCAN_ESCAPE]) {
 		pressed[SLIP_INPUT_SCAN_ESCAPE] = false;
 		return SLIP_RESULTS_CONTINUE;
@@ -107,7 +106,6 @@ void SlipRaceResults_DrawFrame(const SlipRaceRacerTable *racers, const SlipSprit
                                const SlipSprite *inactive, const SlipFont *computerFont, const SlipFont *localFont,
                                const char *const buttonLabels[SLIP_RACE_RESULTS_BUTTON_COUNT], const char *title,
                                uint32_t hoveredButton, uint8_t *framebuffer, int pitch) {
-
 	Raster_SetClipRect(0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 	SlipSprite_DrawClipped(background, framebuffer, pitch, 0, 0);
 

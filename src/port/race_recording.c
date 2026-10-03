@@ -47,7 +47,6 @@ SlipRaceRacerTable *SlipRaceRecording_PrepareRace(SlipRaceRecordingStart *start,
                                                   SlipRaceRacerTable *racers, SlipRaceRecording *recording,
                                                   const SlipRaceRecordingHost *host) {
 	if (!replay) {
-
 		if (recording != NULL)
 			SlipRaceRecording_Reset(recording);
 

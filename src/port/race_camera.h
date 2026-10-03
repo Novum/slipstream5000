@@ -36,7 +36,6 @@ enum {
 };
 
 typedef struct SlipRaceCameraState {
-
 	uint16_t viewOneMode;
 	uint16_t viewTwoMode;
 

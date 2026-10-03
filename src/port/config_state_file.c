@@ -114,7 +114,6 @@ static const ConfigWordBinding words[] = {
 };
 
 static void SlipConfigFile_ImportImage(void) {
-
 	for (unsigned track = 0; track < SLIP_RACE_TRACK_COUNT; ++track) {
 		for (unsigned position = 0; position < SLIP_LAP_RECORDS_ROW_COUNT; ++position) {
 			const unsigned offset = SLIP_CONFIG_OFFSET_LAP_RECORDS + track * SLIP_CONFIG_LAP_TRACK_BYTES +

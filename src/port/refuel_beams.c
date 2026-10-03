@@ -5,7 +5,6 @@ void SlipRefuel_BuildBeams(SlipRefuelBeamState *state, uint32_t section, uint16_
                            const SlipTrackDrawRecord *drawRecords, uint32_t drawRecordsAddress,
                            const SlipView3DMaths *maths, uint32_t incomingX, uint32_t incomingY,
                            const SlipRefuelBeamCalls *calls) {
-
 	enum {
 		SLIP_REFUEL_SLOT_EMITS_BEAMS = 4u,
 		SLIP_REFUEL_BEAMS_PER_SLOT = 8,

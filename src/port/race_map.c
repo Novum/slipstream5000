@@ -205,7 +205,6 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 					points[0] = &transformedPosition;
 					points[1] = &transformedLinkedPosition;
 					if (SlipDraw3D_ClassifyPoints(points, 2, projection.projectState) >= 0) {
-
 						(void)SlipRenderer_DrawLine(&SlipRendererHost_state, transformedPosition,
 						                            transformedLinkedPosition, routeColor, &SlipRendererHost_lineCalls,
 						                            &SlipRendererHost_flatRasterCalls);
@@ -221,7 +220,6 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 					points[0] = &transformedPosition;
 					points[1] = &transformedLinkedPosition;
 					if (SlipDraw3D_ClassifyPoints(points, 2, projection.projectState) >= 0) {
-
 						(void)SlipRenderer_DrawLine(&SlipRendererHost_state, transformedPosition,
 						                            transformedLinkedPosition, routeColor, &SlipRendererHost_lineCalls,
 						                            &SlipRendererHost_flatRasterCalls);

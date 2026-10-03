@@ -477,7 +477,6 @@ void SlipRaceCamera_DestroyRacer(SlipRaceCameraState *state, uint16_t racerObjec
 		return;
 	}
 	if (racerObject == playerOneObject) {
-
 		state->viewOneZoomDistance = SLIP_RACE_CAMERA_DESTROYED_DISTANCE;
 		state->viewOneMode = SLIP_RACE_CAMERA_MODE_DESTROYED;
 		state->lapNotificationTimer[0] = 0;
@@ -658,7 +657,6 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 		}
 
 		if ((primitive[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_CAMERA_RAY_SKIP_MASK) == 0) {
-
 			const int32_t normalDirectionDot =
 			    (int32_t)SlipBytes_ReadLEI16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET) * dirX +
 			    (int32_t)SlipBytes_ReadLEI16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET) * dirY +
@@ -687,7 +685,6 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 				continue;
 			}
 			{
-
 				const int32_t planePointDeltaX = queryRelativeToComponent.x - (int32_t)pointLookup.pointXOrInput;
 				const int32_t planePointDeltaY = queryRelativeToComponent.y - (int32_t)pointLookup.pointYOrInput;
 				const int32_t planePointDeltaZ =
@@ -735,7 +732,6 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 					continue;
 				}
 			} else {
-
 				clearanceDistance = (uint32_t)(planeDistance - SLIP_RACE_CAMERA_PLANE_STANDOFF);
 			}
 
@@ -776,10 +772,8 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 				continue;
 			}
 			if (!nearPlane) {
-
 				*minimumClearance = (int32_t)clearanceDistance;
 			} else {
-
 				uint32_t nearPlaneCorrectionDistance;
 				const uint64_t nearPlaneDividend = (uint64_t)(uint32_t)(-(int32_t)clearanceDistance)
 				                                   << SLIP_RACE_CAMERA_RAY_NUMERATOR_SHIFT;

@@ -1578,7 +1578,6 @@ static bool SlipTrackWorld_TraverseRawBspNode(const uint8_t *bspBase, size_t bsp
 		return false;
 	}
 	if (carry) {
-
 		negativeChild = SlipBytes_ReadLE32(node + SLIP_TRACK_BSP_CHILD_0_OFFSET);
 		if (negativeChild != 0 &&
 		    !SlipTrackWorld_TraverseRawBspNode(bspBase, bspBytesRemaining, negativeChild, classify, callback, userData,
@@ -2907,7 +2906,6 @@ bool SlipObject_SlotAllocate(SlipObjectSlotAllocate *result) {
 		++object;
 	}
 	if (i >= remaining) {
-
 		result->exhausted = true;
 		SlipRuntime_error = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
 		result->errorCode = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
@@ -4780,7 +4778,6 @@ bool SlipTrackWorld_ClipRefuelBeam(const uint8_t *trackData, size_t trackDataSiz
                                    const uint8_t *components, size_t componentBytes, const uint8_t *searchTable,
                                    size_t searchTableBytes, SlipView3DVec32 start, SlipView3DVec32 end,
                                    SlipView3DVec32 *clippedEnd) {
-
 	SlipTrackWorldRecordSearch search;
 	SlipView3DNormalizeVector3D direction;
 	uint32_t startSection;
@@ -5601,7 +5598,6 @@ bool SlipTrackWorld_PreFrameBuild(SlipTrackBeamState *beams, const uint8_t *trac
 		record->continuation = UINT32_MAX;
 		bool complete = false;
 		for (;;) {
-
 			record->section = section;
 			record->material = request->material;
 			record->midpoint = (SlipView3DVec32){(int32_t)((uint32_t)start.x + (uint32_t)end.x) >> 1,
@@ -5746,7 +5742,6 @@ bool SlipTrackWorld_PreFrameBuild(SlipTrackBeamState *beams, const uint8_t *trac
 				break;
 		}
 		if (complete) {
-
 			record->material = request->material;
 			record->end = end;
 			record->continuation = 0;
@@ -6950,7 +6945,6 @@ bool SlipTrackWorld_AllocSlotDrawRecord(uint8_t *slotDrawBase, size_t slotDrawBy
 	                                        .slotListEntryAddress = slotListEntryAddress,
 	                                        .ret = allocatedAddress != freeListAddress};
 	if (allocatedAddress == freeListAddress) {
-
 		SlipRuntime_Fatal("SlotDrawAlloc - out of SlotDraw records");
 	}
 	if (!SlipTrackWorld_DosAddressToOffset(allocatedAddress, slotDrawBaseAddress, slotDrawBytes, &allocatedOffset) ||
@@ -8987,7 +8981,6 @@ bool SlipTrackWorld_ListSetup(uint8_t *objectList, size_t objectListBytes, uint3
 	                                    {0},
 	                                    SLIP_TRACK_WORLD_LIST_SETUP_BRANCH_INITIALIZED};
 	if (frameRenderFlags == UINT32_MAX) {
-
 		result->primaryLeft = viewportMinX;
 		result->primaryTop = viewportMinY;
 		result->primaryRight = viewportMaxX;
@@ -11388,7 +11381,6 @@ bool SlipTrackWorld_DeferredItemDirect(
 	}
 	result->enabledComponentDrawMask = (uint16_t)(result->componentDrawMask & renderContextIndex);
 	if (result->enabledComponentDrawMask != 0) {
-
 		uint32_t incomingValue = result->callDisableDepthFade ? 0 : x;
 		incomingValue = (incomingValue & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | result->enabledComponentDrawMask;
 		if (!SlipTrackWorld_ComponentSetup(record, recordBytesRemaining, incomingValue, z, drawFlags, textureMode,
@@ -11498,7 +11490,6 @@ bool SlipTrackWorld_DeferredItemDirect(
 					free(directVisits);
 				}
 			} else if (callbackFunction != 0) {
-
 				SlipTrackWorldDirectCallbackEnvironment inlineEnvironment = {
 				    &componentSetup, &componentTail, &primitiveWalker, {(int32_t)x, (int32_t)y, (int32_t)z}, true};
 				uint32_t inlineCallbackValue = scaledLightX;
@@ -12893,7 +12884,6 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 		return false;
 	}
 	if (slot->doorAddress != 0) {
-
 		const uint32_t doorOffset = slot->doorAddress - SLIP_TRACK_DOOR_TABLE_DOS_TOKEN;
 		if (doorOffset % SLIP_TRACK_DOOR_RECORD_BYTES != 0 ||
 		    doorOffset / SLIP_TRACK_DOOR_RECORD_BYTES >= SLIP_TRACK_DOOR_CAPACITY)
@@ -12928,7 +12918,6 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 	}
 	do {
 		if (slot->flags == SLIP_TRACK_SLOT_POINT_COLLISION) {
-
 			firstRecord = slot->currentTrackRecordAddress;
 			break;
 		}
@@ -13003,9 +12992,7 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 	} while (false);
 
 	if (firstRecord == 0) {
-
 		if (entryRegisters == NULL) {
-
 			return false;
 		}
 		const uint32_t slotAddress = slotListBaseAddress + (uint32_t)(inputSlot - slotListBase);
@@ -14400,7 +14387,6 @@ uint32_t SlipTrackWorld_DoorEvent(uint32_t eventCode, uint16_t objectOffset, uin
 		return 0;
 	}
 	case SLIP_OBJECT_EVENT_UPDATE: {
-
 		if (SlipRaceCollision_Query(objectOffset)) {
 			door->speed = SLIP_DOOR_DEFAULT_SPEED;
 			door->direction = 0;
@@ -14437,7 +14423,6 @@ uint32_t SlipTrackWorld_DoorEvent(uint32_t eventCode, uint16_t objectOffset, uin
 		if (!SlipTrackWorld_MoveDoor(door, objectOffset, objects, objectBytes))
 			return UINT32_MAX;
 		if (reached) {
-
 			door->direction ^= UINT32_MAX;
 			door->speed = SLIP_DOOR_DEFAULT_SPEED;
 			door->endpointDelayRemaining = door->endpointDelay;

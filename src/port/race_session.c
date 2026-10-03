@@ -853,7 +853,6 @@ void SlipRaceSession_FireMiniMines(uint16_t shooter, uint16_t target) {
 	    .transform = SlipRaceSession_MiniMinesTransform};
 	SlipGuidedProjectileMiniMinesContinuation continuation = SlipGuidedProjectile_FireMiniMines(shooter, &calls);
 	if (continuation.displacedStack) {
-
 		fprintf(stderr,
 		        "Unimplemented DOS execution at 5d59f: unmatched POP EDX before POPAD; "
 		        "remaining iterations %u, offset-table byte offset %u. "
@@ -1206,7 +1205,6 @@ static void SlipRaceSession_ShutdownTrackDraw(void) {
 }
 
 static void SlipRaceSession_ShutdownWorld(void) {
-
 	SlipRaceMap_Reset();
 	SlipTrackAssets_FreeBundle(&SlipRaceSession_trackBundle, TrackView_ReleaseResource,
 	                           &SlipRaceSession_resourceRegistry);
@@ -1612,7 +1610,6 @@ static uint32_t SlipRaceSession_RemoveObjectTrackSlot(uint32_t eventCode, uint32
 }
 
 static void SlipRaceSession_UpdateProgress(void) {
-
 	static const uint32_t lapPositionSpeech[] = {0, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74};
 	static const uint32_t finishingDriverSpeech[] = {74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84};
 	SlipRaceRacerState *const racerTable = SlipRaceSession_racerStates;
@@ -1765,7 +1762,6 @@ static void SlipRaceSession_UpdateProgress(void) {
 			}
 		}
 		if (candidate == NULL) {
-
 			SlipRuntime_Fatal("ERROR: An unforseen problem has been encountered - please restart Slipstream.");
 		}
 		candidate->racePosition = position;
@@ -1843,7 +1839,6 @@ static void SlipRaceSession_DrawCockpitSight(uint16_t craftObject) {
 	targetObject = playerState->targetObject;
 	if (selectedWeapon < SLIP_RACE_WEAPON_COUNT &&
 	    SlipRacePlayer_WeaponTargetRange(SlipRacePlayer_records, selectedWeapon) != 0) {
-
 		SlipRaceHud_DrawNormalSight(&SlipRaceSession_hudAssets, g_framebuffer, SLIPSTREAM_SCREEN_WIDTH,
 		                            SlipRendererHost_state.projection.centerX,
 		                            SlipRendererHost_state.projection.centerY);
@@ -1969,7 +1964,6 @@ static void SlipRaceSession_DrawTurboIndicator(uint16_t turboActive, uint16_t ch
 	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, SLIP_RACE_HUD_TURBO_LABEL_LEFT,
 	                  SLIP_RACE_HUD_INDICATOR_LABEL_RIGHT);
 	if (splitScreen) {
-
 		y = SlipRendererHost_state.projection.maxY + 1 +
 		    (consoleMode == SLIP_RACE_HUD_CONSOLE_FULL ? SLIP_RACE_HUD_SPLIT_FULL_CONSOLE_LABEL_OFFSET_Y : 0);
 		SlipRaceSession_DrawChargeBar(SLIP_RACE_HUD_CHARGE_BAR_LEFT, y + SLIP_RACE_HUD_SPLIT_CHARGE_BAR_TOP_OFFSET_Y,
@@ -2007,7 +2001,6 @@ static void SlipRaceSession_DrawWeaponIndicator(uint32_t selectedWeapon, uint32_
 	                  SLIP_RACE_HUD_INDICATOR_LABEL_RIGHT);
 	SlipRacePlayer_BuildWeaponLabel(SlipRacePlayer_records, selectedWeapon, ammo, weaponLabel);
 	if (splitScreen) {
-
 		y = SlipRendererHost_state.projection.maxY + 1 +
 		    (consoleMode == SLIP_RACE_HUD_CONSOLE_FULL ? SLIP_RACE_HUD_SPLIT_FULL_CONSOLE_LABEL_OFFSET_Y : 0);
 		if (ammo == UINT32_MAX)
@@ -2072,7 +2065,6 @@ static void SlipRaceSession_DrawPlayerIndicators(int consoleMode, uint16_t craft
 	damageBarBottom = consoleMode == SLIP_RACE_HUD_CONSOLE_FULL ? SLIP_RACE_HUD_DAMAGE_BAR_FULL_BOTTOM
 	                                                            : SLIP_RACE_HUD_DAMAGE_BAR_COMPACT_BOTTOM;
 	if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN) {
-
 		damageBarTop = (int)consoleY + SLIP_RACE_HUD_SPLIT_DAMAGE_BAR_OFFSET_Y;
 		damageBarBottom = damageBarTop + SLIP_RACE_HUD_BAR_BORDER_HEIGHT;
 	}
@@ -2085,7 +2077,6 @@ static void SlipRaceSession_DrawPlayerIndicators(int consoleMode, uint16_t craft
 
 	if ((privateState->powerupSpeedTimer != 0 || privateState->powerupActive != 0) &&
 	    SlipRaceSession_hudAssets.turboLoaded) {
-
 		SlipRaceHud_DrawSpriteResource(
 		    SlipRaceSession_hudAssets.turboSprite, g_framebuffer, SLIPSTREAM_SCREEN_WIDTH,
 		    SlipRendererHost_state.projection.minX + SLIP_RACE_HUD_TURBO_SPRITE_X_OFFSET,
@@ -2313,7 +2304,6 @@ static SlipRacePauseAction SlipRaceSession_UpdatePauseMenu(bool inputPressed[SLI
 		if (!SlipRaceSession_replay) {
 			SlipRaceRecording_Write(&SlipRaceRecording_state, controls);
 		} else {
-
 			bool ended = SlipRaceRecording_Read(&SlipRaceRecording_state, &SlipRaceRecording_state.host, controls);
 			SlipRace_controls = controls[0];
 			if (ended)
@@ -2367,7 +2357,6 @@ static SlipRacePauseAction SlipRaceSession_UpdatePauseMenu(bool inputPressed[SLI
 bool SlipRaceSession_IsPaused(void) { return SlipRaceSession_pauseState != SLIP_RACE_PAUSE_RUNNING; }
 
 void SlipRaceSession_ConfigurationReturn(void) {
-
 	SlipMenuMusic_RaceConfigurationReturn();
 
 	SlipRaceHud_ResetConsole(&SlipRaceSession_hudState);
@@ -2506,7 +2495,6 @@ static bool SlipRaceSession_LoadWorld(uint16_t axTrack, const char *const *archi
 }
 
 static void SlipRaceSession_LoadEffectSprites(void) {
-
 	for (unsigned frame = 0; frame < SLIP_RACE_EXPLOSION_FRAME_COUNT; ++frame) {
 		char name[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 		uint32_t handle;
@@ -2572,7 +2560,6 @@ static void SlipRaceSession_LoadEffectSprites(void) {
 }
 
 static void SlipRaceSession_SetEnvironmentDetail(uint32_t environmentDetail) {
-
 	SlipRaceSession_renderMode = environmentDetail;
 	SlipMaterialHost_residency.frame = environmentDetail;
 
@@ -2899,7 +2886,6 @@ void SlipRaceSession_Begin(const char *resPath, uint16_t axTrack, SlipRaceRacerT
 	SlipRaceSession_LoadWeaponShapes();
 	if (!SlipRaceDrone_Initialize(archives, archiveCount, &SlipRaceSession_resourceRegistry,
 	                              &SlipRaceSession_droneArtPayload, &SlipRaceSession_droneArtHandle)) {
-
 		SlipRuntime_Fatal("ERROR: An internal error has occurred. Please restart Slipstream.");
 	}
 
@@ -3793,7 +3779,6 @@ bool SlipRaceSession_DebugRenderCapturedState(const uint32_t cameraPosition[3], 
 }
 
 static void SlipRaceSession_DrawView(uint16_t view, uint32_t windowSize, const bool inputHeld[SLIP_INPUT_CODE_COUNT]) {
-
 	const uint16_t viewCraftObject = view == 1 ? SlipRacePlayer_playerOneObject : SlipRacePlayer_playerTwoObject;
 
 	(void)SlipRaceCamera_MainViewport(view, SlipRace_gameMode, windowSize, SlipRaceSession_cameraState.shake[0],
@@ -3965,7 +3950,6 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 	if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN)
 		SlipRaceSession_DrawView(2u, windowSize, inputHeld);
 	if (SlipRaceSession_playerReady) {
-
 		if (SlipRace_gameMode != SLIP_RACE_GAME_SPLIT_SCREEN && SlipConfig_TrackMapEnabled() != 0 &&
 		    SlipRacePlayer_track > 0 && SlipRacePlayer_track <= SLIP_RACE_TRACK_COUNT) {
 			const uint32_t center = SlipRaceSession_mapCenters[SlipRacePlayer_track];
@@ -4032,7 +4016,6 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 		}
 
 		if (drawPlayerIndicators) {
-
 			(void)SlipRaceCamera_MainViewport(1u, SlipRace_gameMode, windowSize, SlipRaceSession_cameraState.shake[0],
 			                                  SlipRaceSession_cameraState.shake[1], &SlipRendererHost_state.projection);
 		}
@@ -4168,7 +4151,6 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 		}
 
 		if (!finishDelayExpired) {
-
 			{
 				const SlipRaceRacerState *const musicRacer = SlipRacePlayer_RacerState(SlipRacePlayer_playerOneObject);
 				uint32_t position = 0;
@@ -4231,7 +4213,6 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 
 		for (racerIndex = 0; racerIndex < SLIP_RACE_RACER_COUNT; ++racerIndex) {
 			if (SlipRaceSession_racerArtHandles[racerIndex] != 0) {
-
 				SlipActor_ReleaseResources(SlipRaceSession_racerArtHandles[racerIndex], &SlipActorHost_resourceCalls);
 				SlipResourceHost_Release(NULL, SlipRaceSession_racerArtHandles[racerIndex]);
 				SlipRaceSession_racerArtPayload[racerIndex] = (SlipResourcePayload){0};

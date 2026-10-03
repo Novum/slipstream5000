@@ -191,7 +191,6 @@ bool SlipResourceHost_LoadSequence(void *context, const char *pattern, uint32_t 
 		filename[length++] = *pattern;
 	} while (*pattern++ != '\0');
 	do {
-
 		static const uint16_t divisors[] = {1, 10, 100, 1000};
 		uint16_t value = (uint16_t)first;
 		for (uint16_t digit = 0; digit < digits; ++digit) {
@@ -327,7 +326,6 @@ uint16_t SlipResourceHost_ModifyReturnedSI(SlipResourceModifyResult result) {
 
 void SlipResourceHost_ReportModifyContinuation(uint32_t callerReturn, uint32_t continuationAddress,
                                                const void *continuationBytes, SlipResourceModifyResult result) {
-
 	fprintf(stderr,
 	        "Unimplemented DOS execution: 249a0 displaced RET, saved EDI DOS offset/tag=0x%08x "
 	        "(host bytes %p), normal return 0x%08x remains on stack, ESP delta -4, CF=1; "

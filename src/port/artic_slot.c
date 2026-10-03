@@ -1003,7 +1003,6 @@ bool SlipArticSlot_WorldPosition(uint32_t partTag, uint32_t pointTag, uint16_t o
 		return false;
 	}
 	if (selectedPartResult.selectionFailed) {
-
 		result->lookupFailed = true;
 		return true;
 	}
@@ -1025,7 +1024,6 @@ bool SlipArticSlot_WorldPosition(uint32_t partTag, uint32_t pointTag, uint16_t o
 		--remaining;
 	}
 	if (remaining == 0) {
-
 		*result = (SlipArticSlotPosition){objectPosition.positionX, objectPosition.positionY, 0, true};
 		return true;
 	}

@@ -30,7 +30,6 @@ typedef enum GameDataToken {
 
 /* Steam's text files use quoted KeyValues strings, braces and // comments. */
 static GameDataToken SlipGameData_ReadToken(const char **cursor, char *text, size_t capacity) {
-
 	const char *p = *cursor;
 	for (;;) {
 		while (isspace((unsigned char)*p))
@@ -72,13 +71,11 @@ static GameDataToken SlipGameData_ReadToken(const char **cursor, char *text, siz
 }
 
 static bool SlipGameData_Join(char *path, size_t capacity, const char *directory, const char *relative) {
-
 	const int length = SDL_snprintf(path, capacity, "%s/%s", directory, relative);
 	return length >= 0 && (size_t)length < capacity;
 }
 
 static bool SlipGameData_FileExists(const char *path) {
-
 	SDL_IOStream *const file = SDL_IOFromFile(path, "rb");
 	if (file == NULL)
 		return false;
@@ -87,12 +84,10 @@ static bool SlipGameData_FileExists(const char *path) {
 }
 
 static bool SlipGameData_FindInDirectory(const char *directory, char *path, size_t capacity) {
-
 	return SlipGameData_Join(path, capacity, directory, resourceFile) && SlipGameData_FileExists(path);
 }
 
 const char *SlipGameData_FindSaved(void) {
-
 	char *const preferenceFile = SlipHostFile_PreferencePath("game-data-path.txt");
 	if (preferenceFile == NULL)
 		return NULL;
@@ -111,7 +106,6 @@ const char *SlipGameData_FindSaved(void) {
 }
 
 static bool SlipGameData_SaveSelectedPath(void) {
-
 	char *const preferenceFile = SlipHostFile_PreferencePath("game-data-path.txt");
 	if (preferenceFile == NULL)
 		return false;
@@ -126,7 +120,6 @@ static bool SlipGameData_SaveSelectedPath(void) {
 }
 
 static bool SlipGameData_TrySteamLibrary(const char *library, char *path, size_t capacity) {
-
 	char manifestPath[GAME_DATA_PATH_CAPACITY];
 	if (!SlipGameData_Join(manifestPath, sizeof(manifestPath), library, steamManifest))
 		return false;
@@ -175,7 +168,6 @@ static bool SlipGameData_TrySteamLibrary(const char *library, char *path, size_t
 }
 
 bool SlipGameData_FindInSteam(const char *steamDirectory, char *path, size_t capacity) {
-
 	if (SlipGameData_TrySteamLibrary(steamDirectory, path, capacity))
 		return true;
 	const char *const configurations[] = {"config/libraryfolders.vdf", "steamapps/libraryfolders.vdf"};
@@ -221,7 +213,6 @@ bool SlipGameData_FindInSteam(const char *steamDirectory, char *path, size_t cap
 #ifdef _WIN32
 static bool SlipGameData_ReadRegistry(HKEY root, const wchar_t *keyPath, const wchar_t *valueName, REGSAM view,
                                       char *path, size_t capacity) {
-
 	HKEY key;
 	if (RegOpenKeyExW(root, keyPath, 0, KEY_QUERY_VALUE | view, &key) != ERROR_SUCCESS)
 		return false;
@@ -238,7 +229,6 @@ static bool SlipGameData_ReadRegistry(HKEY root, const wchar_t *keyPath, const w
 #endif
 
 const char *SlipGameData_FindInstalled(void) {
-
 #ifdef _WIN32
 	char installPath[GAME_DATA_PATH_CAPACITY];
 	if (SlipGameData_ReadRegistry(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath", 0, installPath,
@@ -284,7 +274,6 @@ typedef struct GameDataSelection {
 } GameDataSelection;
 
 static void SDLCALL SlipGameData_FileSelected(void *context, const char *const *files, int filter) {
-
 	(void)filter;
 	GameDataSelection *const selection = context;
 	selection->failed = files == NULL;
@@ -298,7 +287,6 @@ static void SDLCALL SlipGameData_FileSelected(void *context, const char *const *
 }
 
 const char *SlipGameData_SelectFile(SDL_Window *window) {
-
 	static const SDL_DialogFileFilter filters[] = {{"Slipstream 5000 resources", "res;RES"}, {"All files", "*"}};
 	GameDataSelection selection = {0};
 	SDL_ShowOpenFileDialog(SlipGameData_FileSelected, &selection, window, filters, SDL_arraysize(filters), NULL, false);

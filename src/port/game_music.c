@@ -81,7 +81,6 @@ void SlipRaceMusic_ConfigurationReturn(SlipRaceMusicState *race, SlipGameSoundSt
 }
 
 void SlipRaceMusic_Update(SlipRaceMusicState *race, SlipGameSoundState *game, uint32_t delta, uint32_t position) {
-
 	static const uint32_t positionBranches[SLIP_RACE_RACER_COUNT] = {3, 2, 2, 3, 3, 2, 2, 3, 3, 0};
 	if (game->musicCard == 0)
 		return;

@@ -113,7 +113,6 @@ void SlipSprite_DrawDissolve(const SlipSprite *sprite, uint8_t *dst, int dstPitc
 		const uint8_t *const sourceRow = src + (size_t)row * sprite->width;
 		uint8_t *const out = dst + (y + row) * dstPitch + x;
 		for (int col = 0; col < copyWidth; ++col) {
-
 			const uint16_t incremented = (uint16_t)(random + 1u);
 			random = (uint16_t)(incremented >> 1);
 			if ((incremented & 1u) != 0)

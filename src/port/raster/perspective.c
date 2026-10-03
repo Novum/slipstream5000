@@ -236,7 +236,6 @@ void Raster_DrawOpaquePerspective(RasterPerspectiveDrawState *state, RasterOpaqu
 		(void)Raster_StepPerspectiveRight(&state->right, state->begin, state->end, scanline, bottom);
 		Raster_DrawOpaquePerspectiveRun(state, opaque, scanline, screenRows, calls);
 		for (;;) {
-
 			if (Raster_AdvanceOpaquePerspective(state, opaque, &scanline))
 				break;
 			if (scanline >= bottom) {
@@ -304,7 +303,6 @@ void Raster_DrawOpaquePerspective(RasterPerspectiveDrawState *state, RasterOpaqu
 					break;
 				Raster_DrawOpaquePerspectiveRun(state, opaque, scanline, screenRows, calls);
 				if ((opaque->extensionMask & RASTER_SPAN_EXTENDS_LEFT) != 0) {
-
 					for (int32_t pixel = 0; pixel < opaque->extensionLength; ++pixel)
 						opaque->extensionDestination[pixel] = opaque->extensionSource[pixel];
 				}

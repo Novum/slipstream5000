@@ -1,7 +1,6 @@
 #ifndef SLIPSTREAM5000_RACE_DISPLAY_H
 #define SLIPSTREAM5000_RACE_DISPLAY_H
 #include "draw3d.h"
-
 /* Host-only race target; menus and HUD retain their original coordinates. */
 extern bool SlipRaceDisplay_highRes;
 extern bool SlipRaceDisplay_ready;

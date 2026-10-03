@@ -196,7 +196,6 @@ void SlipMenuMusic_Branch(uint32_t selection) {
 }
 
 void SlipMenuMusic_Close(void) {
-
 	if (menuMusic.game == NULL || menuMusic.game->initialized == 0)
 		return;
 	HmiOplOutput_Close(&menuMusic.output);

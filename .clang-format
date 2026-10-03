@@ -5,3 +5,6 @@ UseTab: ForIndentation
 ContinuationIndentWidth: 4
 ColumnLimit: 120
 SeparateDefinitionBlocks: Always
+MaxEmptyLinesToKeep: 1
+KeepEmptyLines:
+  AtStartOfBlock: false

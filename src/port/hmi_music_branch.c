@@ -1,7 +1,6 @@
 #include "hmi_music.h"
 
 void HmiMusic_RestoreBranch(HmiMusicState *state, uint32_t song, uint32_t track, uint32_t branch) {
-
 	uint8_t message[HMI_MIDI_MESSAGE_STORAGE_BYTES] = {0};
 	uint32_t controllerByteOffset;
 	if (state->songs[song][HMI_SONG_RESTORE_PROGRAM_ENABLED_OFFSET] != 0) {

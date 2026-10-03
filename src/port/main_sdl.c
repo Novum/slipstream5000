@@ -81,7 +81,6 @@ static struct {
 } displaySettings = {true, SLIP_OUT_WIDTH, SLIP_OUT_HEIGHT};
 
 static void SlipSdl_LoadDisplaySettings(void) {
-
 	char *const path = SlipHostFile_PreferencePath("display-settings.txt");
 	if (path == NULL)
 		return;
@@ -102,7 +101,6 @@ static void SlipSdl_LoadDisplaySettings(void) {
 }
 
 static void SlipSdl_SaveDisplaySettings(void) {
-
 	char *const path = SlipHostFile_PreferencePath("display-settings.txt");
 	if (path == NULL)
 		return;
@@ -116,7 +114,6 @@ static void SlipSdl_SaveDisplaySettings(void) {
 }
 
 static void SlipSdl_ObserveDisplayEvent(const SDL_Event *event) {
-
 	if (event->type != SDL_EVENT_WINDOW_RESIZED && event->type != SDL_EVENT_WINDOW_ENTER_FULLSCREEN &&
 	    event->type != SDL_EVENT_WINDOW_LEAVE_FULLSCREEN)
 		return;

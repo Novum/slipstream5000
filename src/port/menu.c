@@ -593,7 +593,6 @@ static bool SlipMenu_PageSetup(const char *resPath, MenuPageId pageId) {
 		SlipStringTable_Unlock(g_mainMenuStrings, &menuStringResources);
 	}
 	if (pageId == MENU_PAGE_TWO_PLAYER) {
-
 		uint16_t blocker;
 		if (!SlipResourceHost_Load(NULL, "CNFBLOCK.SPR", &blocker))
 			SlipGame_ResourceFailure();
@@ -699,7 +698,6 @@ typedef struct VehicleArtActor VehicleArtActor;
 typedef struct VehicleArtSlot VehicleArtSlot;
 
 static uint16_t SlipMenu_TrackSelectResourceTrack(uint16_t menuTrackOneBased) {
-
 	if (menuTrackOneBased == 0 || menuTrackOneBased > kDriverCount) {
 		return 0;
 	}
@@ -759,7 +757,6 @@ static void SlipMenu_TrackGlobeResourcesSetup(void) {
 }
 
 static void SlipMenu_TrackButtonSetup(void) {
-
 	if (!SlipResourceHost_Load(NULL, "STARFONT.FNT", &trackFontResource))
 		SlipGame_ResourceFailure();
 	SlipText_SelectResourceFont(&SlipText_state, trackFontResource, &mainMenuFontCalls);
@@ -1181,7 +1178,6 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 	}
 
 	if (panel == GARAGE_PANEL_WEAPON_PODS) {
-
 		SlipMenu_DrawGarageSprite(g_garageStatusCopy, kGarageStatusPanelX, kGarageStatusPanelY);
 		SlipText_SelectResourceFont(&SlipText_state, g_garageFont, &SlipRaceHud_fontResources);
 		SlipText_SetColor(&SlipText_state, UINT16_MAX);
@@ -2085,7 +2081,6 @@ static uint32_t SlipMenu_TrackLimit(void) {
 
 static void SlipMenu_AcceptTrackSelection(const char *resPath, SDL_Window *window, AppMode *mode, int track,
                                           bool *redraw) {
-
 	if (SlipMainMenu_hiddenToggle == 0) {
 		const uint16_t limit = (uint16_t)SlipMenu_TrackLimit();
 		if ((int16_t)(uint16_t)(track + 1) > (int16_t)limit)
@@ -2097,7 +2092,6 @@ static void SlipMenu_AcceptTrackSelection(const char *resPath, SDL_Window *windo
 	    g_selectedRaceType == ONE_PLAYER_RACE_PRACTICE ? 1u : (uint16_t)SlipRace_racerCount;
 	SlipRace_BuildRacerTable(&SlipRace_racerTable, g_playerOneDriver, g_playerTwoDriver);
 	if (g_selectedRaceType == ONE_PLAYER_RACE_PRACTICE) {
-
 		SlipMenu_StartSelectedRace(resPath, mode);
 		*redraw = true;
 		return;
@@ -2106,7 +2100,6 @@ static void SlipMenu_AcceptTrackSelection(const char *resPath, SDL_Window *windo
 }
 
 static void SlipMenu_EnterGarageView(SDL_Window *window, AppMode *mode, bool *redraw, uint32_t playerNumber) {
-
 	const uint16_t racerType = playerNumber == 1 ? 0 : 1;
 	g_garageRacer = SlipRace_racerTable.records;
 	for (uint16_t remaining = SlipRace_racerTable.racerCount; remaining != 0; --remaining) {
@@ -2155,11 +2148,9 @@ static void SlipMenu_SelectGarageAction(const char *resPath, SDL_Window *window,
 	} else if (action == kGarageActionSystems) {
 		g_garagePanel = GARAGE_PANEL_SYSTEMS;
 	} else {
-
 		SlipMenu_ReleaseGarageResources();
 		g_garagePanel = GARAGE_PANEL_NONE;
 		if (mode != NULL) {
-
 			if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN && g_garageRacer->racerType == SLIP_RACER_PLAYER_ONE)
 				SlipMenu_EnterGarageView(window, mode, redraw, 2u);
 			else
@@ -2170,7 +2161,6 @@ static void SlipMenu_SelectGarageAction(const char *resPath, SDL_Window *window,
 }
 
 static void SlipMenu_LeaveGaragePanel(SDL_Window *window, bool *redraw) {
-
 	if (g_garagePanel == GARAGE_PANEL_SYSTEMS) {
 		g_garageRacer->powerupFlags = g_garageSystems;
 		g_garageRacer->bonusScore = (uint32_t)g_garageCash;
@@ -2290,7 +2280,6 @@ bool SlipMenu_PollInput(void) {
 }
 
 void SlipMenu_PresentFrame(void) {
-
 	SlipScreenHost_Present();
 	if (g_mainMenuPresentFrame != NULL)
 		g_mainMenuPresentFrame(g_mainMenuPresentFrameContext);
@@ -2498,7 +2487,6 @@ bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview) {
 		vehicleResourceCalls.drawSprite(NULL, titleResource, INT16_MAX, 0);
 		if (state.caption != 0 && !(SlipConfig_language != SLIP_CONFIG_LANGUAGE_ENGLISH && menuSound != NULL &&
 		                            menuSound->digitalCard != 0 && SlipConfig_speech != 0)) {
-
 			SlipText_SelectResourceFont(&SlipText_state, SlipMenu_resources.smallFont, &mainMenuFontCalls);
 			SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX,
 			                  kCampaignCaptionLeft + kCampaignCaptionShadowOffset,
@@ -3137,7 +3125,6 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 	}
 
 	if (haveMainMenu) {
-
 		bool raceFrame = appMode == APP_MODE_RACE || appMode == APP_MODE_RESULTS;
 		if (appMode == APP_MODE_VEHICLE_SELECT) {
 			SlipMenu_RunVehicleSelection(window, &appMode, &redraw);
@@ -3154,7 +3141,6 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 			}
 			return !g_sdlQuitRequested;
 		} else if (appMode == APP_MODE_RACE) {
-
 			const uint64_t nowMs = SlipSdl_TicksMs();
 			const SlipRaceFrameResult raceResult =
 			    SlipRaceSession_RunFrame((uint32_t)nowMs, SlipInput_held, SlipInput_pressed,
@@ -3170,11 +3156,9 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 				if (returnToResultsAfterReplay ||
 				    (SlipRace_type != SLIP_RACE_TYPE_PRACTICE && SlipRaceSession_exitRequested == 0)) {
 					if (!returnToResultsAfterReplay) {
-
 						SlipRaceResults_Begin(&resultsScreen, SlipRaceSession_track, &SlipRace_racerTable,
 						                      g_playerOneDriver, resPath, menuSound);
 					} else {
-
 						SlipRaceResults_BeginDisplay(&resultsScreen, resPath, menuSound);
 					}
 					returnToResultsAfterReplay = false;
@@ -3212,12 +3196,10 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 				                       SlipConfig_shadows);
 				appMode = APP_MODE_RACE;
 			} else {
-
 				if (SlipRace_type == SLIP_RACE_TYPE_CHAMPIONSHIP)
 					SlipRaceRecording_Release();
 				SlipLapRecordsHost_Update(SlipRacePlayer_track, &SlipRace_racerTable, SlipMathsHost_Tables());
 				if (SlipRace_type != SLIP_RACE_TYPE_CHAMPIONSHIP) {
-
 					SlipRaceRecording_Release();
 					SlipRandom_Stir(SlipDebug_BiosTickLow());
 					SlipMenuMusic_Start();

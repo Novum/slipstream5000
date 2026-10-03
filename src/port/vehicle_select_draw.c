@@ -17,7 +17,6 @@ void SlipVehicleSelection_Draw(SlipVehicleSelection *state, const SlipVehicleSel
 	SlipText_SelectFont(&SlipText_state, &screen->smallFont);
 	const int32_t markerIndex = (int32_t)excludedVehicle - 1;
 	if (markerIndex >= 0) {
-
 		static const int16_t markerPositions[SLIP_RACE_RACER_COUNT][2] = {
 		    {109, 116}, {13, 107}, {206, 115}, {250, 76}, {200, 45}, {93, 77}, {2, 66}, {167, 73}, {123, 43}, {74, 50}};
 		SlipSprite_DrawClipped(&screen->playerMarker, g_screenBufferBase, g_screenPitch,

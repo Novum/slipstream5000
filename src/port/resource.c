@@ -112,7 +112,6 @@ uint32_t SlipResource_cachedBytes;
 void SlipResource_ReleaseBlock(SlipResourceBlock *block) {
 	block->flags &= (uint16_t)~SLIP_RESOURCE_BLOCK_ALLOCATED;
 	if (block->handleByteOffset != UINT32_MAX) {
-
 		SlipResource_handles[block->handleByteOffset / SLIP_RESOURCE_DOS_HANDLE_BYTES].block = NULL;
 	}
 	const uint32_t bytes = block->capacityBytes + SLIP_RESOURCE_DOS_BLOCK_HEADER_BYTES;

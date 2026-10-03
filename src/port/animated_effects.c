@@ -67,7 +67,6 @@ uint32_t SlipAnimatedEffects_Event(uint32_t eventCode, uint32_t eventPayload, ui
 	const SlipAnimatedDescriptor *const descriptor = state->descriptor;
 	const uint16_t duration = (uint16_t)(state->initialDuration + state->finalDuration);
 	if (state->age >= duration) {
-
 		SlipObject_FreeImmediate(
 		    object, (timer.deltaMilliseconds & SLIP_ANIMATED_VALUE_UPPER_WORD_MASK) | state->age,
 		    (timer.stepQ14 & SLIP_ANIMATED_VALUE_UPPER_WORD_MASK) | duration, timer.deltaMilliseconds,
@@ -108,7 +107,6 @@ uint32_t SlipAnimatedEffects_Event(uint32_t eventCode, uint32_t eventPayload, ui
 			                             &frameWrite);
 		}
 	} else {
-
 		const uint16_t finalPhaseElapsed = (uint16_t)(state->age - state->initialDuration);
 		lifetimeFractionQ14 = ((uint32_t)finalPhaseElapsed << SLIP_Q14_FRACTION_BITS) / state->finalDuration;
 		const SlipAnimatedFrames *const frames = descriptor->finalFrames;

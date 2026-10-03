@@ -87,7 +87,6 @@ void SlipText_SetStyle(SlipTextLayout *state, uint16_t mode, uint16_t spacing, i
 void SlipText_FlushLine(SlipTextLayout *state, SlipTextPosition position) {
 	state->line[state->length] = 0;
 	if (state->mode == SLIP_TEXT_AT_POSITION) {
-
 	} else if (state->mode == SLIP_TEXT_CENTERED) {
 		const int16_t remaining = (int16_t)(state->right - state->left + 1 - state->width);
 		position.x = (int16_t)((remaining >> 1) + state->left);
@@ -119,7 +118,6 @@ void SlipText_JustifyLine(SlipTextLayout *state, SlipTextPosition position) {
 	state->line[state->length] = 0;
 	const uint16_t remaining = (uint16_t)(state->right - position.x - state->width);
 	if (remaining == 0) {
-
 		if (state->color != UINT16_MAX) {
 			if (state->fontResources)
 				SlipFont_DrawResourceStringColor(state->fontResource, state->line, &position.x, position.y,

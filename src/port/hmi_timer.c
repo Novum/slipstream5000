@@ -88,7 +88,6 @@ void HmiTimer_Restore(HmiTimerState *state) {
 }
 
 void HmiTimer_Interrupt(HmiTimerState *state) {
-
 	if (state->interruptActive != 1) {
 		jmp_buf continuation;
 		jmp_buf *const previous = state->interruptExit;

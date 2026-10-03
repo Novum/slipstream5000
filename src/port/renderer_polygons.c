@@ -98,7 +98,6 @@ bool SlipRenderer_SubmitTextured(SlipRendererState *state, uint32_t countAndFlag
 		if (!rejected)
 			calls->draw(calls->context);
 	} else {
-
 		countAndFlags &= SLIP_PRIMITIVE_SOLID_COUNT_FLAGS_MASK;
 		SlipDraw3DMaterialTable *const table = state->materials->table;
 		material = table->records + (materialIndex < (uint16_t)table->count ? materialIndex : 0);

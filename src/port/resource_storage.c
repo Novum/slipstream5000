@@ -130,7 +130,6 @@ enum { SLIP_RESOURCE_PERSPECTIVE_TABLE_CAPACITY = 512 };
 RasterPerspectiveEntry *SlipResourceStorage_PerspectiveTable(SlipResourceBlock *block) {
 	SlipResourceStorageNode *const node = (SlipResourceStorageNode *)block;
 	if (node->perspectiveTable == NULL) {
-
 		node->perspectiveTable = malloc(SLIP_RESOURCE_PERSPECTIVE_TABLE_CAPACITY * sizeof(*node->perspectiveTable));
 		if (node->perspectiveTable == NULL)
 			SlipRuntime_Fatal("Cannot allocate native perspective table records");

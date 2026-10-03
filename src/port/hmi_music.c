@@ -23,7 +23,6 @@ void HmiMusic_GetDriverFunctions(HmiMusicDriverTableQuery entry, void *context, 
 }
 
 const char *HmiMusic_ErrorString(uint32_t code) {
-
 	static const char *const errors[HMI_MUSIC_ERROR_COUNT] = {"Error Code Does Not Indicate An Error",
 	                                                          "Specified Driver Is Not Loaded",
 	                                                          "Specified Pointer Is NULL",
@@ -82,7 +81,6 @@ uint32_t HmiMusic_SetBranchCallback(HmiMusicState *state, uint32_t song, HmiMusi
 
 uint32_t HmiMusic_SetTriggerCallback(HmiMusicState *state, uint32_t song, uint8_t trigger,
                                      HmiMusicTriggerCallback callback) {
-
 	const uint32_t index = song * HMI_MUSIC_TRIGGER_COUNT + trigger;
 	if (index >= HMI_MUSIC_SONG_COUNT * HMI_MUSIC_TRIGGER_COUNT)
 		SlipAssertFail("Trigger write outside native callback table requires original pointer bytes", __FILE__,
@@ -92,7 +90,6 @@ uint32_t HmiMusic_SetTriggerCallback(HmiMusicState *state, uint32_t song, uint8_
 }
 
 void HmiMusic_WriteTriggerAlias(HmiMusicState *state, uint32_t offset, uint16_t selector) {
-
 	state->fadeMode[0] = (state->fadeMode[0] & HMI_TRIGGER_ALIAS_OFFSET_HIGH_MASK) |
 	                     ((uint32_t)(selector & UINT8_MAX) << HMI_TRIGGER_ALIAS_SELECTOR_LOW_SHIFT);
 	state->fadeMode[1] = (state->fadeMode[1] & HMI_TRIGGER_ALIAS_SELECTOR_HIGH_PRESERVE_MASK) | (selector >> 8);
@@ -470,7 +467,6 @@ static uint32_t HmiA002_MiddlewareShutdown(HmiMusicState *music, uint32_t driver
 }
 
 void HmiA002_BindNativeFunctions(HmiMusicState *music, uint32_t driver, HmiA002State *module) {
-
 	assert(driver < HMI_MUSIC_DRIVER_COUNT);
 	music->driverContexts[driver] = module;
 	music->driverSend[driver] = HmiA002_MiddlewareSend;

@@ -107,7 +107,6 @@ static void SlipTrackAssets_ReleaseActors(SlipResourcePayload *trd, SlipArticSlo
 
 void SlipTrackAssets_FreeBundle(SlipTrackAssetBundle *bundle, SlipArticSlotReleaseResource releaseResource,
                                 void *user) {
-
 	if (bundle->trdHandle != 0)
 		SlipTrackAssets_ReleaseActors(&bundle->trdPayload, releaseResource, user);
 	uint16_t *handles[] = {&bundle->trkHandle, &bundle->trdHandle, &bundle->trcHandle};

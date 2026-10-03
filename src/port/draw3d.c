@@ -965,7 +965,6 @@ int SlipDraw3D_PolygonStatus(SlipDraw3DVertexRecord *vertexRecords, size_t verte
 				status |= SLIP_CLIP_FAR;
 			}
 			if ((state->renderFlags & SLIP_SHAPE_CLIP_AUXILIARY) != 0) {
-
 				const int32_t deltaX = (int32_t)((uint32_t)world.x - (uint32_t)state->depthOrigin.x);
 				const int32_t deltaY = (int32_t)((uint32_t)world.y - (uint32_t)state->depthOrigin.y);
 				const int32_t deltaZ = (int32_t)((uint32_t)world.z - (uint32_t)state->depthOrigin.z);
@@ -1077,7 +1076,6 @@ int SlipDraw3D_PerspectiveDepth(SlipDraw3DVertexRecord *vertexRecords, size_t ve
 		visit->alreadyTransformed = (flags & SLIP_VERTEX_TRANSFORMED) != 0;
 		visit->minDepthBefore = minDepth;
 		if (!visit->alreadyTransformed) {
-
 			const uint32_t sourceX = (uint16_t)record->sourceX | ((uint32_t)(uint16_t)record->sourceY << 16);
 			const uint32_t sourceY = (uint16_t)record->sourceY | ((uint32_t)(uint16_t)record->sourceZ << 16);
 			const uint32_t sourceZ = (uint16_t)record->sourceZ | ((uint32_t)record->sourceFollowingWord << 16);
@@ -1152,7 +1150,6 @@ uint32_t SlipDraw3D_ProjectVertex(SlipDraw3DVertexRecord *record, const SlipDraw
 			newFlags |= SLIP_CLIP_FAR;
 		}
 		if ((state->renderFlags & SLIP_SHAPE_CLIP_AUXILIARY) != 0) {
-
 			const int32_t deltaX = (int32_t)((uint32_t)world.x - (uint32_t)state->depthOrigin.x);
 			const int32_t deltaY = (int32_t)((uint32_t)world.y - (uint32_t)state->depthOrigin.y);
 			const int32_t deltaZ = (int32_t)((uint32_t)world.z - (uint32_t)state->depthOrigin.z);
@@ -6296,7 +6293,6 @@ uint32_t SlipDraw3D_ProjectDrawRecordPoint(SlipDraw3DDrawRecord *record, SlipDra
 	if (point.z > state->maxZ)
 		flags |= SLIP_CLIP_FAR;
 	if ((state->renderFlags & SLIP_SHAPE_CLIP_AUXILIARY) != 0) {
-
 		const int32_t x = (int32_t)((uint32_t)point.x - (uint32_t)state->auxiliaryClipPlaneOrigin.x);
 		const int32_t y = (int32_t)((uint32_t)point.y - (uint32_t)state->auxiliaryClipPlaneOrigin.y);
 		const int32_t z = (int32_t)((uint32_t)point.z - (uint32_t)state->auxiliaryClipPlaneOrigin.z);
@@ -9325,7 +9321,6 @@ int SlipDraw3D_BackgroundPassExecuteMaterial(
 		return 0;
 	}
 	if (out.materialPass.branch == SLIP_DRAW3D_BACKGROUND_PASS_FILL) {
-
 		Raster_FillRectClipped((uint8_t)out.materialPass.fillValue, (int16_t)minX, (int16_t)minY, (int16_t)maxX,
 		                       (int16_t)maxY);
 	} else if (out.materialPass.branch == SLIP_DRAW3D_BACKGROUND_PASS_STRIP) {
@@ -9363,7 +9358,6 @@ int SlipDraw3D_BackgroundPassExecuteFixed(SlipDraw3DRecordPool *pool, uint16_t m
 		return 0;
 	}
 	if (out.fixedPass.branch == SLIP_DRAW3D_BACKGROUND_PASS_FILL) {
-
 		Raster_FillRectClipped((uint8_t)out.fixedPass.fillValue, (int16_t)minX, (int16_t)minY, (int16_t)maxX,
 		                       (int16_t)maxY);
 	} else if (out.fixedPass.branch == SLIP_DRAW3D_BACKGROUND_PASS_STRIP) {

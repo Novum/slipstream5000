@@ -20,7 +20,6 @@ void SlipRenderer_GrowVertices(SlipRendererState *state, uint32_t capacity, cons
 	uint32_t remaining = state->stateCount;
 	SlipRendererDrawState *record = state->states;
 	do {
-
 		record->vertices = (SlipDraw3DVertexRecord *)((uintptr_t)record->vertices +
 		                                              ((uintptr_t)state->vertexBase - (uintptr_t)oldBase));
 		++record;

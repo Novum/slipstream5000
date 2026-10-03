@@ -39,7 +39,6 @@ int SlipShape3D_RecalculateBounds(SlipShape3DHeader *header, const SlipShape3DVe
 	SlipShape3D_minimumZ = INT16_MAX;
 	SlipShape3D_maximumZ = -INT16_MAX;
 	for (uint16_t i = 0; i < count; ++i) {
-
 		const uint32_t shift = header->scaleShift & SLIP_DWORD_SHIFT_COUNT_MASK;
 		const int32_t x = (int32_t)((uint32_t)(int32_t)vertices[i].x << shift);
 		const int32_t y = (int32_t)((uint32_t)(int32_t)vertices[i].y << shift);

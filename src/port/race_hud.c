@@ -289,7 +289,6 @@ void SlipRaceHud_DrawRaceStatus(const SlipRaceHudAssets *assets, uint8_t *frameb
 
 void SlipRaceHud_DrawSpeed(const SlipRaceHudAssets *assets, uint8_t *framebuffer, int pitch, int minX, int minY,
                            uint32_t inputSpeed, int units, uint16_t countdown) {
-
 	const uint32_t quotient =
 	    inputSpeed / (units != 0 ? SLIP_RACE_HUD_SPEED_DIVISOR_KMH : SLIP_RACE_HUD_SPEED_DIVISOR_MPH);
 	char text[] = "%d:";
@@ -334,14 +333,12 @@ void SlipRaceHud_DrawBorders(SlipRaceHudState *state, uint32_t gameMode, uint32_
 		return;
 	--state->borderFrames;
 	if (gameMode == SLIP_RACE_HUD_SPLIT_SCREEN_MODE) {
-
 		Raster_FillRectUnchecked(0, 0, 0, SLIP_RACE_HUD_BORDER_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 		Raster_FillRectUnchecked(0, SLIP_RACE_HUD_RIGHT_BORDER_LEFT, 0, SLIPSTREAM_SCREEN_WIDTH - 1,
 		                         SLIPSTREAM_SCREEN_HEIGHT - 1);
 		Raster_DrawLineSolid(0, SLIP_RACE_HUD_BORDER_WIDTH, SLIP_RACE_HUD_SPLIT_DIVIDER_Y,
 		                     SLIP_RACE_HUD_RIGHT_BORDER_LEFT - 1, SLIP_RACE_HUD_SPLIT_DIVIDER_Y);
 	} else {
-
 		Raster_FillRectUnchecked(0, 0, 0, SLIPSTREAM_SCREEN_WIDTH - 1,
 		                         windowSize != 0 ? SLIP_RACE_HUD_TALL_TOP_BORDER_HEIGHT - 1
 		                                         : SLIP_RACE_HUD_SHORT_TOP_BORDER_HEIGHT - 1);
@@ -410,20 +407,17 @@ void SlipRaceHud_DrawLowerConsole(SlipRaceHudState *state, const SlipRaceHudAsse
 
 		SlipRaceHud_DrawSpriteResource(bottom, framebuffer, pitch, SLIP_RACE_HUD_BORDER_WIDTH, (int)y);
 		if (view == 1 && (assets->flags & SLIP_RACE_HUD_INTRO_PRESENTATION) != 0) {
-
 			Raster_FillRectClipped(
 			    0, 0, (int16_t)(y + SlipSprite_Dimensions(bottom, &SlipSpriteHost_effectResources).height - 1u),
 			    SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 		}
 	} else if (bottomIndex < 0) {
 		if (view != 1 || (assets->flags & SLIP_RACE_HUD_INTRO_PRESENTATION) == 0) {
-
 			if (!SlipRaceDisplay_ready)
 				Raster_DrawLineClipped(0, 0, (int16_t)y, SLIPSTREAM_SCREEN_WIDTH - 1, (int16_t)y);
 			SlipRaceHud_DrawSpriteResourceClipped(assets->consoleExtensionSprite, framebuffer, pitch,
 			                                      SLIP_RACE_HUD_BORDER_WIDTH, (int)y + 1);
 		} else {
-
 			const uint8_t *const data = SlipResourceHost_Lock(NULL, assets->bottomSprites[0]);
 			const uint16_t width = SlipBytes_ReadLE16(data);
 			SlipResourceHost_Unlock(NULL, assets->bottomSprites[0]);

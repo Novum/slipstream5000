@@ -11,7 +11,6 @@ static void SlipSpriteResourceHost_AllocationError(void *context) {
 
 static void SlipSpriteResourceHost_DrawScaled(void *context, uint16_t resource, int16_t left, int16_t top,
                                               int16_t right, int16_t bottom) {
-
 	if (right < g_clipMinX || left > g_clipMaxX || top > g_clipMaxY || bottom < g_clipMinY)
 		return;
 	const uint8_t *const bytes = SlipResourceHost_Lock(context, resource);

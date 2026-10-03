@@ -117,7 +117,6 @@ static void SlipVehicleSelector_ClearNavigation(void *context) {
 static void SlipVehicleSelector_Poll(void *context) {
 	(void)context;
 	if (!SlipMenu_PollInput()) {
-
 		SlipRuntime_Shutdown();
 		SDL_Quit();
 		exit(0);
@@ -182,7 +181,6 @@ static void SlipVehicleSelector_RestoreScreen(void *context) {
 
 static void SlipVehicleSelector_BakeText(void *context, uint16_t resource, const char *text, uint16_t color,
                                          int16_t y) {
-
 	SlipText_SetColor(&SlipText_state, color);
 	SlipSelectorDimensions size = SlipVehicleSelector_Dimensions(context, resource);
 	SlipVehicleSelector_BindSprite(context, resource, size);
@@ -199,7 +197,6 @@ static void SlipVehicleSelector_Zoom(void *context, uint16_t resource, int16_t s
 }
 
 static void SlipVehicleSelector_Background(void *context, SlipVehicleSelector *selector) {
-
 	SlipVehicleSelectorHost *const host = context;
 	RasterSurfaceBounds surface = Raster_GetSurfaceBounds();
 	Raster_SetClipRect((int16_t)surface.left, (int16_t)surface.top, (int16_t)surface.right, (int16_t)surface.bottom);

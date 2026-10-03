@@ -11,7 +11,6 @@ void SlipStringTable_SetLanguage(SlipStringTableState *state, uint8_t language) 
 
 bool SlipStringTable_Load(SlipStringTableState *state, const char name[SLIP_RESOURCE_BASE_NAME_BYTES],
                           const SlipStringTableResources *resources, SlipStringTableSlot **slot) {
-
 	memcpy(state->filename, name, SLIP_RESOURCE_BASE_NAME_BYTES);
 	state->filename[SLIP_RESOURCE_NAME_BYTES - 1] = (char)(uint8_t)(state->language + '0');
 	uint16_t resource;
@@ -39,7 +38,6 @@ void SlipStringTable_Release(SlipStringTableSlot *slot, const SlipStringTableRes
 }
 
 const char *SlipStringTable_Get(SlipStringTableSlot *slot, uint32_t tag, const SlipStringTableResources *resources) {
-
 	if (slot->locks == 0)
 		slot->data = resources->lock(resources->context, slot->resource);
 	slot->locks = (uint16_t)(slot->locks + 1);

@@ -814,7 +814,6 @@ int16_t SlipView3D_HeadingFromMatrix(const SlipView3DMaths *maths, const SlipVie
 			    maths, maths->arctangentTableOffset,
 			    (uint16_t)((ratio >> SLIP_VIEW_ARCTANGENT_BYTE_OFFSET_SHIFT) & SLIP_VIEW_WORD_TABLE_INDEX_MASK));
 		} else {
-
 			/* Preserve the original numerator truncation before forming the Q14 ratio. */
 			ratio = (uint16_t)(((uint32_t)(absZ >> SLIP_VIEW_HEADING_DIVIDEND_TRUNCATION_BITS)
 			                    << (SLIP_Q14_FRACTION_BITS + SLIP_VIEW_HEADING_DIVIDEND_TRUNCATION_BITS)) /
@@ -1705,7 +1704,6 @@ void SlipView3D_BuildFacingBasis(SlipView3DMatrix *basis, int16_t directionX, in
 	const int16_t rightY = (int16_t)(0u - normalized.unitYQ14);
 	const int16_t rightZ = (int16_t)(0u - normalized.unitZQ14);
 	if ((uint16_t)((uint16_t)rightX | (uint16_t)rightY | (uint16_t)rightZ) == 0) {
-
 		*basis = (SlipView3DMatrix){{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 		return;
 	}

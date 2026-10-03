@@ -14,7 +14,6 @@ static void HmiOplOutput_OplWrite(void *context, uint16_t port, uint8_t value) {
 	if (port == HMI_OPL_ADDRESS_PORT)
 		output->registerAddress = value;
 	else {
-
 		if ((output->chip.writeBufLast + 1) % OPAL_WRITEBUF_SIZE == output->chip.writeBufCur) {
 			SlipAssertFail("OPL timed write queue exhausted; refusing zero-time flush", __FILE__, __LINE__);
 			return;

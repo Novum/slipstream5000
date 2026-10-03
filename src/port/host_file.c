@@ -7,7 +7,6 @@
 #include <io.h>
 
 static wchar_t *SlipHostFile_WidePath(const char *path) {
-
 	wchar_t *const wide = (wchar_t *)SDL_iconv_string("WCHAR_T", "UTF-8", path, SDL_strlen(path) + 1);
 	if (wide == NULL)
 		errno = EINVAL;
@@ -18,7 +17,6 @@ static wchar_t *SlipHostFile_WidePath(const char *path) {
 #endif
 
 char *SlipHostFile_PreferencePath(const char *name) {
-
 	char *const directory = SDL_GetPrefPath(NULL, "slipstream5000");
 	if (directory == NULL)
 		return NULL;
@@ -29,7 +27,6 @@ char *SlipHostFile_PreferencePath(const char *name) {
 }
 
 FILE *SlipHostFile_OpenStream(const char *path, const char *mode) {
-
 #ifdef _WIN32
 	wchar_t *const widePath = SlipHostFile_WidePath(path);
 	if (widePath == NULL)
@@ -45,7 +42,6 @@ FILE *SlipHostFile_OpenStream(const char *path, const char *mode) {
 }
 
 int SlipHostFile_OpenDescriptor(const char *path, int flags, int permissions) {
-
 #ifdef _WIN32
 	wchar_t *const widePath = SlipHostFile_WidePath(path);
 	if (widePath == NULL)

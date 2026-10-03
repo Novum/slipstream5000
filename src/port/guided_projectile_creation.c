@@ -366,7 +366,6 @@ static void SlipGuidedProjectile_CreateDisrupter(uint16_t shooter, uint32_t side
 	state->shooterObject = SlipGuidedProjectile_disrupterShooter;
 	state->targetObject = SlipGuidedProjectile_disrupterTarget;
 	if (state->targetObject != 0) {
-
 		SlipView3DVec32 origin = calls->objectPosition(context, projectile);
 		SlipView3DVec32 target = calls->objectPosition(context, state->targetObject);
 		SlipView3DVec32 delta = {(int32_t)((uint32_t)target.x - (uint32_t)origin.x),

@@ -559,7 +559,6 @@ static void SlipRacePlayer_CreateBlasterProjectile(uint16_t shooterObject, uint3
 	    !SlipObject_SlotFill(&shooterMatrix, (uint32_t)muzzlePosition.x, (uint32_t)muzzlePosition.y,
 	                         (uint32_t)muzzlePosition.z, NULL, 0, SlipRacePlayer_ProjectileEvent, &fill) ||
 	    fill.carryOut) {
-
 		return;
 	}
 	projectileObject = (uint16_t)fill.objectOffset;
@@ -1534,7 +1533,6 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			privateState->positionBoostTimer = 0;
 			privateState->impactPenaltyTimer = SLIP_RACE_IMPACT_PENALTY_MS;
 			if ((uint16_t)eventValue == SlipRacePlayer_playerOneObject) {
-
 				static const uint32_t hitByPlayerVoices[] = {14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
 				SlipGameSoundState *const sound = context->soundEffects->gameSound;
 				SlipRaceVoiceCalls voiceCalls = SlipRaceVoiceHost_Calls(sound);
@@ -1542,7 +1540,6 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			}
 		}
 		if ((int32_t)SlipRandom_Next() <= SLIP_RACE_DAMAGE_DEBRIS_RANDOM_LIMIT) {
-
 			SlipRaceEffects_Debris(SLIP_RACE_DAMAGE_HIT_DEBRIS_COUNT, objectOffset, dispatchFrame);
 		}
 		if (eventPayload != SLIP_RACE_WEAPON_DISRUPTER) {
@@ -1553,7 +1550,6 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_LASER_HIT, objectOffset,
 			                       SLIP_SOUND_POSITION_OBJECT);
 			if (objectOffset == SlipRacePlayer_playerOneObject) {
-
 				enum { SLIP_RACE_VOICE_PLAYER_HIT = 0x3f };
 
 				SlipGameSoundState *const sound = context->soundEffects->gameSound;
@@ -1573,7 +1569,6 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 		return 0;
 
 	case SLIP_OBJECT_EVENT_COLLISION_STOP: {
-
 		const uint32_t otherObjectFlags = SlipObject_GetActorHandle((uint16_t)eventPayload);
 		const SlipRaceCollisionStopEvent *const collisionEvent = &SlipRaceCollision_stopEvent;
 		uint32_t projectileWeaponIndex;
@@ -1721,7 +1716,6 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 		racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
 		if ((uint16_t)((uint32_t)privateState->collisionImpulseX >> 16) ==
 		    SLIP_RACE_IMPACT_VOICE_TRIGGER_IMPULSE_X_HIGH_WORD) {
-
 			static const uint32_t impactVoices[] = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
 			SlipGameSoundState *const sound = context->soundEffects->gameSound;
 			SlipRaceVoiceCalls voiceCalls = SlipRaceVoiceHost_Calls(sound);
@@ -1875,7 +1869,6 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 				}
 				privateState->powerupActive ^= 1u;
 				if (privateState->powerupActive != 0) {
-
 					SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_ENGINE_START, objectOffset,
 					                       SLIP_SOUND_POSITION_OBJECT);
 				}
@@ -3290,7 +3283,6 @@ void SlipRacePlayer_BuildWeaponLabel(const SlipRacePlayerWeaponRecord *records, 
 }
 
 uint32_t SlipRacePlayer_WeaponRechargeRate(uint32_t weaponIndex) {
-
 	static const uint32_t rechargeByBiasedWeaponIndex[SLIP_RACE_BIASED_WEAPON_COUNT] = {
 	    0xfffc9997u, 0x800u,  0x4000u, 0x4000u, 0x4000u, 0x4000u, 0x4000u,
 	    0x4000u,     0x4000u, 0x4000u, 0x4000u, 0x4000u, 0x4000u,
@@ -4534,7 +4526,6 @@ uint32_t SlipRacePlayer_ApplyControls(SlipRacePlayerHostBindings *context, SlipR
 		actions |= SLIP_ACTION_ACCELERATE;
 	}
 	if (privateState->amplifiedControlsTimer != 0 || privateState->impactPenaltyTimer != 0) {
-
 		int32_t expandedSteering = (int32_t)steering * SLIP_RACE_CONTROL_AMPLIFICATION;
 		int32_t expandedPitch = (int32_t)pitch * SLIP_RACE_CONTROL_AMPLIFICATION;
 		if (expandedSteering > SLIP_Q14_ONE)

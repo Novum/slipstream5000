@@ -2165,7 +2165,6 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 	haveFrameState =
 	    materialTable != NULL && materialTableBytes >= SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES && maths != NULL;
 	if (haveFrameState) {
-
 		threshold = SlipView3D_CosQ14(maths, SLIP_TRACK_PRIMITIVE_REPLAY_LIGHT_ANGLE);
 	}
 	rootListOffset = SlipBytes_ReadLE16(componentBase + SLIP_TRC_FILE_COMPONENT_LIST_OFFSET);
@@ -2250,19 +2249,15 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 					if (material != SLIP_TRC_MATERIAL_FLOOR_LIGHT_DASHES) {
 						if ((flags & SLIP_TRC_PRIMITIVE_RANGE_PLANE) != 0 ||
 						    (flags & SLIP_TRC_PRIMITIVE_FORCE_TRANSPARENT) != 0) {
-
 							skipAll = true;
 						} else if ((flags & SLIP_TRC_PRIMITIVE_TRANSPARENT) != 0) {
-
 							skipToTrnc = true;
 						} else if (siblingMaterialRecord != NULL &&
 						           memcmp(siblingMaterialRecord, "TRNCHIDD", 8u) == 0) {
-
 							skipToTrnc = true;
 						}
 					}
 					if (!skipAll && !skipToTrnc) {
-
 						SlipView3DDotProductQ14 dot;
 						int16_t facingDot;
 
@@ -2283,7 +2278,6 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 						}
 					}
 					if (!skipAll && !skipToTrnc) {
-
 						uint32_t materialIndex = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET);
 						const SlipDraw3DMaterialTable *const frameTable = (const void *)materialTable;
 						const uint32_t textureHandle =
@@ -2306,7 +2300,6 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 						}
 					}
 					if (!skipAll) {
-
 						if (siblingMaterialRecord != NULL && memcmp(siblingMaterialRecord, "TRNC", 4u) == 0) {
 							flags = (uint8_t)(flags | SLIP_TRC_PRIMITIVE_TRENCH);
 						}
@@ -3395,7 +3388,6 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 			return false;
 		}
 		if (handled) {
-
 			if (environment->inlineWalkMode && (flags & SLIP_TRACK_PRIMITIVE_REPLAY_PLANE) != 0 && !carryHigh) {
 				bool skippedByCapture = false;
 
@@ -3526,7 +3518,6 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 		}
 		++context->directCallbackLowMaterialCount;
 		if (environment->inlineWalkMode) {
-
 			bool runReplay = false;
 
 			if (materialFlags == 0) {
@@ -3534,13 +3525,11 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 					runReplay = true;
 				}
 			} else if (polygonRejected) {
-
 				runReplay = false;
 			} else if ((flags & SLIP_TRACK_PRIMITIVE_REPLAY_PLANE) != 0) {
 				runReplay = true;
 			}
 			if (runReplay) {
-
 				const uint8_t *const shadeRecord =
 				    TrackView_MaterialRecord(context->materialTable, context->materialTableBytes, materialIndex);
 				const uint32_t shadeValue =
@@ -3594,7 +3583,6 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 				context->postPlaneHead = capture.postPlaneHeadOut;
 				if (!capture.carryOut) {
 					if (materialFlags != 0) {
-
 						if (!TrackView_ExecuteExtendedMaterialDispatch(
 						        context, &primitiveContext, primitiveRecord, recordBytesRemaining, 0, countAndFlags,
 						        materialIndex, materialFlags, &polygonRejected)) {
@@ -3623,7 +3611,6 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 						context->postPlaneHead = release.postPlaneHeadOut;
 					}
 				} else if (materialFlags != 0) {
-
 					if (!TrackView_ExecuteExtendedMaterialDispatch(context, &primitiveContext, primitiveRecord,
 					                                               recordBytesRemaining, 0, countAndFlags,
 					                                               materialIndex, materialFlags, &polygonRejected)) {
@@ -3632,7 +3619,6 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 					}
 				}
 			} else if (materialFlags != 0 && !polygonRejected) {
-
 				if (!TrackView_ExecuteExtendedMaterialDispatch(context, &primitiveContext, primitiveRecord,
 				                                               recordBytesRemaining, 0, countAndFlags, materialIndex,
 				                                               materialFlags, &polygonRejected)) {
@@ -3913,7 +3899,6 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 		}
 	}
 	if (!primitiveContext->shapePath) {
-
 		if (context->projectState == NULL ||
 		    !SlipDraw3D_PerspectiveDepth(context->vertexRecords, context->vertexRecordCount,
 		                                 primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
@@ -3928,7 +3913,6 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 	}
 
 	if (!primitiveContext->shapePath && (int32_t)depthResult.fadeDepth > (int32_t)context->farTextureDepth) {
-
 		++context->directCallbackHighFarFallbackCount;
 		if (fallbackLow != NULL) {
 			*fallbackLow = true;
@@ -4237,7 +4221,6 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 			    texturePayload.size >= SLIP_SPRITE_TRANSPARENT_COLOUR_END &&
 			    SlipBytes_ReadLE16(texturePayload.data + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET) !=
 			        SLIP_SPRITE_NO_TRANSPARENT_COLOUR) {
-
 				TrackView_UnlockResourceHandlePayload(context->resourceRegistry, texturedDispatch.textureHandle);
 				(void)TrackView_LockResourceHandlePayload(context->resourceRegistry, texturedDispatch.textureHandle,
 				                                          &texturePayload);
@@ -4845,7 +4828,6 @@ void TrackView_MaterialInit(const uint8_t *materialTable, size_t materialTableBy
 }
 
 static void TrackView_ProjectScreenPrimary(SlipDraw3DVec32 world, int32_t *screenX, int32_t *screenY, void *userData) {
-
 	const TrackViewPrimitiveCallbackContext *const context = userData;
 	SlipDraw3DProjectState *const state = context->projectState;
 	state->projectPrimary(world, screenX, screenY, state);
@@ -4853,7 +4835,6 @@ static void TrackView_ProjectScreenPrimary(SlipDraw3DVec32 world, int32_t *scree
 
 static void TrackView_ProjectScreenSecondary(SlipDraw3DVec32 world, int32_t *screenX, int32_t *screenY,
                                              void *userData) {
-
 	const TrackViewPrimitiveCallbackContext *const context = userData;
 	SlipDraw3DProjectState *const state = context->projectState;
 	state->projectSecondary(world, screenX, screenY, state);
@@ -4861,7 +4842,6 @@ static void TrackView_ProjectScreenSecondary(SlipDraw3DVec32 world, int32_t *scr
 
 static void TrackView_MaterialProjectScreenPrimary(SlipDraw3DVec32 world, int32_t *screenX, int32_t *screenY,
                                                    void *userData) {
-
 	const TrackViewMaterialMidpointContext *const context = userData;
 	SlipDraw3DProjectState *const state = context->primitiveContext->projectState;
 	state->projectPrimary(world, screenX, screenY, state);
@@ -4869,7 +4849,6 @@ static void TrackView_MaterialProjectScreenPrimary(SlipDraw3DVec32 world, int32_
 
 static void TrackView_MaterialProjectScreenSecondary(SlipDraw3DVec32 world, int32_t *screenX, int32_t *screenY,
                                                      void *userData) {
-
 	const TrackViewMaterialMidpointContext *const context = userData;
 	SlipDraw3DProjectState *const state = context->primitiveContext->projectState;
 	state->projectSecondary(world, screenX, screenY, state);
@@ -6193,7 +6172,6 @@ static bool TrackView_ExecuteInlineReplayTail(TrackViewRawBspContext *context,
 	}
 	context->postPlaneHead = capture.postPlaneHeadOut;
 	if (capture.carryOut) {
-
 		*skippedByCapture = true;
 		return true;
 	}
@@ -6451,7 +6429,6 @@ static bool TrackView_DrawCageFiveLinesMaterial(TrackViewRawBspContext *context,
                                                 TrackViewPrimitiveCallbackContext *primitiveContext,
                                                 const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                 uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-
 	(void)materialIndex;
 	return TrackView_ExecuteMaterialLineHandler(
 	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, TrackView_MaterialHandle(context), depth,
@@ -6463,7 +6440,6 @@ static bool TrackView_DrawCageSixteenLinesMaterial(TrackViewRawBspContext *conte
                                                    TrackViewPrimitiveCallbackContext *primitiveContext,
                                                    const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                    uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-
 	(void)materialIndex;
 	return TrackView_ExecuteMaterialLineHandler(
 	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, TrackView_MaterialHandle(context), depth,
@@ -7112,7 +7088,6 @@ static bool TrackView_DrawAnimatedFloorLightDashesMaterial(TrackViewRawBspContex
 	}
 	if (!TrackView_MaterialPair(context->materialTable, context->materialTableBytes, context->materialGlobal,
 	                            kTrackViewFloorLightMaterialName, &baseColor, &litColor)) {
-
 		baseColor = 0;
 		litColor = 0;
 	}
@@ -7197,7 +7172,6 @@ static bool TrackView_DrawCageSevenLinesMaterial(TrackViewRawBspContext *context
                                                  TrackViewPrimitiveCallbackContext *primitiveContext,
                                                  const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                  uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-
 	(void)materialIndex;
 	return TrackView_ExecuteMaterialLineHandler(
 	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, TrackView_MaterialHandle(context), depth,
@@ -8158,7 +8132,6 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 					}
 					context->directCallbackCount += (uint32_t)directLoop.visitCount;
 				} else {
-
 					SlipTrackWorldDirectCallbackEnvironment inlineEnvironment = {
 					    &setup, &tail, &primitiveWalker, projectedPrimitiveVertex.viewPosition, true};
 					uint32_t inlineCallbackValue = context->scaledLightX;
@@ -8590,7 +8563,6 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 			}
 			context->haveFirstRecordVisibility = true;
 			if (context->firstRecordVisibility.continues) {
-
 				SlipView3DMatrix objectMatrix;
 				SlipView3DMatrix viewMatrix;
 				SlipTrackWorldRecordTransformSetup transformSetup;
@@ -9336,7 +9308,6 @@ bool TrackView_DrawSprite(TrackViewRawBspContext *context, SlipView3DVec32 view,
 
 	SlipDraw3DProjectState *const state = context->projectState;
 	if (state->auxiliaryClipPlaneEnabled) {
-
 		const int32_t x = (int32_t)((uint32_t)view.x - (uint32_t)state->auxiliaryClipPlaneOrigin.x);
 		const int32_t y = (int32_t)((uint32_t)view.y - (uint32_t)state->auxiliaryClipPlaneOrigin.y);
 		const int32_t z = (int32_t)((uint32_t)view.z - (uint32_t)state->auxiliaryClipPlaneOrigin.z);
@@ -9348,7 +9319,6 @@ bool TrackView_DrawSprite(TrackViewRawBspContext *context, SlipView3DVec32 view,
 		if ((int32_t)distance < 0)
 			distance = 0u - distance;
 		if (distance <= (uint32_t)radius) {
-
 			const int32_t left = (int32_t)((uint32_t)view.x - (uint32_t)radius);
 			const int32_t right = (int32_t)((uint32_t)view.x + (uint32_t)radius);
 			const int32_t low = (int32_t)((uint32_t)view.y - (uint32_t)radius);
@@ -9841,7 +9811,6 @@ bool TrackView_DrawBeam(TrackViewRawBspContext *context, uint32_t beamIndex) {
 		}
 
 	} else {
-
 		SlipView3DVec32 step = {delta.x >> SLIP_REFUEL_BEAM_SEGMENT_SHIFT, delta.y >> SLIP_REFUEL_BEAM_SEGMENT_SHIFT,
 		                        delta.z >> SLIP_REFUEL_BEAM_SEGMENT_SHIFT};
 		SlipView3DVec32 center = start;
@@ -10230,7 +10199,6 @@ static bool TrackView_BuildClouds(TrackViewCloudState *state, const SlipView3DMa
                                   const uint8_t *nearLayout, size_t nearLayoutBytes, const uint8_t *farLayout,
                                   size_t farLayoutBytes, const uint8_t *silhouetteLayout,
                                   size_t silhouetteLayoutBytes) {
-
 	bool cloudsBuilt =
 	    TrackView_BuildCloudLayers(state, maths, yawStep, nearLayout, nearLayoutBytes, farLayout, farLayoutBytes);
 	bool silhouettesBuilt = TrackView_BuildSilhouetteLayer(state, maths, silhouetteLayout, silhouetteLayoutBytes);
@@ -10827,7 +10795,6 @@ SlipView3DMatrix TrackView_VehicleViewIdentityMatrix(void) {
 }
 
 void TrackView_TrackGlobeResetActorState(void) {
-
 	if (!g_trackSelectGlobeMatrixValid) {
 		g_trackSelectGlobeMatrix = TrackView_VehicleViewIdentityMatrix();
 		g_trackSelectGlobeMatrixValid = true;
@@ -11666,7 +11633,6 @@ static bool TrackView_ShadowBounds(TrackViewRawBspContext *context, const SlipSh
 	    {header.maximumX, header.maximumY, header.maximumZ}, {header.maximumX, header.maximumY, header.minimumZ}};
 	uint16_t all = UINT16_MAX;
 	for (size_t i = 0; i < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++i) {
-
 		SlipView3DVec32 point = SlipView3D_TransformPositionByColumns(&view->matrix, corners[i]);
 		point.x = (int32_t)((uint32_t)point.x + (uint32_t)view->translation.x);
 		point.y = (int32_t)((uint32_t)point.y + (uint32_t)view->translation.y);

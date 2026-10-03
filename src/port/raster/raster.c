@@ -205,7 +205,6 @@ enum { RASTER_FLAT_EDGE_FRACTION_BITS = RASTER_FRACTION_BITS, RASTER_FLAT_EDGE_H
 
 static int Raster_StepLeftFlat(FlatEdgeState *edge, int currentY) {
 	if (currentY == edge->bottomY) {
-
 		edge->xAccumulator =
 		    (int32_t)(((uint32_t)edge->points[edge->currentIndex].x << RASTER_FLAT_EDGE_FRACTION_BITS) |
 		              (uint16_t)edge->xAccumulator);
@@ -240,7 +239,6 @@ static int Raster_StepLeftFlat(FlatEdgeState *edge, int currentY) {
 
 static int Raster_StepRightFlat(FlatEdgeState *edge, int currentY) {
 	if (currentY == edge->bottomY) {
-
 		edge->xAccumulator =
 		    (int32_t)(((uint32_t)edge->points[edge->currentIndex].x << RASTER_FLAT_EDGE_FRACTION_BITS) |
 		              (uint16_t)edge->xAccumulator);
@@ -285,7 +283,6 @@ static void Raster_AdvanceFlatEdge(FlatEdgeState *edge) {
 
 static int Raster_StepLeftShaded(ShadedEdgeState *edge, int currentY) {
 	if (currentY == edge->bottomY) {
-
 		edge->xAccumulator = (int32_t)((uint32_t)edge->points[edge->currentIndex].x << RASTER_FRACTION_BITS) |
 		                     (uint16_t)edge->xAccumulator;
 		edge->shadeAccumulator = edge->points[edge->currentIndex].shade;
@@ -323,7 +320,6 @@ static int Raster_StepLeftShaded(ShadedEdgeState *edge, int currentY) {
 
 static int Raster_StepRightShaded(ShadedEdgeState *edge, int currentY) {
 	if (currentY == edge->bottomY) {
-
 		edge->xAccumulator = (int32_t)((uint32_t)edge->points[edge->currentIndex].x << RASTER_FRACTION_BITS) |
 		                     (uint16_t)edge->xAccumulator;
 		edge->shadeAccumulator = edge->points[edge->currentIndex].shade;

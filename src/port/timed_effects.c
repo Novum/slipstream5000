@@ -66,7 +66,6 @@ SlipTimedEffect *SlipTimedEffects_Allocate(void) {
 		SlipTimedEffect *selected = SlipTimedEffects_active->next;
 		entry = SlipTimedEffects_active->next;
 		while (entry != SlipTimedEffects_active) {
-
 			if (minimum > entry->lifetime) {
 				minimum = entry->lifetime;
 				selected = entry;

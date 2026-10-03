@@ -11,7 +11,6 @@ void SlipShape_DrawUnsorted(SlipActorShapeState *state, const uint8_t *shape, co
 	uint32_t remaining = SlipBytes_ReadLE16(primitive);
 	primitive += SLIP_SHAPE_TABLE_COUNT_BYTES;
 	do {
-
 		const int16_t normalZ = (int16_t)SlipBytes_ReadLE16(primitive + SLIP_PRIMITIVE_NORMAL_Z_OFFSET);
 		const uint32_t traversalValue = (remaining & SLIP_SHAPE_TRAVERSAL_UPPER_WORD_MASK) | (uint16_t)normalZ;
 		if (calls->planeVisible(calls->context, (int16_t)SlipBytes_ReadLE16(primitive + SLIP_PRIMITIVE_NORMAL_X_OFFSET),

@@ -22,7 +22,6 @@ enum {
 /* ANN commands use unaligned little-endian readers; caption tags follow the
  * original byte-swap sequence below. */
 static uint32_t SlipRaceIntro_CaptionTag(const uint8_t *p) {
-
 	return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
@@ -72,7 +71,6 @@ static bool SlipRaceIntro_PreloadInternal(uint8_t *script, size_t scriptBytes, u
 			if (size == 0)
 				break;
 			if (SlipBytes_ReadLE16(script + cursor) == SLIP_INTRO_SPEECH) {
-
 				char name[] = "????.SMP";
 				memcpy(name, script + cursor + SLIP_ANN_PAYLOAD_OFFSET, SLIP_ANN_CAPTION_TAG_BYTES);
 				name[0] = speechLanguagePrefixes[languageIndex];
@@ -219,7 +217,6 @@ SlipRaceIntroScriptResult SlipRaceIntro_Step(SlipRaceIntroScript *state, const u
 			state->caption = SlipRaceIntro_CaptionTag(command + SLIP_ANN_PAYLOAD_OFFSET);
 			host->resetConsole(host->context);
 			if (opcode == SLIP_INTRO_SPEECH && SlipBytes_ReadLE16(command + SLIP_ANN_SPEECH_HANDLE_OFFSET) != 0) {
-
 				if (host->play == NULL)
 					return SLIP_RACE_INTRO_SCRIPT_INVALID;
 				state->voice =

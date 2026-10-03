@@ -20,7 +20,6 @@ void SlipLapRecords_DrawRow(SlipLapRecord *record, const SlipLapRecordNameInput 
 	SlipTextPosition position = {0, SLIP_LAP_RECORDS_ROW_NAME_Y};
 	SlipText_Draw(&SlipText_state, record->name, NULL, &position);
 	if (input->cursorVisible != 0 && record->editing != 0) {
-
 		const char character = record->name[input->cursor];
 		record->name[input->cursor] = '\0';
 		const uint16_t prefixWidth = (uint16_t)SlipFont_MeasureText(&assets->font, record->name);

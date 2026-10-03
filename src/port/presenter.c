@@ -97,7 +97,6 @@ bool SlipPresenter_Initialize(uint16_t variant, const char *const *archives, siz
 	if (loaded)
 		loaded = SlipResourceHost_Load(NULL, variant == 0 ? "FACE.SPR" : "FFACE.SPR", &state->faceResource);
 	if (!loaded) {
-
 		for (unsigned i = 0; i < SLIP_PRESENTER_LAYER_COUNT; ++i)
 			for (unsigned j = 0; j < state->layers[variant != 0][i].count; ++j)
 				if (state->layers[variant != 0][i].resources[j] != 0)
