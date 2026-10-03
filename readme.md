@@ -1,11 +1,13 @@
-# Slipstream 5000
+# Slipstream 5000 source port
+
+<img width="2612" height="1556" alt="image" src="https://github.com/user-attachments/assets/c5f51e6a-1e89-42c9-89f0-beca4cacfb1d" />
+
 
 A native C port of Slipstream 5000, using SDL3 for windowing, input, and audio.
-The original software renderer and game logic are preserved. Opal provides
-OPL synthesis for music.
 
-Full championship runs have been compared against the DOS game with zero
-pixel divergence.
+Code is reverse engineered from the DOS binary and should produce bit identical results.
+It also includes a high-res mode with GPU rendering. Pressing F12 at any time switches
+old graphics and GPU mode.
 
 ## Game data
 
