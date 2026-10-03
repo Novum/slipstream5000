@@ -1,7 +1,7 @@
 #ifndef SLIPSTREAM5000_RASTER_AFFINE_H
 #define SLIPSTREAM5000_RASTER_AFFINE_H
-#include "texture_edges.h"
 #include "sprite.h"
+#include "texture_edges.h"
 extern uint32_t Raster_textureRowScroll;
 void Raster_SetTextureRowScroll(uint16_t scroll);
 void Raster_ClearTextureRowScroll(void);

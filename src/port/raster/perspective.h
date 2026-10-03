@@ -1,7 +1,7 @@
 #ifndef SLIPSTREAM5000_RASTER_PERSPECTIVE_H
 #define SLIPSTREAM5000_RASTER_PERSPECTIVE_H
-#include "texture_edges.h"
 #include "sprite.h"
+#include "texture_edges.h"
 
 typedef struct RasterPerspectiveDrawState {
 	const SlipSprite *texture;

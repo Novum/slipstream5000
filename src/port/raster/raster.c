@@ -1,6 +1,6 @@
 #include "raster.h"
-#include "software.h"
 #include "byte_order.h"
+#include "software.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -705,8 +705,8 @@ static uint32_t scaledSpriteHorizontalStep, scaledSpriteVerticalStep;
 static uint32_t scaledSpriteSourceWidth;
 static uint16_t scaledSpriteColumns, scaledSpriteTransparent;
 
-void RasterSoftware_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, const uint8_t *pixels, size_t pixelBytes,
-                             int16_t left, int16_t top, int16_t right, int16_t bottom) {
+void RasterSoftware_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, const uint8_t *pixels,
+                                     size_t pixelBytes, int16_t left, int16_t top, int16_t right, int16_t bottom) {
 	(void)recordBytes;
 	(void)pixelBytes;
 
@@ -964,7 +964,8 @@ void RasterSoftware_DrawShadedFlatPolygon(const RasterShadedPoint *points, uint1
 	                      (int16_t)Raster_FixedXInt(left.xAccumulator), (int16_t)Raster_FixedXInt(right.xAccumulator));
 }
 
-void RasterSoftware_DrawDitheredFlatPolygon(uint8_t color, uint8_t ditherBits, const RasterPoint *points, uint16_t pointCount) {
+void RasterSoftware_DrawDitheredFlatPolygon(uint8_t color, uint8_t ditherBits, const RasterPoint *points,
+                                            uint16_t pointCount) {
 	int i;
 	int topY;
 	int bottomY;

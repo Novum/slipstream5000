@@ -66,7 +66,10 @@ and software renderer.
 
 ## Development
 
-Format `src/port` with Clang-format 22 using the checked-in `.clang-format`.
+Format `src/port`, including GPU shaders, with Clang-format 22.1.3 using the
+checked-in `.clang-format`. Format `meson.build` and `meson.options` with
+`meson format` (Meson 1.11.0). Shader regeneration also runs Clang-format;
+use `build_shaders.py --clang-format PATH` to select the executable.
 GitHub Actions build debug and release configurations on Windows, Linux, and
 macOS, and check formatting.
 
