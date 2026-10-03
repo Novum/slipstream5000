@@ -19,7 +19,7 @@ uint8_t *SlipDraw3D_NextPrimitive(uint8_t *primitive) {
 			stride += SLIP_SERIALIZED_TEXTURE_COORDINATE_BYTES;
 		bytes = (uint16_t)((count & SLIP_PRIMITIVE_VERTEX_COUNT_MASK) * stride);
 	} else {
-		bytes = (uint32_t)(count & SLIP_PRIMITIVE_VERTEX_COUNT_MASK) << 1;
+		bytes = (uint32_t)(count & SLIP_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_SERIALIZED_INDEX_BYTES;
 	}
 	return primitive + bytes + SLIP_PRIMITIVE_HEADER_BYTES;
 }
@@ -27,55 +27,56 @@ uint8_t *SlipDraw3D_NextPrimitive(uint8_t *primitive) {
 uint8_t *SlipShape_NextPrimitive(uint8_t *primitive) { return SlipDraw3D_NextPrimitive(primitive); }
 
 bool SlipShape_MaterialName(uint8_t *shape, uint16_t material, char **name) {
-	const uint32_t materialOffset = SlipBytes_ReadLE32(shape + 0x18);
+	const uint32_t materialOffset = SlipBytes_ReadLE32(shape + SLIP_SHAPE_MATERIAL_TABLE_OFFSET);
 	if (materialOffset == 0)
 		return false;
 	uint8_t *entry = shape + materialOffset;
-	uint32_t remaining = SlipBytes_ReadLE16(entry);
-	if (remaining == 0)
+	const uint32_t materialCount = SlipBytes_ReadLE16(entry);
+	if (materialCount == 0)
 		return false;
-	entry += 2;
-	do {
-		if (SlipBytes_ReadLE16(entry + 16) == material) {
-			for (unsigned i = 0; i < 16; ++i) {
+	entry += SLIP_SHAPE_TABLE_COUNT_BYTES;
+	for (uint32_t materialIndex = 0; materialIndex < materialCount; ++materialIndex) {
+		if (SlipBytes_ReadLE16(entry + SLIP_SHAPE_MATERIAL_ID_OFFSET) == material) {
+			for (unsigned i = 0; i < SLIP_SHAPE_MATERIAL_NAME_BYTES; ++i) {
 				uint8_t character = entry[i];
 				if (character >= 'a' && character <= 'z')
-					character -= 0x20;
+					character -= 'a' - 'A';
 				entry[i] = character;
 			}
 			*name = (char *)entry;
 			return true;
 		}
-		entry += 18;
-	} while (--remaining != 0);
+		entry += SLIP_SHAPE_MATERIAL_ENTRY_BYTES;
+	}
 	return false;
 }
 
 void SlipShape_Prepare(SlipActorShapeState *state, uint8_t *shape, const SlipShapePrepareCalls *calls) {
 	state->shape = shape;
-	if (SlipBytes_ReadLE32(shape + 0x18) != 0 && SlipBytes_ReadLE32(shape + 0x14) != 0) {
-		uint8_t *primitive = shape + SlipBytes_ReadLE32(shape + 0x14);
+	if (SlipBytes_ReadLE32(shape + SLIP_SHAPE_MATERIAL_TABLE_OFFSET) != 0 &&
+	    SlipBytes_ReadLE32(shape + SLIP_SHAPE_PRIMITIVE_TABLE_OFFSET) != 0) {
+		uint8_t *primitive = shape + SlipBytes_ReadLE32(shape + SLIP_SHAPE_PRIMITIVE_TABLE_OFFSET);
 		uint32_t remaining = SlipBytes_ReadLE16(primitive);
 		SlipShape_StoreWord(shape + SLIP_SHAPE_FLAGS_OFFSET,
 		                    SlipBytes_ReadLE16(shape + SLIP_SHAPE_FLAGS_OFFSET) | SLIP_SHAPE_MATERIALS_PREPARED);
-		primitive += 2;
+		primitive += SLIP_SHAPE_TABLE_COUNT_BYTES;
 		do {
-			uint16_t material = SlipBytes_ReadLE16(primitive + 8);
+			uint16_t material = SlipBytes_ReadLE16(primitive + SLIP_PRIMITIVE_MATERIAL_OFFSET);
 			char *name;
 			if (!SlipShape_MaterialName(shape, material, &name) ||
 			    !calls->findMaterialByName(calls->context, name, &material))
 				material = 0;
-			SlipShape_StoreWord(primitive + 8, material);
+			SlipShape_StoreWord(primitive + SLIP_PRIMITIVE_MATERIAL_OFFSET, material);
 			primitive = SlipShape_NextPrimitive(primitive);
 		} while (--remaining != 0);
-		uint8_t *entry = shape + SlipBytes_ReadLE32(shape + 0x18);
+		uint8_t *entry = shape + SlipBytes_ReadLE32(shape + SLIP_SHAPE_MATERIAL_TABLE_OFFSET);
 		remaining = SlipBytes_ReadLE16(entry);
-		entry += 2;
+		entry += SLIP_SHAPE_TABLE_COUNT_BYTES;
 		do {
 			uint16_t material;
 			if (calls->findMaterialByName(calls->context, (const char *)entry, &material))
-				SlipShape_StoreWord(entry + 16, material);
-			entry += 18;
+				SlipShape_StoreWord(entry + SLIP_SHAPE_MATERIAL_ID_OFFSET, material);
+			entry += SLIP_SHAPE_MATERIAL_ENTRY_BYTES;
 		} while (--remaining != 0);
 	}
 	SlipShape_StoreWord(shape + SLIP_SHAPE_FLAGS_OFFSET,

@@ -1,5 +1,6 @@
 #ifndef SLIPSTREAM5000_ACTOR_POOL_H
 #define SLIPSTREAM5000_ACTOR_POOL_H
+#include "actor_format.h"
 #include "view3d.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,33 +16,33 @@ typedef struct SlipActorNamedPoint {
 } SlipActorNamedPoint;
 
 typedef struct SlipActorPartRecord {
-	struct SlipActorPartRecord *parent, *firstChild;           /* part+04,08 */
-	struct SlipActorPartRecord *nextSibling, *previousSibling; /* part+0c,10 */
-	uint32_t tag;                                              /* part+00 */
-	SlipView3DVec32 localPosition, worldPosition;              /* part+14,24 */
-	uint16_t shapes[8], replayShapes[8];                       /* part+3c,4c */
-	uint16_t debrisCount, destructionCount;                    /* part+5c,9e */
-	SlipActorDebris debris[4], destruction[4];                 /* part+5e,a0 */
+	struct SlipActorPartRecord *parent, *firstChild;                                        /* part+04,08 */
+	struct SlipActorPartRecord *nextSibling, *previousSibling;                              /* part+0c,10 */
+	uint32_t tag;                                                                           /* part+00 */
+	SlipView3DVec32 localPosition, worldPosition;                                           /* part+14,24 */
+	uint16_t shapes[SLIP_ART_LOD_COUNT], replayShapes[SLIP_ART_LOD_COUNT];                  /* part+3c,4c */
+	uint16_t debrisCount, destructionCount;                                                 /* part+5c,9e */
+	SlipActorDebris debris[SLIP_ART_DEBRIS_COUNT], destruction[SLIP_ART_DESTRUCTION_COUNT]; /* part+5e,a0 */
 	uint32_t rotationCallbackOffset;
-	uint16_t matrixValid, angle;        /* part+108,10a */
-	SlipView3DMatrix worldMatrix;       /* part+e4 */
-	SlipView3DMatrix drawMatrix;        /* part+f6 */
-	SlipView3DVec32 drawPosition;       /* part+30 */
-	uint16_t drawShape;                 /* resourceHandle word of part+20 */
-	bool hasDrawShape;                  /* part+20 != ffffffff */
-	uint32_t namedPointCount;           /* part+10c */
-	SlipActorNamedPoint namedPoints[5]; /* part+110 */
+	uint16_t matrixValid, angle;                              /* part+108,10a */
+	SlipView3DMatrix worldMatrix;                             /* part+e4 */
+	SlipView3DMatrix drawMatrix;                              /* part+f6 */
+	SlipView3DVec32 drawPosition;                             /* part+30 */
+	uint16_t drawShape;                                       /* resourceHandle word of part+20 */
+	bool hasDrawShape;                                        /* part+20 != ffffffff */
+	uint32_t namedPointCount;                                 /* part+10c */
+	SlipActorNamedPoint namedPoints[SLIP_ART_POINT_CAPACITY]; /* part+110 */
 } SlipActorPartRecord;
 
 typedef struct SlipActorRecord {
-	struct SlipActorRecord *next, *previous;          /* actor+00,04 */
-	SlipActorPartRecord *parts[17];                   /* actor+30 */
-	uint32_t partCount;                               /* actor+74 */
-	uint16_t ownerObject;                             /* actor+c0 */
-	uint16_t resourceHandle;                          /* actor+c2 */
-	SlipView3DVec32 cachedPosition, minimum, maximum; /* actor+08,14,20 */
-	uint32_t radius, cachedPartTag;                   /* actor+2c,78 */
-	uint32_t lodDistances[8], replayLodDistances[8];  /* actor+7c,9c */
+	struct SlipActorRecord *next, *previous;                                           /* actor+00,04 */
+	SlipActorPartRecord *parts[SLIP_ACTOR_PART_SLOT_COUNT];                            /* actor+30 */
+	uint32_t partCount;                                                                /* actor+74 */
+	uint16_t ownerObject;                                                              /* actor+c0 */
+	uint16_t resourceHandle;                                                           /* actor+c2 */
+	SlipView3DVec32 cachedPosition, minimum, maximum;                                  /* actor+08,14,20 */
+	uint32_t radius, cachedPartTag;                                                    /* actor+2c,78 */
+	uint32_t lodDistances[SLIP_ART_LOD_COUNT], replayLodDistances[SLIP_ART_LOD_COUNT]; /* actor+7c,9c */
 	uint32_t childrenInSortTree;
 	SlipView3DMatrix cachedMatrix; /* actor+c4 */
 } SlipActorRecord;

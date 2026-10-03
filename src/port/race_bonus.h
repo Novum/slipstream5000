@@ -25,7 +25,7 @@ typedef struct SlipRaceBonusSpawnTable {
 	size_t count;
 } SlipRaceBonusSpawnTable;
 
-extern const SlipRaceBonusSpawnTable SlipRaceBonus_trackTables[10];
+extern const SlipRaceBonusSpawnTable SlipRaceBonus_trackTables[SLIP_RACE_TRACK_COUNT];
 
 typedef struct SlipRaceBonusHostBindings {
 	SlipRacePlayerHostBindings *playerBindings;

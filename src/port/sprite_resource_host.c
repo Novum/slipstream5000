@@ -2,6 +2,7 @@
 #include "game_errors.h"
 #include "raster/raster.h"
 #include "resource_host.h"
+#include "sprite_format.h"
 
 static void SlipSpriteResourceHost_AllocationError(void *context) {
 	(void)context;
@@ -15,7 +16,8 @@ static void SlipSpriteResourceHost_DrawScaled(void *context, uint16_t resource, 
 		return;
 	const uint8_t *const bytes = SlipResourceHost_Lock(context, resource);
 	SlipResourcePayload payload = SlipResourceHost_Payload(resource);
-	Raster_DrawSpriteScaled(bytes, payload.size, bytes + 16, payload.size - 16, left, top, right, bottom);
+	Raster_DrawSpriteScaled(bytes, payload.size, bytes + SLIP_SPRITE_HEADER_BYTES,
+	                        payload.size - SLIP_SPRITE_HEADER_BYTES, left, top, right, bottom);
 	SlipResourceHost_Unlock(context, resource);
 }
 

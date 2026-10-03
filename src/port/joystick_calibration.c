@@ -5,6 +5,10 @@
 
 SlipJoystickCalibration SlipJoystick_calibration[2];
 uint8_t SlipJoystick_present[2];
+
+/* Initial minimum while collecting the joystick excursion range. */
+enum { SLIP_JOYSTICK_CALIBRATION_INITIAL_MINIMUM = 0x4000 };
+
 static SlipJoystickRead hostRead;
 static void *hostReadContext;
 
@@ -73,7 +77,7 @@ bool SlipJoystick_Calibrate(uint32_t operation, uint32_t joystick, SlipJoystickR
 	SlipJoystickCalibration *const state = &SlipJoystick_calibration[joystick];
 	uint16_t x, y;
 	switch ((uint16_t)operation) {
-	case 0:
+	case SLIP_JOYSTICK_CALIBRATION_INITIALIZE:
 		if (!read(context, joystick, &x, &y))
 			return false;
 		state->centerX = x;
@@ -83,13 +87,13 @@ bool SlipJoystick_Calibrate(uint32_t operation, uint32_t joystick, SlipJoystickR
 		state->maximumY = (int16_t)y;
 		state->minimumY = (int16_t)(0u - y);
 		return true;
-	case 1:
-		state->minimumX = 0x4000;
+	case SLIP_JOYSTICK_CALIBRATION_RESET_RANGE:
+		state->minimumX = SLIP_JOYSTICK_CALIBRATION_INITIAL_MINIMUM;
 		state->maximumX = 0;
-		state->minimumY = 0x4000;
+		state->minimumY = SLIP_JOYSTICK_CALIBRATION_INITIAL_MINIMUM;
 		state->maximumY = 0;
 		return true;
-	case 2:
+	case SLIP_JOYSTICK_CALIBRATION_SAMPLE_RANGE:
 		if (!read(context, joystick, &x, &y))
 			return false;
 		if ((int16_t)x < state->minimumX)
@@ -101,7 +105,7 @@ bool SlipJoystick_Calibrate(uint32_t operation, uint32_t joystick, SlipJoystickR
 		if ((int16_t)y > state->maximumY)
 			state->maximumY = (int16_t)y;
 		return true;
-	case 3:
+	case SLIP_JOYSTICK_CALIBRATION_FINISH:
 		if (!read(context, joystick, &x, &y))
 			return false;
 		state->centerX = x;

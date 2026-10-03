@@ -3,6 +3,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Texture residency scales dimensions in Q30; resampling positions use Q16. */
+enum {
+	SLIP_TEXTURE_RESIZE_SCALE_FRACTION_BITS = 30,
+	SLIP_TEXTURE_RESIZE_SCALE_ONE_Q30 = 1u << SLIP_TEXTURE_RESIZE_SCALE_FRACTION_BITS,
+	SLIP_TEXTURE_RESIZE_SCALE_HALF_Q30 = SLIP_TEXTURE_RESIZE_SCALE_ONE_Q30 / 2,
+	SLIP_TEXTURE_RESIZE_PIXEL_FRACTION_BITS = 16
+};
+
 typedef struct SlipTextureResizeState {
 	uint32_t width, height, resizedWidth, resizedHeight, resizedBytes;
 	uint32_t scale;

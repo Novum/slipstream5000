@@ -18,9 +18,23 @@
 
 enum {
 	SAVED_PATH_CAPACITY = 4096,
-	SAVED_CANCEL = 7,
-	SAVED_TOGGLE_FIRST = 0x81,
-	SAVED_TOGGLE_LAST = 0x86,
+	SAVED_CANCEL = SLIP_SAVE_SLOT_COUNT + 1,
+	SAVED_CURSOR_BLINK_MS = 1000,
+	SAVED_SLOT_NAME_Y = 64,
+	SAVED_CANCEL_LABEL_Y = 95,
+	SAVED_STATUS_TOP = 54,
+	SAVED_STATUS_BOTTOM = 79,
+	SAVED_NAME_LEFT = 106,
+	SAVED_NAME_TOP = 68,
+	SAVED_NAME_CURSOR_BOTTOM = 77,
+	SAVED_NAME_MAXIMUM_WIDTH = 100,
+	SAVED_NAME_CLIP_LEFT = 99,
+	SAVED_NAME_CLIP_RIGHT = 216,
+	SAVED_NAME_PROMPT_Y = 57,
+	SAVED_NAME_TEXT_COLOUR = 255,
+	SAVED_TOGGLE_SELECTION_BASE = 0x80,
+	SAVED_TOGGLE_FIRST = SAVED_TOGGLE_SELECTION_BASE + 1,
+	SAVED_TOGGLE_LAST = SAVED_TOGGLE_SELECTION_BASE + SLIP_SAVE_SLOT_COUNT,
 	SAVED_TEXT_COLOR = 240,
 	SAVED_TAG_CANCEL = 0x43414e43,
 	SAVED_TAG_EMPTY = 0x4e4f4741,
@@ -38,7 +52,7 @@ static struct {
 } saved;
 
 static SlipInputNavigationTable savedGamesNavigation = {
-    .itemCount = 7,
+    .itemCount = SAVED_CANCEL,
     .currentItem = 0,
     .up = {-1, -1, -1, -1, -1, -1, -1},
     .down = {-1, -1, -1, -1, -1, -1, -1},
@@ -134,8 +148,11 @@ static void SlipSavedGames_Initialize(void) {
 	if (!SlipResourceHost_LoadSequence(NULL, "RES_GL*.SPR", 1, SLIP_SAVE_SLOT_COUNT, saved.labels))
 		SlipGame_FileFailure();
 	char pattern[] = "RES_G0*.SPR";
+
+	enum { SLIP_SAVE_FRAME_DIGIT_OFFSET = sizeof("RES_G") - 1 };
+
 	for (unsigned frame = 0; frame < SLIP_SAVE_SLOT_LAST_FRAME; ++frame) {
-		pattern[5] = (char)('0' + frame);
+		pattern[SLIP_SAVE_FRAME_DIGIT_OFFSET] = (char)('0' + frame);
 		if (!SlipResourceHost_LoadSequence(NULL, pattern, 1, SLIP_SAVE_SLOT_COUNT, saved.frames[frame]))
 			SlipGame_FileFailure();
 	}
@@ -178,7 +195,7 @@ static void SlipSavedGames_DrawSlot(uint16_t selection, uint16_t names) {
 		const char *text = (const char *)SlipResourceHost_Lock(NULL, names);
 		for (uint16_t slotIndex = 1; slotIndex < selection; ++slotIndex)
 			text += strlen(text) + 1;
-		SlipTextPosition position = {0, 64};
+		SlipTextPosition position = {0, SAVED_SLOT_NAME_Y};
 		SlipText_Draw(&SlipText_state, text, NULL, &position);
 		SlipResourceHost_Unlock(NULL, names);
 	}
@@ -192,9 +209,9 @@ static void SlipSavedGames_Draw(void) {
 			SlipSavedGamesHost_DrawSprite(saved.frames[frame - 1][slot], true);
 	}
 	SlipText_SetColor(&SlipText_state, SAVED_TEXT_COLOR);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 0, 319);
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
 	const char *const text = SlipStringTable_Get(saved.strings, SAVED_TAG_CANCEL, &strings);
-	SlipTextPosition position = {0, 95};
+	SlipTextPosition position = {0, SAVED_CANCEL_LABEL_Y};
 	SlipText_Draw(&SlipText_state, text, NULL, &position);
 	SlipStringTable_Unlock(saved.strings, &strings);
 }
@@ -228,7 +245,7 @@ bool SlipSavedGames_Run(const char *resourcePath, SlipRaceRacerTable *racers, ui
 		else {
 			const uint32_t tag = names.resource == 0 ? SAVED_TAG_EMPTY : SAVED_TAG_CHOOSE;
 			const char *const text = SlipStringTable_Get(saved.strings, tag, &strings);
-			SlipText_DrawCentered(&SlipText_state, text, NULL, 0, 54, 79);
+			SlipText_DrawCentered(&SlipText_state, text, NULL, 0, SAVED_STATUS_TOP, SAVED_STATUS_BOTTOM);
 			SlipStringTable_Unlock(saved.strings, &strings);
 		}
 		SlipMenu_PresentFrame();
@@ -259,7 +276,7 @@ bool SlipSavedGames_Run(const char *resourcePath, SlipRaceRacerTable *racers, ui
 			animating = SlipSaveSlotAnimation_Update(&saved.animation);
 			SlipSavedGames_Draw();
 			const char *const text = SlipStringTable_Get(saved.strings, SAVED_TAG_LOADING, &strings);
-			SlipText_DrawCentered(&SlipText_state, text, NULL, 0, 54, 79);
+			SlipText_DrawCentered(&SlipText_state, text, NULL, 0, SAVED_STATUS_TOP, SAVED_STATUS_BOTTOM);
 			SlipStringTable_Unlock(saved.strings, &strings);
 			SlipMenu_PresentFrame();
 		} while (animating);
@@ -284,7 +301,7 @@ static bool SlipSavedGamesHost_Open(void *context, const char *name, uint8_t mod
 	char path[SAVED_PATH_CAPACITY];
 	if (!SlipSavedGamesHost_Path(name, path))
 		return false;
-	host->file = SlipHostFile_OpenStream(path, mode == 0 ? "rb" : "r+b");
+	host->file = SlipHostFile_OpenStream(path, mode == SLIP_SAVE_OPEN_READ ? "rb" : "r+b");
 	*file = 0;
 	return host->file != NULL;
 }
@@ -358,7 +375,8 @@ static bool SlipSavedGames_Invalidate(void *context, uint16_t slot) {
 	if (!calls->load(calls->context, "SLIPSTRM.SAV", &resource))
 		return false;
 	SlipChampionshipSaveDirectory *const directory = calls->lockDirectory(calls->context, resource);
-	bool ok = directory->header.version == 2 && (int16_t)slot < (int16_t)directory->header.slotCount;
+	bool ok = directory->header.version == SLIP_SAVE_DIRECTORY_VERSION &&
+	          (int16_t)slot < (int16_t)directory->header.slotCount;
 	if (ok)
 		directory->slots[slot].payloadOffset = 0;
 	calls->unlock(calls->context, resource);
@@ -366,11 +384,11 @@ static bool SlipSavedGames_Invalidate(void *context, uint16_t slot) {
 	return ok;
 }
 
-static bool SlipSavedGames_Name(uint16_t selection, char name[32]) {
+static bool SlipSavedGames_Name(uint16_t selection, char name[SLIP_SAVE_NAME_BYTES]) {
 	saved.animation.targetFrame[selection - 1] ^= SLIP_SAVE_SLOT_LAST_FRAME;
 	name[0] = 0;
 	bool cursorVisible = true;
-	uint16_t cursor = 0, cursorMilliseconds = 1000;
+	uint16_t cursor = 0, cursorMilliseconds = SAVED_CURSOR_BLINK_MS;
 	SDL_HideCursor();
 	SlipInput_SetBiosMode(1);
 	SlipFrameTimer_Reset();
@@ -381,14 +399,14 @@ static bool SlipSavedGames_Name(uint16_t selection, char name[32]) {
 		SlipSavedGames_Draw();
 		SlipSavedGames_DrawSlot(selection, 0);
 		const char *const text = SlipStringTable_Get(saved.strings, SAVED_TAG_NAME, &strings);
-		SlipTextPosition position = {0, 57};
+		SlipTextPosition position = {0, SAVED_NAME_PROMPT_Y};
 		SlipText_Draw(&SlipText_state, text, NULL, &position);
 		SlipStringTable_Unlock(saved.strings, &strings);
 		const uint16_t elapsed = (uint16_t)SlipFrameTimer_Values().deltaMilliseconds;
 		bool borrow = cursorMilliseconds < elapsed;
 		cursorMilliseconds = (uint16_t)(cursorMilliseconds - elapsed);
 		if (borrow) {
-			cursorMilliseconds = (uint16_t)(cursorMilliseconds + 1000);
+			cursorMilliseconds = (uint16_t)(cursorMilliseconds + SAVED_CURSOR_BLINK_MS);
 			cursorVisible = !cursorVisible;
 		}
 		const uint8_t character = SlipInput_ReadCharacter(SlipInput_pressed, SlipInput_held, &SlipInputBiosHost_calls);
@@ -397,19 +415,20 @@ static bool SlipSavedGames_Name(uint16_t selection, char name[32]) {
 				accepted = true;
 				break;
 			}
-			if (SlipText_FitsCharacter(&SlipText_state, name, character, 100))
-				cursor = (uint16_t)SlipText_Edit(name, cursor, 31, character);
+			if (SlipText_FitsCharacter(&SlipText_state, name, character, SAVED_NAME_MAXIMUM_WIDTH))
+				cursor = (uint16_t)SlipText_Edit(name, cursor, SLIP_SAVE_NAME_BYTES - 1, character);
 		}
-		SlipText_SetColor(&SlipText_state, 255);
-		SlipText_SetStyle(&SlipText_state, 0, UINT16_MAX, 99, 216);
-		position = (SlipTextPosition){106, 68};
+		SlipText_SetColor(&SlipText_state, SAVED_NAME_TEXT_COLOUR);
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_AT_POSITION, UINT16_MAX, SAVED_NAME_CLIP_LEFT,
+		                  SAVED_NAME_CLIP_RIGHT);
+		position = (SlipTextPosition){SAVED_NAME_LEFT, SAVED_NAME_TOP};
 		SlipText_Draw(&SlipText_state, name, NULL, &position);
 		if (cursorVisible) {
 			const char replaced = name[cursor];
 			name[cursor] = 0;
-			const int16_t x = (int16_t)(106 + SlipFont_MeasureText(&SlipText_state.font, name));
+			const int16_t x = (int16_t)(SAVED_NAME_LEFT + SlipFont_MeasureText(&SlipText_state.font, name));
 			name[cursor] = replaced;
-			Raster_DrawLineClipped(255, x, 68, x, 77);
+			Raster_DrawLineClipped(SAVED_NAME_TEXT_COLOUR, x, SAVED_NAME_TOP, x, SAVED_NAME_CURSOR_BOTTOM);
 		}
 		SlipMenu_PresentFrame();
 		if (!SlipMenu_PollInput() || SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_SCAN_ESCAPE))
@@ -427,7 +446,7 @@ bool SlipSavedGames_Save(const char *resourcePath, const SlipRaceRacerTable *rac
 	if (!SlipStringTable_Load(&SlipStringTable_state, "SAVED   ", &strings, &saved.strings))
 		SlipGame_ResourceFailure();
 	SlipConfigHost_calls.selectFont(NULL, SlipMenu_resources.smallFont);
-	Raster_SetClipRect(0, 0, 319, 199);
+	Raster_SetClipRect(0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 	SlipSavedGames_Initialize();
 	SlipSavedGamesFileHost host = {.racers = racers,
 	                               .stage = stage,
@@ -440,7 +459,7 @@ bool SlipSavedGames_Save(const char *resourcePath, const SlipRaceRacerTable *rac
 	                                             .release = SlipResourceHost_Release}};
 	SlipChampionshipSaveNames names = SlipChampionshipSave_LoadNames(&host.directory);
 	if (names.slotCount == 0) {
-		if (!SlipResourceHost_Allocate(NULL, 85, 0, &names.resource))
+		if (!SlipResourceHost_Allocate(NULL, SLIP_SAVE_SLOT_COUNT * sizeof("[Unused Slot]") + 1, 0, &names.resource))
 			SlipGame_MemoryFailure();
 		char *destination = SlipSavedGamesHost_LockNames(NULL, names.resource);
 		for (unsigned slotIndex = 0; slotIndex < SLIP_SAVE_SLOT_COUNT; ++slotIndex) {
@@ -463,10 +482,10 @@ bool SlipSavedGames_Save(const char *resourcePath, const SlipRaceRacerTable *rac
 			SlipSavedGames_DrawSlot(selection, names.resource);
 		else {
 			const char *const text = SlipStringTable_Get(saved.strings, SAVED_TAG_CHOOSE_SAVE, &strings);
-			SlipText_DrawCentered(&SlipText_state, text, NULL, 0, 54, 79);
+			SlipText_DrawCentered(&SlipText_state, text, NULL, 0, SAVED_STATUS_TOP, SAVED_STATUS_BOTTOM);
 			SlipStringTable_Unlock(saved.strings, &strings);
 		}
-		SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 99, 216);
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, SAVED_NAME_CLIP_LEFT, SAVED_NAME_CLIP_RIGHT);
 		SlipText_SetColor(&SlipText_state, SAVED_TEXT_COLOR);
 		SlipMenu_PresentFrame();
 		if (!SlipMenu_PollInput())
@@ -474,11 +493,11 @@ bool SlipSavedGames_Save(const char *resourcePath, const SlipRaceRacerTable *rac
 		if (!SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_SCAN_ENTER) &&
 		    !SlipInput_TestAndClear(SlipInput_pressed, SLIP_INPUT_MOUSE_LEFT))
 			continue;
-		if (selection == 0 || selection >= 128)
+		if (selection == 0 || selection >= SAVED_TOGGLE_SELECTION_BASE)
 			continue;
 		if (selection == SAVED_CANCEL)
 			break;
-		char name[32] = {0};
+		char name[SLIP_SAVE_NAME_BYTES] = {0};
 		if (!SlipSavedGames_Name(selection, name))
 			continue;
 		SlipChampionshipSaveStoreCalls store = {.file = {&host, SlipSavedGamesHost_Open, SlipSavedGamesHost_Create,

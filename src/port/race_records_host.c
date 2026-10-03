@@ -1,9 +1,11 @@
 #include "race_records_host.h"
 #include "config_menu_draw.h"
 #include "config_settings.h"
+#include "fixed_point.h"
 #include "game_errors.h"
 #include "material_host.h"
 #include "race_hud.h"
+#include "race_records_draw.h"
 #include "raster/raster.h"
 #include "renderer_host.h"
 #include "renderer_projection.h"
@@ -13,8 +15,9 @@
 #include "shape_host.h"
 #include "shape_vertices.h"
 
-SlipLapRecordsScreen SlipLapRecordsHost_screen = {.animation = {.matrix = {{16384, 0, 0, 0, 16384, 0, 0, 0, 16384}}}};
-static const SlipView3DMatrix cameraMatrix = {{16384, 0, 0, 0, 16384, 0, 0, 0, 16384}};
+SlipLapRecordsScreen SlipLapRecordsHost_screen = {
+    .animation = {.matrix = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}}}};
+static const SlipView3DMatrix cameraMatrix = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 
 static void SlipLapRecordsHost_RowViewport(void *context, int32_t left, int32_t top, int32_t right, int32_t bottom,
                                            int32_t centerX, int32_t centerY) {
@@ -192,12 +195,14 @@ void SlipLapRecordsHost_DrawRow(void *context, SlipLapRecordsScreen *screen, uin
 	SlipSprite_Draw(&sprite, g_screenBufferBase, g_screenPitch, 1, 1);
 	SlipResourceHost_Unlock(context, screen->portraits[record->driverIndex]);
 	sprite = SlipLapRecordsHost_LockSprite(context, screen->shapeBackground);
-	SlipSprite_Draw(&sprite, g_screenBufferBase, g_screenPitch, 207, 1);
+	SlipSprite_Draw(&sprite, g_screenBufferBase, g_screenPitch, SLIP_LAP_RECORDS_ROW_SHAPE_LEFT,
+	                SLIP_LAP_RECORDS_ROW_SHAPE_TOP);
 	SlipResourceHost_Unlock(context, screen->shapeBackground);
 	SlipText_SelectResourceFont(&SlipText_state, screen->rowFont, &recordFontCalls);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 49, 206);
-	SlipText_SetColor(&SlipText_state, 255);
-	SlipTextPosition position = {0, 12};
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, SLIP_LAP_RECORDS_ROW_TEXT_LEFT,
+	                  SLIP_LAP_RECORDS_ROW_TEXT_RIGHT);
+	SlipText_SetColor(&SlipText_state, SLIP_LAP_RECORDS_ROW_TEXT_COLOUR);
+	SlipTextPosition position = {0, SLIP_LAP_RECORDS_ROW_NAME_Y};
 	SlipText_Draw(&SlipText_state, record->name, NULL, &position);
 	if (screen->input.cursorVisible != 0 && record->editing != 0) {
 
@@ -206,17 +211,20 @@ void SlipLapRecordsHost_DrawRow(void *context, SlipLapRecordsScreen *screen, uin
 		const uint16_t prefixWidth = SlipFont_MeasureResource(screen->rowFont, record->name, &recordFontCalls);
 		record->name[screen->input.cursor] = character;
 		const int16_t wholeWidth = (int16_t)SlipFont_MeasureResource(screen->rowFont, record->name, &recordFontCalls);
-		const int16_t cursorX = (int16_t)(uint16_t)(prefixWidth + 127 - (wholeWidth >> 1));
-		Raster_DrawLineClipped(255, cursorX, position.y, cursorX, (int16_t)(position.y + 9));
+		const int16_t cursorX = (int16_t)(uint16_t)(prefixWidth + SLIP_LAP_RECORDS_ROW_TEXT_CENTER - (wholeWidth >> 1));
+		Raster_DrawLineClipped(SLIP_LAP_RECORDS_ROW_TEXT_COLOUR, cursorX, position.y, cursorX,
+		                       (int16_t)(position.y + SLIP_LAP_RECORDS_ROW_CURSOR_HEIGHT));
 	}
-	char time[12];
+	char time[SLIP_RACE_TIME_TEXT_BYTES];
 	SlipRaceHud_FormatTime(record->lapTime, time);
-	time[5] = '\'';
-	time[8] = '"';
-	position = (SlipTextPosition){0, 26};
-	SlipText_Draw(&SlipText_state, time + 3, NULL, &position);
-	SlipLapRecordsHost_RowViewport(context, 207, 1, 254, 44, 230, 22);
-	SlipView3DVec32 position3D = {0, 0, 63440};
+	time[SLIP_RACE_TIME_MINUTES_SEPARATOR] = '\'';
+	time[SLIP_RACE_TIME_SECONDS_SEPARATOR] = '"';
+	position = (SlipTextPosition){0, SLIP_LAP_RECORDS_ROW_TIME_Y};
+	SlipText_Draw(&SlipText_state, time + SLIP_RACE_TIME_MINUTES_OFFSET, NULL, &position);
+	SlipLapRecordsHost_RowViewport(context, SLIP_LAP_RECORDS_ROW_SHAPE_LEFT, SLIP_LAP_RECORDS_ROW_SHAPE_TOP,
+	                               SLIP_LAP_RECORDS_ROW_SHAPE_RIGHT, SLIP_LAP_RECORDS_ROW_SHAPE_BOTTOM,
+	                               SLIP_LAP_RECORDS_ROW_SHAPE_CENTER_X, SLIP_LAP_RECORDS_ROW_SHAPE_CENTER_Y);
+	SlipView3DVec32 position3D = {0, 0, SLIP_LAP_RECORDS_ROW_SHAPE_DEPTH};
 	SlipLapRecordsHost_RowPosition(context, position3D, position3D);
 	SlipLapRecordsHost_RowShape(context, shape, &screen->animation.matrix, &screen->animation.matrix);
 	SlipResourceHost_Unlock(context, resource);

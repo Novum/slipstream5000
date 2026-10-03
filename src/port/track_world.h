@@ -12,6 +12,7 @@
 #include "resource.h"
 #include "shape3d.h"
 #include "timed_effects.h"
+#include "track_format.h"
 #include "view3d.h"
 
 typedef struct SlipTrackBeamRequest {
@@ -19,7 +20,25 @@ typedef struct SlipTrackBeamRequest {
 	uint32_t material;
 } SlipTrackBeamRequest;
 
-enum { SLIP_TRACK_BEAM_BLASTER = 0, SLIP_TRACK_BEAM_REFUEL = UINT16_MAX };
+enum {
+	SLIP_TRACK_BEAM_BLASTER = 0,
+	SLIP_TRACK_BEAM_REFUEL = UINT16_MAX,
+	SLIP_TRACK_BEAM_RECORD_CAPACITY = 0x180,
+	SLIP_TRACK_BEAM_QUEUE_CAPACITY = 48,
+	SLIP_TRACK_SLOT_RECORD_BYTES = 280,
+	SLIP_TRACK_SLOT_SPARE_COUNT = 8,
+	SLIP_TRACK_SLOT_SENTINEL_COUNT = 2,
+	SLIP_TRACK_BOUNDING_CORNER_COUNT = 8,
+	/* Object-list entry increments the nesting counter before drawing. */
+	SLIP_TRACK_OUTER_OBJECT_DEPTH = 1,
+	SLIP_TRACK_REPLAY_OBJECT_CAPACITY = 10,
+	SLIP_TRACK_BOUND_COORDINATE_COUNT = 6,
+	SLIP_TRACK_CORNER_COORDINATE_COUNT = 3,
+	SLIP_TRACK_SLOT_BOX_COLLISION = 1,
+	SLIP_TRACK_SLOT_POINT_COLLISION = 2,
+	SLIP_TRACK_SLOT_ARTICULATED_BOUNDS = 4,
+	SLIP_TRACK_SLOT_DRONE = 64
+};
 
 typedef struct SlipTrackBeamRecord {
 	uint32_t section;
@@ -35,8 +54,8 @@ typedef struct SlipTrackBeamState {
 	uint32_t built;
 	uint32_t recordCount;
 	uint32_t queueCount;
-	SlipTrackBeamRequest queue[0x30];
-	SlipTrackBeamRecord records[0x180];
+	SlipTrackBeamRequest queue[SLIP_TRACK_BEAM_QUEUE_CAPACITY];
+	SlipTrackBeamRecord records[SLIP_TRACK_BEAM_RECORD_CAPACITY];
 	SlipTrackBeamRecord *resourceRecords;
 } SlipTrackBeamState;
 
@@ -48,7 +67,27 @@ enum {
 	SLIP_TRACK_WORLD_DEFERRED_LIST_BYTES = 0x0c04,
 	SLIP_TRACK_WORLD_DEFERRED_SCAN_BYTES = 0x0c00,
 	SLIP_TRACK_WORLD_AXIS_RAMP_BYTES = 0x01d4,
-	SLIP_TRACK_WORLD_AXIS_TEST_BYTES = 0x0042
+	SLIP_TRACK_WORLD_AXIS_TEST_BYTES = 0x0042,
+	SLIP_TRACK_WORLD_AXIS_RAMP_X_LAST_INDEX = 12,
+	SLIP_TRACK_WORLD_AXIS_RAMP_Y_LAST_INDEX = 4,
+	SLIP_TRACK_WORLD_AXIS_RAMP_Z_LAST_INDEX = 20,
+	SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES = sizeof(SlipView3DVec32),
+	SLIP_TRACK_WORLD_AXIS_RAMP_POINT_COUNT = SLIP_TRACK_WORLD_AXIS_RAMP_X_LAST_INDEX +
+	                                         SLIP_TRACK_WORLD_AXIS_RAMP_Y_LAST_INDEX +
+	                                         SLIP_TRACK_WORLD_AXIS_RAMP_Z_LAST_INDEX + 3,
+	SLIP_TRACK_WORLD_AXIS_RAMP_Y_OFFSET =
+	    (SLIP_TRACK_WORLD_AXIS_RAMP_X_LAST_INDEX + 1) * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES,
+	SLIP_TRACK_WORLD_AXIS_RAMP_Z_OFFSET =
+	    SLIP_TRACK_WORLD_AXIS_RAMP_Y_OFFSET +
+	    (SLIP_TRACK_WORLD_AXIS_RAMP_Y_LAST_INDEX + 1) * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES,
+	SLIP_TRACK_WORLD_AXIS_TEST_X_COUNT = SLIP_TRACK_WORLD_AXIS_RAMP_X_LAST_INDEX - 1,
+	SLIP_TRACK_WORLD_AXIS_TEST_Y_COUNT = SLIP_TRACK_WORLD_AXIS_RAMP_Y_LAST_INDEX - 1,
+	SLIP_TRACK_WORLD_AXIS_TEST_Z_COUNT = SLIP_TRACK_WORLD_AXIS_RAMP_Z_LAST_INDEX - 1,
+	SLIP_TRACK_WORLD_AXIS_TEST_Y_OFFSET = SLIP_TRACK_WORLD_AXIS_TEST_X_COUNT * sizeof(uint16_t),
+	SLIP_TRACK_WORLD_AXIS_TEST_Z_OFFSET =
+	    SLIP_TRACK_WORLD_AXIS_TEST_Y_OFFSET + SLIP_TRACK_WORLD_AXIS_TEST_Y_COUNT * sizeof(uint16_t),
+	SLIP_TRACK_WORLD_AXIS_TEST_COUNT =
+	    SLIP_TRACK_WORLD_AXIS_TEST_X_COUNT + SLIP_TRACK_WORLD_AXIS_TEST_Y_COUNT + SLIP_TRACK_WORLD_AXIS_TEST_Z_COUNT
 };
 
 extern uint32_t SlipTrackWorld_lastRecord;
@@ -1005,6 +1044,11 @@ typedef enum SlipObjectEvent {
 	SLIP_OBJECT_EVENT_APPLY_DAMAGE = 0x0202
 } SlipObjectEvent;
 
+/* Release servers receive a separate event code from per-object callbacks. */
+enum { SLIP_OBJECT_SERVER_EVENT_FREE = 1u, SLIP_OBJECT_RELEASE_SERVER_ID = 1u };
+
+enum { SLIP_OBJECT_EVENT_UPPER_WORD_MASK = 0xffff0000u };
+
 typedef uint32_t (*SlipObjectEventCallback)(uint32_t eventCode, uint32_t eventPayload, uint32_t eventValue,
                                             uint32_t eventFlags, uint16_t objectOffset, uintptr_t dispatchData,
                                             uint32_t dispatchFrame);
@@ -1022,7 +1066,9 @@ typedef struct SlipObjectSetCallback {
 
 enum {
 	SLIP_OBJECT_COUNT = 100,
+	SLIP_OBJECT_VIEW_POSITION_VALID = 1u,
 	SLIP_OBJECT_DOS_STRIDE = 0xae,
+	SLIP_OBJECT_DOS_TRACK_SLOT_END = 16,
 	SLIP_OBJECT_PRIVATE_STATE_BYTES = 0x4e,
 	SLIP_OBJECT_TABLE_DOS_BYTES = SLIP_OBJECT_COUNT * SLIP_OBJECT_DOS_STRIDE,
 	SLIP_TRACK_SLOT_DRAW_RECORD_COUNT = 0x40 * 2 + 1
@@ -1313,8 +1359,8 @@ typedef struct SlipTrackWorldCullBounds {
 	SlipView3DVec32 center;
 	bool callTrackWorldIndirectCull;
 	bool trackWorldIndirectCullCarry;
-	SlipView3DVec32 points[8];
-	uint32_t cornerClipMasks[8];
+	SlipView3DVec32 points[SLIP_TRACK_BOUNDING_CORNER_COUNT];
+	uint32_t cornerClipMasks[SLIP_TRACK_BOUNDING_CORNER_COUNT];
 	uint32_t mask;
 	SlipTrackWorldCullBranch branch;
 	SlipView3DVec32 lastPoint;
@@ -1401,7 +1447,7 @@ typedef struct SlipTrackWorldComponentSetup {
 	uint32_t drawStateIndexAfter;
 	bool callLoadDrawState;
 
-	uint16_t replayList[10];
+	uint16_t replayList[SLIP_TRACK_REPLAY_OBJECT_CAPACITY];
 } SlipTrackWorldComponentSetup;
 
 typedef struct SlipTrackWorldComponentTailVisit {
@@ -1834,6 +1880,20 @@ typedef struct SlipTrackVisibilityEntry {
 	uint32_t useClipBounds;
 	uint32_t resetMaximumDepth;
 } SlipTrackVisibilityEntry;
+
+enum {
+	SLIP_TRACK_VISIBILITY_ENTRY_BYTES = sizeof(SlipTrackVisibilityEntry),
+	SLIP_TRACK_VISIBILITY_POSITION_END = offsetof(SlipTrackVisibilityEntry, callbackFlag),
+	SLIP_TRACK_VISIBILITY_BOUNDS_END = offsetof(SlipTrackVisibilityEntry, maxY) + sizeof(uint32_t),
+	SLIP_TRACK_VISIBILITY_CLIP_BOUNDS_END = offsetof(SlipTrackVisibilityEntry, useClipBounds) + sizeof(uint32_t),
+	SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES = sizeof(uint32_t),
+	SLIP_TRACK_DEFERRED_REFERENCE_BYTES = sizeof(uint32_t),
+	SLIP_TRACK_DEFERRED_REFERENCE_SHIFT = 2,
+	SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES = sizeof(uint32_t),
+	SLIP_TRACK_VISIBILITY_ENTRY_CAPACITY =
+	    (SLIP_TRACK_WORLD_OBJECT_LIST_BYTES - SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) /
+	    SLIP_TRACK_VISIBILITY_ENTRY_BYTES
+};
 
 typedef char SlipTrackVisibilityEntrySize[sizeof(SlipTrackVisibilityEntry) == 0x2c ? 1 : -1];
 
@@ -3148,14 +3208,24 @@ typedef struct SlipTrackDoorRecord {
 	int16_t directionZ;
 } SlipTrackDoorRecord;
 
+enum {
+	SLIP_TRACK_DOOR_RECORD_BYTES = sizeof(SlipTrackDoorRecord),
+	SLIP_TRACK_DOOR_TABLE_DOS_TOKEN = 0x339a6,
+	SLIP_TRACK_DOOR_DRAW_DOS_TOKEN = 0x3c22a,
+	SLIP_TRACK_DOOR_DRAW_REVERSE_DOS_TOKEN = 0x3c2ea
+};
+
 typedef char SlipTrackDoorSize[sizeof(SlipTrackDoorRecord) == 0x64 ? 1 : -1];
 typedef char SlipTrackDoorMatrixOffset[offsetof(SlipTrackDoorRecord, matrix) == 0x4c ? 1 : -1];
 typedef char SlipTrackDoorDirectionOffset[offsetof(SlipTrackDoorRecord, directionX) == 0x5e ? 1 : -1];
+
+enum { SLIP_TRACK_DOOR_CAPACITY = 8 };
+
 extern uint32_t SlipTrackWorld_doorsInitialized;
 extern uint16_t SlipTrackWorld_doorCount;
-extern SlipTrackDoorRecord SlipTrackWorld_doors[8];
+extern SlipTrackDoorRecord SlipTrackWorld_doors[SLIP_TRACK_DOOR_CAPACITY];
 
-extern SlipResourcePayload SlipTrackWorld_doorShapes[8];
+extern SlipResourcePayload SlipTrackWorld_doorShapes[SLIP_TRACK_DOOR_CAPACITY];
 bool SlipTrackWorld_FindDoors(uint16_t trackHandle, const uint8_t *trd, size_t trdBytes, uint32_t trdAddress,
                               const uint8_t *trc, size_t trcBytes);
 
@@ -3166,7 +3236,7 @@ typedef struct SlipTrackSectionDrawLinks {
 	struct {
 		uint16_t sectionOffset;
 		uint16_t primitiveOffset;
-	} exits[3];
+	} exits[SLIP_TRD_SECTION_EXIT_COUNT];
 
 	uint16_t firstDrawOffset;
 } SlipTrackSectionDrawLinks;
@@ -3190,8 +3260,9 @@ typedef char SlipTrackDrawRecordSize[sizeof(SlipTrackDrawRecord) == 0x38u ? 1 : 
 typedef char SlipTrackDrawRecordOwnerOffset[offsetof(SlipTrackDrawRecord, ownerTrackRecordAddress) == 0x1cu ? 1 : -1];
 
 typedef struct SlipTrackSlotRecord {
-	uint32_t cornerTrackRecords[8];
-	int32_t boundsAndCorners[30];
+	uint32_t cornerTrackRecords[SLIP_TRACK_BOUNDING_CORNER_COUNT];
+	int32_t boundsAndCorners[SLIP_TRACK_BOUND_COORDINATE_COUNT +
+	                         SLIP_TRACK_BOUNDING_CORNER_COUNT * SLIP_TRACK_CORNER_COORDINATE_COUNT];
 	uint32_t doorAddress;
 	uint32_t trackBranch;
 	uint32_t flags;
@@ -3221,6 +3292,32 @@ typedef struct SlipTrackSlotRecord {
 	uint16_t recoveryFlags;
 } SlipTrackSlotRecord;
 
+/* Field ends used when reading partial draw and slot records. Keep these
+ * offsets as integer constants so DOS address additions retain their width. */
+enum {
+	SLIP_TRACK_DRAW_RECORD_BYTES = sizeof(SlipTrackDrawRecord),
+	SLIP_TRACK_DRAW_CALLBACK_END = offsetof(SlipTrackDrawRecord, callbackAddress) + sizeof(uint32_t),
+	SLIP_TRACK_DRAW_ATTACHMENT_READY_END = offsetof(SlipTrackDrawRecord, attachmentTransformReady) + sizeof(uint32_t),
+	SLIP_TRACK_DRAW_LINKS_END = offsetof(SlipTrackDrawRecord, previousAddress) + sizeof(uint32_t),
+	SLIP_TRACK_DRAW_OWNER_END = offsetof(SlipTrackDrawRecord, ownerTrackRecordAddress) + sizeof(uint32_t),
+	SLIP_TRACK_DRAW_ATTACHMENT_READY_OFFSET = offsetof(SlipTrackDrawRecord, attachmentTransformReady),
+	SLIP_TRACK_DRAW_PAIRED_ADDRESS_END = offsetof(SlipTrackDrawRecord, pairedDrawAddress) + sizeof(uint32_t),
+	SLIP_TRACK_DRAW_ATTACHMENT_NORMAL_END = offsetof(SlipTrackDrawRecord, attachmentNormal) + sizeof(SlipView3DVec32),
+	SLIP_TRACK_DRAW_NO_SLOT_TEST_RECORD_INDEX = 2,
+	SLIP_TRACK_DRAW_NO_SLOT_TEST_END = SLIP_TRACK_DRAW_NO_SLOT_TEST_RECORD_INDEX * SLIP_TRACK_DRAW_RECORD_BYTES +
+	                                   offsetof(SlipTrackDrawRecord, attachmentNormal.z) + sizeof(int32_t),
+	SLIP_TRACK_SLOT_DOOR_ADDRESS_OFFSET = offsetof(SlipTrackSlotRecord, doorAddress),
+	SLIP_TRACK_SLOT_DOOR_ADDRESS_END = offsetof(SlipTrackSlotRecord, doorAddress) + sizeof(uint32_t),
+	SLIP_TRACK_SLOT_NEXT_ADDRESS_END = offsetof(SlipTrackSlotRecord, nextSlotAddress) + sizeof(uint32_t),
+	SLIP_TRACK_SLOT_DRAW_ADDRESSES_END = offsetof(SlipTrackSlotRecord, secondDrawAddress) + sizeof(uint32_t),
+	SLIP_TRACK_SLOT_CURRENT_RECORD_END = offsetof(SlipTrackSlotRecord, currentTrackRecordAddress) + sizeof(uint32_t),
+	SLIP_TRACK_SLOT_LINKS_END = offsetof(SlipTrackSlotRecord, previousSlotAddress) + sizeof(uint32_t),
+	SLIP_TRACK_SLOT_OWNER_END = offsetof(SlipTrackSlotRecord, ownerObjectOffset) + sizeof(uint32_t),
+	SLIP_TRACK_SLOT_FLAGS_END = offsetof(SlipTrackSlotRecord, flags) + sizeof(uint32_t),
+	SLIP_TRACK_SLOT_DISABLE_ACTOR_MODE = 0x08,
+	SLIP_TRACK_ACTOR_MODE_DISABLED_DETAIL_MINIMUM = 3
+};
+
 extern SlipView3DVec32 SlipTrackWorld_doorPosition;
 extern SlipView3DVec16 SlipTrackWorld_doorDirection;
 void SlipTrackWorld_DoorDirection(const SlipTrackDoorRecord *door);
@@ -3229,7 +3326,7 @@ uint32_t SlipTrackWorld_DoorEvent(uint32_t eventCode, uint16_t objectOffset, uin
                                   SlipTrackDoorRecord *door, SlipObject *objects, size_t objectBytes,
                                   const SlipTrackSlotRecord *slots, size_t slotBytes, uint32_t slotAddress);
 
-typedef char SlipTrackSlotRecordSize[sizeof(SlipTrackSlotRecord) == 0x118u ? 1 : -1];
+typedef char SlipTrackSlotRecordSize[sizeof(SlipTrackSlotRecord) == SLIP_TRACK_SLOT_RECORD_BYTES ? 1 : -1];
 typedef char
     SlipTrackSlotRecordCurrentTrackOffset[offsetof(SlipTrackSlotRecord, currentTrackRecordAddress) == 0xd0u ? 1 : -1];
 typedef char SlipTrackSlotRecordUnusedOffset[offsetof(SlipTrackSlotRecord, unused) == 0xecu ? 1 : -1];
@@ -3361,11 +3458,13 @@ typedef struct SlipTrackWorldStateResetVisit {
 	uint32_t loopCountAfterDec;
 } SlipTrackWorldStateResetVisit;
 
+enum { SLIP_TRACK_STATE_RESET_COUNT = 3 };
+
 typedef struct SlipTrackWorldStateReset {
 	bool callGetDrawStateIndex;
 	uint32_t initialStateIndex;
 	uint32_t loopCountInitial;
-	SlipTrackWorldStateResetVisit visits[3];
+	SlipTrackWorldStateResetVisit visits[SLIP_TRACK_STATE_RESET_COUNT];
 	uint32_t restoredStateIndex;
 	bool callRestoreDrawState;
 	bool ret;
@@ -4931,9 +5030,10 @@ bool SlipTrackWorld_ReplaySourceDispatch(const uint8_t *initialRecord, size_t re
 
 bool SlipTrackWorld_ReplaySourceScan(const uint8_t *record, size_t recordBytesRemaining, uint32_t objectBaseAddress,
                                      const uint8_t *objectBase, size_t objectBaseBytes, uint16_t initialCount,
-                                     uint16_t replayList[10], uint32_t *objectDrawCallbacks,
-                                     size_t objectDrawCallbackCount, SlipTrackWorldReplaySourceScanVisit *visits,
-                                     size_t visitCapacity, SlipTrackWorldReplaySourceScan *result);
+                                     uint16_t replayList[SLIP_TRACK_REPLAY_OBJECT_CAPACITY],
+                                     uint32_t *objectDrawCallbacks, size_t objectDrawCallbackCount,
+                                     SlipTrackWorldReplaySourceScanVisit *visits, size_t visitCapacity,
+                                     SlipTrackWorldReplaySourceScan *result);
 
 bool SlipTrackWorld_MaterialStateStore(uint32_t planeOriginX, uint32_t planeOriginY, uint32_t planeOriginZ,
                                        uint32_t planeNormalX, uint32_t planeNormalY, uint32_t planeNormalZ,

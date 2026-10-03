@@ -9,17 +9,17 @@ void SlipRenderer_Initialize(SlipRendererState *state, uint16_t vertices, const 
 		if (!calls->initializePolygons(context))
 			SlipRuntime_Fatal("ResAlloc failed during Draw3DInstall");
 		calls->initializeSpecular(context);
-		state->stateCount = 32;
+		state->stateCount = SLIP_RENDERER_DRAW_STATE_CAPACITY;
 		uint16_t resource;
-		if (!calls->allocate(context, (uint32_t)state->stateCount * 56u, 0, &resource))
+		if (!calls->allocate(context, (uint32_t)state->stateCount * SLIP_RENDERER_DRAW_STATE_DOS_BYTES, 0, &resource))
 			SlipRuntime_Fatal("ResAlloc failed during Draw3DInstall");
 		state->stateResource = resource;
 		state->states = calls->lockStates(context, resource);
-		if (!calls->allocate(context, 0x380, 0, &resource))
+		if (!calls->allocate(context, SLIP_RENDERER_RESERVED_WORKSPACE_BYTES, 0, &resource))
 			SlipRuntime_Fatal("ResAlloc failed during Draw3DInstall");
 		state->reservedResource = resource;
 
-		if (!calls->allocate(context, 0x402, 0, &resource))
+		if (!calls->allocate(context, SLIP_RENDERER_POINT_BUFFER_BYTES, 0, &resource))
 			SlipRuntime_Fatal("ResAlloc failed during Draw3DInstall");
 		state->pointResource = resource;
 		state->reservedWorkspace = calls->lockReserved(context, state->reservedResource);

@@ -1,4 +1,5 @@
 #include "actor_render.h"
+#include "draw3d.h"
 #include <stddef.h>
 
 bool SlipActor_SelectShape(const SlipActorRenderState *state, const SlipActorPartRecord *part, uint16_t *shape) {
@@ -66,10 +67,10 @@ void SlipActor_Draw(SlipActorRenderState *state, const SlipActorPool *pool, uint
 	state->childrenInSortTree = actor->childrenInSortTree;
 	const uint32_t reciprocal = calls->projectionReciprocal(context);
 	const uint64_t product = (uint64_t)((int64_t)(int32_t)reciprocal * state->viewDepth);
-	const int32_t distance = (int32_t)(uint32_t)(product >> 16);
+	const int32_t distance = (int32_t)(uint32_t)(product >> SLIP_DRAW3D_SCALE_FRACTION_BITS);
 	uint32_t lod = 0;
 	while (distance >= (int32_t)actor->lodDistances[lod]) {
-		if (++lod == 8)
+		if (++lod == SLIP_ART_LOD_COUNT)
 			return;
 	}
 	if (lod < pool->mode)

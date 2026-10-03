@@ -7,7 +7,7 @@
 static uint16_t bodyResource;
 static uint16_t collisionVertexResource;
 
-enum { COLLISION_BODY_DOS_BYTES = 0x58, COLLISION_OBJECT_RELEASE_SERVER = 1 };
+enum { COLLISION_BODY_DOS_BYTES = 0x58, COLLISION_OBJECT_RELEASE_SERVER = SLIP_OBJECT_RELEASE_SERVER_ID };
 
 void SlipRaceCollisionHost_Shutdown(void) {
 	if (SlipRaceCollision_enabled != 0) {

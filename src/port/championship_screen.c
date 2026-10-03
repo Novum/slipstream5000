@@ -3,13 +3,16 @@
 #include "config_menu_host.h"
 #include "game_errors.h"
 #include "menu_music.h"
+#include "menu_palette.h"
 #include "race_results.h"
 #include "resource_host.h"
 #include "sprite.h"
+#include "string_tags.h"
 #include "text_layout.h"
 
-static SlipInputNavigationTable navigation = {2, 0, {-1, -1}, {-1, -1}, {-1, 0}, {1, -1}, {{83, 183}, {233, 183}}};
-static const SlipInputRectangle buttons[2] = {{40, 175, 127, 191}, {190, 175, 277, 191}};
+static SlipInputNavigationTable navigation = {SLIP_RACE_RESULTS_BUTTON_COUNT, 0, {-1, -1}, {-1, -1}, {-1, 0}, {1, -1},
+                                              {{83, 183}, {233, 183}}};
+static const SlipInputRectangle buttons[SLIP_RACE_RESULTS_BUTTON_COUNT] = {{40, 175, 127, 191}, {190, 175, 277, 191}};
 static const SlipStringTableResources stringResources = {.load = SlipResourceHost_Load,
                                                          .lock = SlipResourceHost_Lock,
                                                          .unlock = SlipResourceHost_Unlock,
@@ -56,15 +59,17 @@ static void SlipChampionship_FullClip(void) {
 static void SlipChampionship_Panel(SlipInputRectangle rectangle, uint16_t resource, SlipStringTableSlot *strings,
                                    uint32_t tag, int16_t textInset) {
 	Raster_SetClipRect(rectangle.left, rectangle.top, rectangle.right, rectangle.bottom);
-	Raster_DrawLineSolid(0x25, rectangle.left, rectangle.top, rectangle.left, rectangle.bottom);
-	Raster_DrawLineSolid(0x2b, rectangle.left, rectangle.top, rectangle.right, rectangle.top);
-	Raster_DrawLineSolid(0x0a, rectangle.left, rectangle.bottom, rectangle.right, rectangle.bottom);
-	Raster_DrawLineSolid(0x0a, rectangle.right, rectangle.top, rectangle.right, rectangle.bottom);
+	Raster_DrawLineSolid(SLIP_MENU_PANEL_LEFT_COLOUR, rectangle.left, rectangle.top, rectangle.left, rectangle.bottom);
+	Raster_DrawLineSolid(SLIP_MENU_PANEL_TOP_COLOUR, rectangle.left, rectangle.top, rectangle.right, rectangle.top);
+	Raster_DrawLineSolid(SLIP_MENU_PANEL_SHADOW_COLOUR, rectangle.left, rectangle.bottom, rectangle.right,
+	                     rectangle.bottom);
+	Raster_DrawLineSolid(SLIP_MENU_PANEL_SHADOW_COLOUR, rectangle.right, rectangle.top, rectangle.right,
+	                     rectangle.bottom);
 	Raster_SetClipRect(rectangle.left + 1, rectangle.top + 1, rectangle.right - 1, rectangle.bottom - 1);
 	SlipChampionship_Sprite(resource);
 	Raster_SetClipRect(rectangle.left, rectangle.top, rectangle.right, rectangle.bottom);
 	if (tag != 0) {
-		SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, rectangle.left, rectangle.right);
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, rectangle.left, rectangle.right);
 		const char *const text = SlipStringTable_Get(strings, tag, &stringResources);
 		SlipTextPosition position = {0, (int16_t)(rectangle.top + textInset)};
 		SlipText_Draw(&SlipText_state, text, SlipMenu_panelArguments, &position);
@@ -73,15 +78,15 @@ static void SlipChampionship_Panel(SlipInputRectangle rectangle, uint16_t resour
 }
 
 static void SlipChampionship_Row(const SlipRaceRacerState *racer, int16_t y) {
-	SlipTextPosition position = {40, y};
+	SlipTextPosition position = {SLIP_RACE_RESULTS_DRIVER_NAME_X, y};
 	SlipText_Draw(&SlipText_state, SlipRaceResults_driverNames[racer->tuningIndex], NULL, &position);
 	int16_t rank = (int16_t)racer->championshipPosition;
 	SlipTextArgument argument = {.word = &rank};
-	position = (SlipTextPosition){20, position.y};
+	position = (SlipTextPosition){SLIP_RACE_RESULTS_TABLE_LEFT, position.y};
 	SlipText_Draw(&SlipText_state, "%d.", &argument, &position);
 	int16_t points = (int16_t)racer->championshipPoints;
 	argument.word = &points;
-	position = (SlipTextPosition){250, position.y};
+	position = (SlipTextPosition){SLIP_RACE_RESULTS_POINTS_X, position.y};
 	SlipText_Draw(&SlipText_state, "%d", &argument, &position);
 }
 
@@ -111,21 +116,23 @@ SlipChampionshipAction SlipChampionship_Screen(uint16_t rounds, const SlipRaceRa
 		SlipChampionship_Sprite(background);
 		SlipText_SetColor(&SlipText_state, UINT16_MAX);
 		SlipChampionship_SelectFont(computerFont);
-		for (unsigned button = 0; button < 2; ++button)
+		for (unsigned button = 0; button < SLIP_RACE_RESULTS_BUTTON_COUNT; ++button)
 			SlipChampionship_Panel(buttons[button], hovered == button + 1 ? background : inactive, strings,
-			                       0x42555431u + button, 4);
-		SlipChampionship_Panel((SlipInputRectangle){59, 10, 258, 26}, inactive, strings, 0x5449544cu, 4);
+			                       SLIP_STRING_FIRST_BUTTON + button, SLIP_RACE_RESULTS_PANEL_TEXT_INSET_Y);
+		SlipChampionship_Panel((SlipInputRectangle){59, 10, 258, 26}, inactive, strings, SLIP_STRING_TITLE,
+		                       SLIP_RACE_RESULTS_PANEL_TEXT_INSET_Y);
 		SlipChampionship_FullClip();
-		SlipText_SetStyle(&SlipText_state, 0, UINT16_MAX, 20, 300);
-		int16_t y = 40;
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_AT_POSITION, UINT16_MAX, SLIP_RACE_RESULTS_TABLE_LEFT,
+		                  SLIP_RACE_RESULTS_TABLE_RIGHT);
+		int16_t y = SLIP_RACE_RESULTS_TABLE_TOP;
 		for (uint16_t rank = 1; rank <= racers->racerCount; ++rank) {
 			uint16_t index = 0;
 			while (index < racers->racerCount && racers->records[index].championshipPosition != rank)
 				++index;
 			const SlipRaceRacerState *const racer = &racers->records[index];
-			SlipChampionship_SelectFont(racer->racerType == 2 ? computerFont : localFont);
+			SlipChampionship_SelectFont(racer->racerType == SLIP_RACER_COMPUTER ? computerFont : localFont);
 			SlipChampionship_Row(racer, y);
-			y = (int16_t)(y + 13);
+			y = (int16_t)(y + SLIP_RACE_RESULTS_ROW_SPACING);
 		}
 		SlipConfigHost_calls.present(SlipConfigHost_calls.context);
 		SlipConfigHost_calls.poll(SlipConfigHost_calls.context);
@@ -165,20 +172,23 @@ void SlipChampionship_FinalScreen(const SlipRaceRacerTable *racers) {
 		SlipChampionship_Sprite(background);
 		SlipText_SetColor(&SlipText_state, UINT16_MAX);
 		SlipChampionship_SelectFont(computerFont);
-		SlipChampionship_Panel((SlipInputRectangle){92, 11, 226, 27}, inactive, strings, 0x5449544cu, 5);
-		SlipChampionship_Panel(finalButton, hovered != 0 ? background : inactive, strings, 0x42555431u, 5);
+		SlipChampionship_Panel((SlipInputRectangle){92, 11, 226, 27}, inactive, strings, SLIP_STRING_TITLE,
+		                       SLIP_CHAMPIONSHIP_FINAL_PANEL_TEXT_INSET_Y);
+		SlipChampionship_Panel(finalButton, hovered != 0 ? background : inactive, strings, SLIP_STRING_FIRST_BUTTON,
+		                       SLIP_CHAMPIONSHIP_FINAL_PANEL_TEXT_INSET_Y);
 		SlipChampionship_FullClip();
-		SlipText_SetStyle(&SlipText_state, 0, UINT16_MAX, 20, 300);
-		int16_t y = 40;
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_AT_POSITION, UINT16_MAX, SLIP_RACE_RESULTS_TABLE_LEFT,
+		                  SLIP_RACE_RESULTS_TABLE_RIGHT);
+		int16_t y = SLIP_RACE_RESULTS_TABLE_TOP;
 		for (uint16_t rank = 1; rank <= racers->racerCount; ++rank) {
 			uint16_t index = 0;
 			while (index < racers->racerCount && racers->records[index].championshipPosition != rank)
 				++index;
 			const SlipRaceRacerState *const racer = &racers->records[index];
-			SlipChampionship_SelectFont(racer->racerType == 2 ? computerFont : localFont);
+			SlipChampionship_SelectFont(racer->racerType == SLIP_RACER_COMPUTER ? computerFont : localFont);
 
 			SlipChampionship_Row(racer, y);
-			y = (int16_t)(y + 13);
+			y = (int16_t)(y + SLIP_RACE_RESULTS_ROW_SPACING);
 		}
 		SlipConfigHost_calls.present(SlipConfigHost_calls.context);
 		SlipConfigHost_calls.poll(SlipConfigHost_calls.context);

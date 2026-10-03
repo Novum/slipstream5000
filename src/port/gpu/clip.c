@@ -64,7 +64,7 @@ int SlipRaceGpu_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint
 	yAfter = target->screenY;
 	flags = target->flags;
 	result->flagsBefore = flags;
-	flags &= ~(uint32_t)SLIP_VERTEX_VERTICAL_CLIP_STATUS;
+	flags &= ~SLIP_VERTEX_VERTICAL_CLIP_STATUS;
 	result->flagsAfterClear = flags;
 	result->yBelow = yAfter < limitYMin;
 	if (result->yBelow) {
@@ -74,7 +74,8 @@ int SlipRaceGpu_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint
 	if (result->yAbove) {
 		flags |= SLIP_CLIP_BOTTOM;
 	}
-	result->yInsideFiniteSentinel = yAfter < 0x3ffe && yAfter > -0x3ffe;
+	result->yInsideFiniteSentinel =
+	    yAfter < SLIP_SCREEN_CLIP_COORDINATE_LIMIT && yAfter > -SLIP_SCREEN_CLIP_COORDINATE_LIMIT;
 	if (result->yInsideFiniteSentinel) {
 		flags |= SLIP_VERTEX_SCREEN_CLIP_IN_RANGE;
 	}

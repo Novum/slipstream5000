@@ -2,7 +2,7 @@
 #include "runtime.h"
 
 void SlipResource_RegisterCallback(uint32_t extension, SlipResourceLoadedCallback callback) {
-	if (SlipResource_callbackCount == 32) {
+	if (SlipResource_callbackCount == SLIP_RESOURCE_CALLBACK_CAPACITY) {
 		SlipRuntime_Fatal("ResAddType - insufficient space for this new type");
 	}
 	const uint32_t key = SlipResource_ExtensionKey(extension);

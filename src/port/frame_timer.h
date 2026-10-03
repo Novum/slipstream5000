@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+enum { SLIP_FRAME_TIMER_MAXIMUM_RATE_HZ = 70 };
+
 typedef struct SlipFrameTimerValues {
 	uint32_t deltaMilliseconds;
 	uint32_t stepQ14;

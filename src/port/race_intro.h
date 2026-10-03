@@ -5,6 +5,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+enum {
+	SLIP_RACE_INTRO_SCRIPT_HEADER_BYTES = 16,
+	SLIP_RACE_INTRO_TRACK_NAME_BYTES = 8,
+	SLIP_RACE_INTRO_STRING_NAME_OFFSET = 0,
+	SLIP_RACE_INTRO_STRING_NAME_BYTES = 8,
+	SLIP_RACE_INTRO_PRESENTER_VARIANT_OFFSET = 8,
+	SLIP_RACE_INTRO_COUNTDOWN_OFFSET = 12
+};
+
 typedef enum SlipRaceIntroOpcode {
 	SLIP_INTRO_WAIT_TRACK = 0,
 	SLIP_INTRO_DELAY = 1,
@@ -28,7 +37,7 @@ typedef struct SlipRaceIntroScriptHost {
 	uint32_t (*play)(void *context, uint16_t resource, uint32_t *sampleBytes);
 	void (*resetConsole)(void *context);
 	bool (*raceProgress)(void *context, int32_t *progress);
-	bool (*trackName)(void *context, uint8_t name[8]);
+	bool (*trackName)(void *context, uint8_t name[SLIP_RACE_INTRO_TRACK_NAME_BYTES]);
 } SlipRaceIntroScriptHost;
 
 typedef enum SlipRaceIntroScriptResult {

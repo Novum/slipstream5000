@@ -45,9 +45,9 @@ static SlipView3DMaths SlipMathsHost_Lock(void *context, uint16_t handle) {
 	SlipResourcePayload payload = SlipResourceHost_Payload(handle);
 	return (SlipView3DMaths){.data = (uint8_t *)data,
 	                         .size = payload.size,
-	                         .sineTableOffset = SlipBytes_ReadLE16(data),
-	                         .arcsineTableOffset = SlipBytes_ReadLE16(data + 2),
-	                         .arctangentTableOffset = SlipBytes_ReadLE16(data + 4)};
+	                         .sineTableOffset = SlipBytes_ReadLE16(data + SLIP_MATHS_SINE_TABLE_OFFSET),
+	                         .arcsineTableOffset = SlipBytes_ReadLE16(data + SLIP_MATHS_ARCSINE_TABLE_OFFSET),
+	                         .arctangentTableOffset = SlipBytes_ReadLE16(data + SLIP_MATHS_ARCTANGENT_TABLE_OFFSET)};
 }
 
 static void SlipMathsHost_Close(void) { mathsCleanup(&maths, &mathsCalls); }

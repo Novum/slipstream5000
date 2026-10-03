@@ -1,19 +1,34 @@
 #include "animated_effects.h"
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "runtime.h"
 #include "track_view_render.h"
 #include "track_world.h"
 
+enum {
+	SLIP_ANIMATED_DEFAULT_JITTER = 488,
+	SLIP_ANIMATED_INITIAL_RADIUS_SHIFT = 2,
+	SLIP_ANIMATED_FINAL_DURATION_SHIFT = 2,
+	SLIP_ANIMATED_VALUE_UPPER_WORD_MASK = 0xffff0000u,
+	SLIP_ANIMATED_FRAME_SELECTION_ATTEMPTS = 4,
+	SLIP_ANIMATED_FRAME_HANDLE_BYTES = sizeof(uint16_t),
+	SLIP_ANIMATED_FRAME_OFFSET_SHIFT = 1,
+	SLIP_ANIMATED_FRAME_OFFSET_MASK = UINT16_MAX - (SLIP_ANIMATED_FRAME_HANDLE_BYTES - 1)
+};
+
 SlipAnimatedUpdate SlipAnimatedEffects_update;
-int16_t SlipAnimatedEffects_jitter = 0x1e8;
+int16_t SlipAnimatedEffects_jitter = SLIP_ANIMATED_DEFAULT_JITTER;
 
 void SlipAnimatedEffects_UpdateAttachment(uint16_t object) {
 	SlipAnimatedState *const state = SlipObject_AnimatedState(object);
 	if (state->parent == 0)
 		return;
-	const int32_t jitterZ = ((int32_t)(int16_t)SlipRandom_Next() * SlipAnimatedEffects_jitter) >> 16;
-	const int32_t jitterY = ((int32_t)(int16_t)SlipRandom_Next() * SlipAnimatedEffects_jitter) >> 16;
-	const int32_t jitterX = ((int32_t)(int16_t)SlipRandom_Next() * SlipAnimatedEffects_jitter) >> 16;
+	const int32_t jitterZ =
+	    ((int32_t)(int16_t)SlipRandom_Next() * SlipAnimatedEffects_jitter) >> SLIP_RANDOM_SAMPLE_BITS;
+	const int32_t jitterY =
+	    ((int32_t)(int16_t)SlipRandom_Next() * SlipAnimatedEffects_jitter) >> SLIP_RANDOM_SAMPLE_BITS;
+	const int32_t jitterX =
+	    ((int32_t)(int16_t)SlipRandom_Next() * SlipAnimatedEffects_jitter) >> SLIP_RANDOM_SAMPLE_BITS;
 	SlipView3DVec32 attachmentOffset = {(int32_t)((uint32_t)jitterX + (uint32_t)state->offset.x),
 	                                    (int32_t)((uint32_t)jitterY + (uint32_t)state->offset.y),
 	                                    (int32_t)((uint32_t)jitterZ + (uint32_t)state->offset.z)};
@@ -53,16 +68,18 @@ uint32_t SlipAnimatedEffects_Event(uint32_t eventCode, uint32_t eventPayload, ui
 	const uint16_t duration = (uint16_t)(state->initialDuration + state->finalDuration);
 	if (state->age >= duration) {
 
-		SlipObject_FreeImmediate(object, (timer.deltaMilliseconds & 0xffff0000u) | state->age,
-		                         (timer.stepQ14 & 0xffff0000u) | duration, timer.deltaMilliseconds,
-		                         (eventFlags & 0xffff0000u) | state->age, (uintptr_t)state, descriptor->dosAddress);
+		SlipObject_FreeImmediate(
+		    object, (timer.deltaMilliseconds & SLIP_ANIMATED_VALUE_UPPER_WORD_MASK) | state->age,
+		    (timer.stepQ14 & SLIP_ANIMATED_VALUE_UPPER_WORD_MASK) | duration, timer.deltaMilliseconds,
+		    (eventFlags & SLIP_ANIMATED_VALUE_UPPER_WORD_MASK) | state->age, (uintptr_t)state, descriptor->dosAddress);
 		return 0;
 	}
 
-	uint32_t lifetimeFractionQ14 = ((uint32_t)state->age << 14) / duration;
+	uint32_t lifetimeFractionQ14 = ((uint32_t)state->age << SLIP_Q14_FRACTION_BITS) / duration;
 	const int32_t radiusDifference = (int32_t)((uint32_t)state->finalRadius - (uint32_t)state->initialRadius);
 	uint32_t radiusFrameSpeedOrCallbackResult =
-	    (uint32_t)(((int64_t)lifetimeFractionQ14 * radiusDifference) >> 14) + (uint32_t)state->initialRadius;
+	    (uint32_t)(((int64_t)lifetimeFractionQ14 * radiusDifference) >> SLIP_Q14_FRACTION_BITS) +
+	    (uint32_t)state->initialRadius;
 	const size_t objectBytes = (size_t)SlipObject_count * SLIP_OBJECT_DOS_STRIDE;
 	SlipObjectExtentWriteResult radiusWrite;
 	(void)SlipObject_SetDrawExtent(SlipObject_table, objectBytes, object, radiusFrameSpeedOrCallbackResult,
@@ -71,16 +88,18 @@ uint32_t SlipAnimatedEffects_Event(uint32_t eventCode, uint32_t eventPayload, ui
 	if (state->age <= state->initialDuration) {
 		const SlipAnimatedFrames *const frames = descriptor->initialFrames;
 		state->frameElapsed = (uint16_t)(state->frameElapsed + deltaMilliseconds);
-		radiusFrameSpeedOrCallbackResult = (radiusFrameSpeedOrCallbackResult & 0xffff0000u) | state->frameElapsed;
+		radiusFrameSpeedOrCallbackResult =
+		    (radiusFrameSpeedOrCallbackResult & SLIP_ANIMATED_VALUE_UPPER_WORD_MASK) | state->frameElapsed;
 		if (state->frameElapsed >= frames->frameDelay) {
 			state->frameElapsed = 0;
 			SlipObjectSlotDataReadResult current;
 			(void)SlipObject_GetDrawData(SlipObject_table, objectBytes, object, &current);
 
-			for (unsigned attempt = 0; attempt < 4; ++attempt) {
+			for (unsigned attempt = 0; attempt < SLIP_ANIMATED_FRAME_SELECTION_ATTEMPTS; ++attempt) {
 				const uint32_t product = (uint32_t)(uint16_t)SlipRandom_Next() * frames->frameCount;
-				const uint16_t offset = (uint16_t)((product >> 16) << 1);
-				radiusFrameSpeedOrCallbackResult = frames->frameHandles[offset / 2u];
+				const uint16_t offset =
+				    (uint16_t)((product >> SLIP_RANDOM_SAMPLE_BITS) << SLIP_ANIMATED_FRAME_OFFSET_SHIFT);
+				radiusFrameSpeedOrCallbackResult = frames->frameHandles[offset / SLIP_ANIMATED_FRAME_HANDLE_BYTES];
 				if ((uint16_t)radiusFrameSpeedOrCallbackResult != (uint16_t)current.drawData)
 					break;
 			}
@@ -91,10 +110,12 @@ uint32_t SlipAnimatedEffects_Event(uint32_t eventCode, uint32_t eventPayload, ui
 	} else {
 
 		const uint16_t finalPhaseElapsed = (uint16_t)(state->age - state->initialDuration);
-		lifetimeFractionQ14 = ((uint32_t)finalPhaseElapsed << 14) / state->finalDuration;
+		lifetimeFractionQ14 = ((uint32_t)finalPhaseElapsed << SLIP_Q14_FRACTION_BITS) / state->finalDuration;
 		const SlipAnimatedFrames *const frames = descriptor->finalFrames;
-		const uint16_t offset = (uint16_t)((lifetimeFractionQ14 * frames->frameCount) >> 13) & 0xfffeu;
-		radiusFrameSpeedOrCallbackResult = frames->frameHandles[offset / 2u];
+		const uint16_t offset = (uint16_t)((lifetimeFractionQ14 * frames->frameCount) >>
+		                                   (SLIP_Q14_FRACTION_BITS - SLIP_ANIMATED_FRAME_OFFSET_SHIFT)) &
+		                        SLIP_ANIMATED_FRAME_OFFSET_MASK;
+		radiusFrameSpeedOrCallbackResult = frames->frameHandles[offset / SLIP_ANIMATED_FRAME_HANDLE_BYTES];
 		SlipObjectSlotDataWriteResult frameWrite;
 		(void)SlipObject_SetDrawData(SlipObject_table, objectBytes, object, radiusFrameSpeedOrCallbackResult,
 		                             &frameWrite);
@@ -103,15 +124,16 @@ uint32_t SlipAnimatedEffects_Event(uint32_t eventCode, uint32_t eventPayload, ui
 	const uint32_t speed = (uint32_t)SlipObject_Speed(SlipObject_table, object);
 	if (speed != 0) {
 		const uint16_t step = (uint16_t)SlipFrameTimer_Step();
-		const uint16_t damping = (uint16_t)(((uint32_t)descriptor->damping * step) >> 14);
-		const uint16_t remainingSpeedFractionQ14 = (uint16_t)(0x4000u - damping);
-		radiusFrameSpeedOrCallbackResult = (uint32_t)(((uint64_t)remainingSpeedFractionQ14 * speed) >> 14);
+		const uint16_t damping = (uint16_t)(((uint32_t)descriptor->damping * step) >> SLIP_Q14_FRACTION_BITS);
+		const uint16_t remainingSpeedFractionQ14 = (uint16_t)(SLIP_Q14_ONE - damping);
+		radiusFrameSpeedOrCallbackResult =
+		    (uint32_t)(((uint64_t)remainingSpeedFractionQ14 * speed) >> SLIP_Q14_FRACTION_BITS);
 		SlipObject_SetSpeed(SlipObject_table, object, radiusFrameSpeedOrCallbackResult);
 	}
 	if (SlipAnimatedEffects_update != NULL)
 		radiusFrameSpeedOrCallbackResult = SlipAnimatedEffects_update(object);
 
-	return radiusFrameSpeedOrCallbackResult & 0xffff0000u;
+	return radiusFrameSpeedOrCallbackResult & SLIP_ANIMATED_VALUE_UPPER_WORD_MASK;
 }
 
 uint32_t SlipAnimatedEffects_initialized;
@@ -121,7 +143,8 @@ static SlipView3DVec32 SlipAnimatedEffects_offset;
 static int32_t SlipAnimatedEffects_radius;
 static uint16_t SlipAnimatedEffects_parent;
 static uint16_t SlipAnimatedEffects_duration;
-static const SlipView3DMatrix SlipAnimatedEffects_identity = {{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
+static const SlipView3DMatrix SlipAnimatedEffects_identity = {
+    {SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 
 void SlipAnimatedEffects_Initialize(uint32_t drawMode, SlipAnimatedAttach attach, SlipAnimatedUpdate update) {
 	if (SlipAnimatedEffects_initialized == 0) {
@@ -130,7 +153,7 @@ void SlipAnimatedEffects_Initialize(uint32_t drawMode, SlipAnimatedAttach attach
 		SlipAnimatedEffects_attach = attach;
 		SlipAnimatedEffects_update = update;
 		SlipRuntime_RegisterExit(SlipAnimatedEffects_Cleanup);
-		SlipObject_SetServer(1, SlipAnimatedEffects_Notify);
+		SlipObject_SetServer(SLIP_OBJECT_RELEASE_SERVER_ID, SlipAnimatedEffects_Notify);
 	}
 }
 
@@ -142,7 +165,7 @@ void SlipAnimatedEffects_Cleanup(void) {
 uint32_t SlipAnimatedEffects_Notify(uint32_t eventCode, uint32_t eventPayload, uint32_t eventValue, uint32_t eventFlags,
                                     uint16_t object, uintptr_t dispatchData, uint32_t dispatchFrame) {
 	(void)dispatchData;
-	if (object != 0 && (eventCode & 1u) != 0 && SlipAnimatedEffects_initialized != 0)
+	if (object != 0 && (eventCode & SLIP_OBJECT_SERVER_EVENT_FREE) != 0 && SlipAnimatedEffects_initialized != 0)
 		SlipAnimatedEffects_RemoveParent(object, eventCode, eventPayload, eventValue, eventFlags, dispatchFrame);
 	return eventCode;
 }
@@ -157,7 +180,7 @@ void SlipAnimatedEffects_RemoveParent(uint16_t parent, uint32_t eventCode, uint3
 		if (draw.slotDrawCallback == TrackView_DrawAnimatedEffect ||
 		    draw.slotDrawCallback == TrackView_QueueAnimatedEffect) {
 			SlipAnimatedState *const state = SlipObject_AnimatedState(object);
-			eventCode = (eventCode & 0xffff0000u) | state->parent;
+			eventCode = (eventCode & SLIP_ANIMATED_VALUE_UPPER_WORD_MASK) | state->parent;
 			if (state->parent == parent) {
 				SlipObject_FreeImmediate(object, eventCode, eventPayload, eventValue, eventFlags, (uintptr_t)state,
 				                         dispatchFrame);
@@ -196,11 +219,12 @@ bool SlipAnimatedEffects_Create(SlipView3DVec32 position, int32_t radius, uint16
 	state->age = 0;
 	state->frameElapsed = 0;
 	state->finalRadius = SlipAnimatedEffects_radius;
-	const int32_t initialRadius = SlipAnimatedEffects_radius >> 2;
+	const int32_t initialRadius = SlipAnimatedEffects_radius >> SLIP_ANIMATED_INITIAL_RADIUS_SHIFT;
 	SlipObjectExtentWriteResult radiusWrite;
 	(void)SlipObject_SetDrawExtent(SlipObject_table, objectBytes, object, (uint32_t)initialRadius, &radiusWrite);
 	state->initialRadius = initialRadius;
-	const uint16_t finalDuration = (uint16_t)((int16_t)SlipAnimatedEffects_duration >> 2);
+	const uint16_t finalDuration =
+	    (uint16_t)((int16_t)SlipAnimatedEffects_duration >> SLIP_ANIMATED_FINAL_DURATION_SHIFT);
 	state->finalDuration = finalDuration;
 	state->initialDuration = (uint16_t)(SlipAnimatedEffects_duration - finalDuration);
 	state->offset = SlipAnimatedEffects_offset;

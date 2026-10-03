@@ -7,19 +7,32 @@
 
 #include <stdint.h>
 
+enum {
+	SLIP_RACE_VOICE_BANK_NONE = 0,
+	SLIP_RACE_VOICE_BANK_RESULTS = 1,
+	SLIP_RACE_VOICE_BANK_ALTERNATE = 2,
+	SLIP_RACE_VOICE_BANK_RACE = 3,
+	SLIP_RACE_VOICE_BANK_COUNT = 4,
+	SLIP_RACE_VOICE_RESULTS_COUNT = 12,
+	SLIP_RACE_VOICE_ALTERNATE_COUNT = 10,
+	SLIP_RACE_VOICE_RACE_COUNT = 85,
+	SLIP_RACE_VOICE_RECENT_COUNT = 4,
+	SLIP_RACE_VOICE_SAMPLE_NAME_BYTES = 14
+};
+
 typedef struct SlipRaceVoiceRecord {
-	char sampleName[14];
+	char sampleName[SLIP_RACE_VOICE_SAMPLE_NAME_BYTES];
 	uint16_t resourceHandle;
 	const uint8_t *sampleData;
 	uint32_t playbackHandle;
 	uint32_t speakingDriver;
 } SlipRaceVoiceRecord;
 
-extern SlipRaceVoiceRecord SlipRaceVoice_resultsRecords[12];
+extern SlipRaceVoiceRecord SlipRaceVoice_resultsRecords[SLIP_RACE_VOICE_RESULTS_COUNT];
 
-extern SlipRaceVoiceRecord SlipRaceVoice_alternateRecords[10];
+extern SlipRaceVoiceRecord SlipRaceVoice_alternateRecords[SLIP_RACE_VOICE_ALTERNATE_COUNT];
 
-extern SlipRaceVoiceRecord SlipRaceVoice_raceRecords[85];
+extern SlipRaceVoiceRecord SlipRaceVoice_raceRecords[SLIP_RACE_VOICE_RACE_COUNT];
 
 extern uint32_t SlipRaceVoice_bank;
 extern uint32_t SlipRaceVoice_speakingDriver;
@@ -27,7 +40,7 @@ extern SlipRaceVoiceRecord *SlipRaceVoice_currentRecord;
 
 extern uint32_t SlipRaceVoice_loadOnDemand;
 extern uint32_t SlipRaceVoice_suppressRecent;
-extern uint32_t SlipRaceVoice_recentSelections[4];
+extern uint32_t SlipRaceVoice_recentSelections[SLIP_RACE_VOICE_RECENT_COUNT];
 extern uint32_t SlipRaceVoice_pendingSelection;
 
 typedef struct SlipRaceVoiceCalls {

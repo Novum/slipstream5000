@@ -7,7 +7,8 @@ typedef char SaveHeaderSizeCheck[offsetof(SlipChampionshipSavePayload, racers) =
 bool SlipChampionshipSave_Pack(const SlipRaceRacerTable *racers, uint32_t stage,
                                const SlipChampionshipSavePayloadCalls *calls,
                                SlipChampionshipSavePayloadResult *result) {
-	const uint16_t bytes = (uint16_t)(50u * racers->racerCount + 4u);
+	const uint16_t bytes = (uint16_t)(sizeof(SlipChampionshipSavedRacer) * racers->racerCount +
+	                                  offsetof(SlipChampionshipSavePayload, racers));
 	uint16_t resource;
 	if (!calls->allocate(calls->context, bytes, 0, &resource))
 		return false;

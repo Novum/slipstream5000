@@ -4,9 +4,11 @@
 #include "config_menu_host.h"
 #include "config_settings.h"
 #include "config_state_file.h"
+#include "hmi_timer.h"
 #include "host_file.h"
 #include "input_bios_host.h"
 #include "input_navigation.h"
+#include "input_zone.h"
 #include "material_host.h"
 #include "menu_music.h"
 #include "menu_resources.h"
@@ -14,9 +16,11 @@
 #include "renderer_projection.h"
 #include "renderer_state.h"
 #include "screen_present_host.h"
+#include "string_tags.h"
 
 #include "championship_screen.h"
 #include "draw3d.h"
+#include "fixed_point.h"
 #include "font.h"
 #include "frame_timer.h"
 #include "game_errors.h"
@@ -58,7 +62,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-uint32_t g_palette[256];
+uint32_t g_palette[SLIP_VGA_DAC_PALETTE_COUNT];
 
 static SlipGameSoundState *menuSound;
 static SlipSoundEffectLock menuSoundLock;
@@ -113,12 +117,21 @@ typedef struct MenuButton {
 	int height;
 } MenuButton;
 
+enum {
+	kMaxMenuButtons = 6,
+	SLIP_MENU_LABEL_BYTES = 64,
+	SLIP_MENU_DRIVER_SPRITE_NAME_BYTES = 32,
+	SLIP_MENU_WINDOW_TITLE_BYTES = 128,
+	SLIP_MENU_GREYSCALE_FRACTION_BITS = 8,
+	SLIP_MENU_GREYSCALE_CHANNEL_WEIGHT_Q8 = UINT8_MAX / SLIP_VGA_DAC_CHANNEL_COUNT
+};
+
 typedef struct MenuPage {
 	const char *title;
-	const char *labelTags[6];
-	char labels[6][64];
+	const char *labelTags[kMaxMenuButtons];
+	char labels[kMaxMenuButtons][SLIP_MENU_LABEL_BYTES];
 	int buttonCount;
-	bool disabled[6];
+	bool disabled[kMaxMenuButtons];
 } MenuPage;
 
 typedef struct SpriteButton {
@@ -132,19 +145,46 @@ typedef struct SpriteButton {
 
 typedef struct GaragePricedItem {
 	const char *name;
-	int cost[3];
+	int cost[SLIP_RACE_WEAPON_PRICE_MODE_COUNT];
 	int load;
 } GaragePricedItem;
 
 enum {
-	kMaxMenuButtons = 6,
+	kMenuTitleTextInsetY = 3,
+	kCampaignPresenterX = 182,
+	kCampaignPresenterY = 25,
+	kGaragePanelLabelInsetY = 5,
+	kGaragePriceAndCancelInsetY = 10,
+	kCampaignVertexCapacity = 150,
+	kCampaignMinimumDepth = 12,
+	kCampaignAmbientLightQ14 = 3 * SLIP_Q14_ONE / 8,
+	kCampaignDirectLightQ14 = 5 * SLIP_Q14_ONE / 8,
+	kCampaignCaptionShadowColour = 0x84,
+	kCampaignCaptionColour = 0x8d,
+	kCampaignCaptionLeft = 185,
+	kCampaignCaptionRight = 309,
+	kCampaignCaptionTop = 127,
+	kCampaignCaptionBottom = 196,
+	kCampaignCaptionShadowOffset = -1,
+	kDriverCardOriginX = 27,
+	kDriverCardOriginY = 10,
+	kDriverCardZoomStepQ14 = SLIP_Q14_ONE / 16,
 	kDriverCount = 10,
+	kDriverActionAccept = 0,
+	kDriverActionCancel = 1,
+	kDriverActionView = 2,
 	kDriverActionCount = 3,
+	kDriverActionPlaySpeech = 3,
+	kGarageActionWeapons = 0,
+	kGarageActionTurbo = 1,
+	kGarageActionSystems = 2,
+	kGarageActionStartRace = 3,
 	kGarageActionCount = 4,
 	kGarageWeaponPodActionCount = 3,
 	kGarageWeaponGridActionCount = 12,
-	kGarageTurboActionCount = 6,
+	kGarageTurboActionCount = SLIP_RACE_TURBO_UPGRADE_COUNT + 1,
 	kGarageSystemsActionCount = 4,
+	kGarageLoaderMaximumLoad = 9,
 	kGarageStatusZoomComplete = 0x4000,
 	kGarageStatusZoomRate = 0x8000,
 	kGarageStatusZoomFractionBits = 14,
@@ -182,6 +222,15 @@ typedef enum OnePlayerRaceType {
 	ONE_PLAYER_RACE_SINGLE,
 	ONE_PLAYER_RACE_CHAMPIONSHIP
 } OnePlayerRaceType;
+
+enum {
+	MAIN_MENU_SELECTION_SINGLE_PLAYER = 1,
+	MAIN_MENU_SELECTION_LINK = 2,
+	MAIN_MENU_TOP_OPTION_COUNT = 5,
+	MAIN_MENU_ONE_PLAYER_OPTION_COUNT = 3,
+	MAIN_MENU_TWO_PLAYER_OPTION_COUNT = 2,
+	MAIN_MENU_LINK_OPTION_COUNT = 4
+};
 
 typedef enum MainMenuDispatchResult {
 	MAIN_MENU_DISPATCH_RESTART = 0,
@@ -285,13 +334,13 @@ static FocusSource g_trackFocus = FOCUS_NONE;
 static FocusSource g_garageActionFocus = FOCUS_NONE;
 static FocusSource g_garagePanelFocus = FOCUS_NONE;
 static AppMode g_trackReturnMode = APP_MODE_DRIVER_SELECT;
-static char g_vehicleTitleLabel[64];
-static char g_vehiclePlayerLabels[2][64];
-char g_driverDescriptions[kDriverCount][512];
-static char g_driverActionLabels[kDriverActionCount][64];
-static char g_trackTitleLabel[64];
-static char g_garageActionLabels[kGarageActionCount][64];
-static char g_garageWeaponPodLabels[kGarageWeaponPodActionCount][64];
+static char g_vehicleTitleLabel[SLIP_MENU_LABEL_BYTES];
+static char g_vehiclePlayerLabels[2][SLIP_MENU_LABEL_BYTES];
+char g_driverDescriptions[kDriverCount][SLIP_MENU_DRIVER_DESCRIPTION_BYTES];
+static char g_driverActionLabels[kDriverActionCount][SLIP_MENU_LABEL_BYTES];
+static char g_trackTitleLabel[SLIP_MENU_LABEL_BYTES];
+static char g_garageActionLabels[kGarageActionCount][SLIP_MENU_LABEL_BYTES];
+static char g_garageWeaponPodLabels[kGarageWeaponPodActionCount][SLIP_MENU_LABEL_BYTES];
 
 const VehicleViewParams g_vehicleViewParams[kDriverCount] = {
     {14640, 0, -4096, -17}, {14152, 0, -4096, -17}, {15128, 0, -4096, -17}, {13664, 0, -4096, -17},
@@ -316,7 +365,7 @@ const uint16_t g_trackPlayerStartRecordIndices[kDriverCount] = {0, 5, 1, 6, 2, 7
 const int16_t g_trackGlobeFlagCoords[kDriverCount][2] = {{-90, 43},  {-160, 25}, {152, 44}, {14, 66}, {5, 54},
                                                          {-105, 39}, {-59, 1},   {0, 59},   {22, 33}, {-76, 43}};
 
-const int16_t g_trackGlobeOrientation[kDriverCount][6] = {
+const int16_t g_trackGlobeOrientation[kDriverCount][SLIP_GLOBE_ORIENTATION_COMPONENT_COUNT] = {
     {-5307, -3864, -15012, 15491, -782, -5275}, {5368, -3077, -15171, 15342, -1078, 5647},
     {15123, 1551, 6108, -6109, 7504, 13221},    {-15227, 1, 6046, -5106, -8772, -12861},
     {-15227, 1, 6046, -5106, -8772, -12861},    {-10173, 8, -12842, 10343, -9706, -8200},
@@ -465,17 +514,18 @@ bool SlipMenu_ApplyPaletteResource(const char *const *archives, size_t archiveCo
 	uint16_t start;
 	uint16_t count;
 
-	if (!SlipResource_LoadByName(archives, archiveCount, name, &payload) || payload.size < 4u) {
+	if (!SlipResource_LoadByName(archives, archiveCount, name, &payload) || payload.size < SLIP_PALETTE_HEADER_BYTES) {
 		return false;
 	}
 
-	start = SlipBytes_ReadLE16(payload.data);
-	count = SlipBytes_ReadLE16(payload.data + 2u);
-	if ((size_t)start + count > 256u || payload.size - 4u < (size_t)count * 3u) {
+	start = SlipBytes_ReadLE16(payload.data + SLIP_PALETTE_START_OFFSET);
+	count = SlipBytes_ReadLE16(payload.data + SLIP_PALETTE_COUNT_OFFSET);
+	if ((size_t)start + count > SLIP_VGA_DAC_PALETTE_COUNT ||
+	    payload.size - SLIP_PALETTE_HEADER_BYTES < (size_t)count * SLIP_PALETTE_RGB_BYTES) {
 		return false;
 	}
 
-	SlipVgaDac_WriteRange(start, count, payload.data + 4u);
+	SlipVgaDac_WriteRange(start, count, payload.data + SLIP_PALETTE_HEADER_BYTES);
 	return true;
 }
 
@@ -529,10 +579,11 @@ static const SlipStringTableResources menuStringResources = {.load = SlipResourc
 
 /* Host metadata inspection for UI descriptors. The translated screen entry
  * owns its string slot; inspecting labels must not allocate arena resources. */
-static bool SlipMenu_InspectStringMetadata(const char *resPath, const char name[8], SlipResourcePayload *payload) {
-	char filename[13] = "        .ST0";
-	memcpy(filename, name, 8);
-	filename[11] = (char)(uint8_t)(SlipConfig_Language() + '0');
+static bool SlipMenu_InspectStringMetadata(const char *resPath, const char name[SLIP_RESOURCE_BASE_NAME_BYTES],
+                                           SlipResourcePayload *payload) {
+	char filename[SLIP_RESOURCE_NAME_BUFFER_BYTES] = "        .ST0";
+	memcpy(filename, name, SLIP_RESOURCE_BASE_NAME_BYTES);
+	filename[SLIP_RESOURCE_NAME_BYTES - 1] = (char)(uint8_t)(SlipConfig_Language() + '0');
 	return SlipResource_LoadByName(&resPath, 1u, filename, payload) != 0;
 }
 
@@ -564,7 +615,7 @@ bool SlipMenu_LoadMainMenuModel(const char *resPath) {
 
 	if (SlipMenu_InspectStringMetadata(resPath, "VIEWCAR ", &viewCarStrings)) {
 		for (itemIndex = 0; itemIndex < kDriverCount; ++itemIndex) {
-			char tag[5];
+			char tag[SLIP_STRING_TABLE_TAG_BYTES + 1];
 			snprintf(tag, sizeof(tag), "CAR%d", itemIndex);
 			if (!SlipStringTable_FindText(&viewCarStrings, tag, g_driverDescriptions[itemIndex],
 			                              sizeof(g_driverDescriptions[itemIndex]))) {
@@ -595,9 +646,11 @@ bool SlipMenu_LoadMainMenuModel(const char *resPath) {
 			snprintf(g_vehiclePlayerLabels[1], sizeof(g_vehiclePlayerLabels[1]), "PLAYER TWO");
 		}
 	} else {
-		snprintf(g_driverActionLabels[0], sizeof(g_driverActionLabels[0]), "Accept");
-		snprintf(g_driverActionLabels[1], sizeof(g_driverActionLabels[1]), "Cancel");
-		snprintf(g_driverActionLabels[2], sizeof(g_driverActionLabels[2]), "View");
+		snprintf(g_driverActionLabels[kDriverActionAccept], sizeof(g_driverActionLabels[kDriverActionAccept]),
+		         "Accept");
+		snprintf(g_driverActionLabels[kDriverActionCancel], sizeof(g_driverActionLabels[kDriverActionCancel]),
+		         "Cancel");
+		snprintf(g_driverActionLabels[kDriverActionView], sizeof(g_driverActionLabels[kDriverActionView]), "View");
 		snprintf(g_vehicleTitleLabel, sizeof(g_vehicleTitleLabel), "SELECT YOUR VEHICLE");
 		snprintf(g_vehiclePlayerLabels[0], sizeof(g_vehiclePlayerLabels[0]), "PLAYER ONE");
 		snprintf(g_vehiclePlayerLabels[1], sizeof(g_vehiclePlayerLabels[1]), "PLAYER TWO");
@@ -633,10 +686,13 @@ bool SlipMenu_LoadMainMenuModel(const char *resPath) {
 			snprintf(g_garageWeaponPodLabels[2], sizeof(g_garageWeaponPodLabels[2]), "Ok");
 		}
 	} else {
-		snprintf(g_garageActionLabels[0], sizeof(g_garageActionLabels[0]), "Weapons");
-		snprintf(g_garageActionLabels[1], sizeof(g_garageActionLabels[1]), "Turbo");
-		snprintf(g_garageActionLabels[2], sizeof(g_garageActionLabels[2]), "Systems");
-		snprintf(g_garageActionLabels[3], sizeof(g_garageActionLabels[3]), "Start Race");
+		snprintf(g_garageActionLabels[kGarageActionWeapons], sizeof(g_garageActionLabels[kGarageActionWeapons]),
+		         "Weapons");
+		snprintf(g_garageActionLabels[kGarageActionTurbo], sizeof(g_garageActionLabels[kGarageActionTurbo]), "Turbo");
+		snprintf(g_garageActionLabels[kGarageActionSystems], sizeof(g_garageActionLabels[kGarageActionSystems]),
+		         "Systems");
+		snprintf(g_garageActionLabels[kGarageActionStartRace], sizeof(g_garageActionLabels[kGarageActionStartRace]),
+		         "Start Race");
 		snprintf(g_garageWeaponPodLabels[0], sizeof(g_garageWeaponPodLabels[0]), "Left Pod");
 		snprintf(g_garageWeaponPodLabels[1], sizeof(g_garageWeaponPodLabels[1]), "Right Pod");
 		snprintf(g_garageWeaponPodLabels[2], sizeof(g_garageWeaponPodLabels[2]), "Ok");
@@ -673,7 +729,8 @@ void SlipMenu_MakeDriverSpriteName(char *dst, size_t dstSize, const char *prefix
 	snprintf(dst, dstSize, "%s%d%s", prefix, driver, suffix);
 }
 
-size_t SlipMenu_BuildArchiveList(const char *resPath, char secondaryPath[512], const char *archives[2]) {
+size_t SlipMenu_BuildArchiveList(const char *resPath, char secondaryPath[SLIP_MENU_ARCHIVE_PATH_BYTES],
+                                 const char *archives[SLIP_MENU_ARCHIVE_CAPACITY]) {
 	const char *slash;
 	const char *backslash;
 	const char *end;
@@ -689,14 +746,14 @@ size_t SlipMenu_BuildArchiveList(const char *resPath, char secondaryPath[512], c
 	backslash = strrchr(resPath, '\\');
 	end = slash > backslash ? slash : backslash;
 	if (end == NULL) {
-		snprintf(secondaryPath, 512, "SLIPCD.RES");
+		snprintf(secondaryPath, SLIP_MENU_ARCHIVE_PATH_BYTES, "SLIPCD.RES");
 	} else {
 		dirLen = (size_t)(end - resPath) + 1u;
-		if (dirLen >= 512) {
+		if (dirLen >= SLIP_MENU_ARCHIVE_PATH_BYTES) {
 			return 1;
 		}
 		memcpy(secondaryPath, resPath, dirLen);
-		snprintf(secondaryPath + dirLen, 512 - dirLen, "SLIPCD.RES");
+		snprintf(secondaryPath + dirLen, SLIP_MENU_ARCHIVE_PATH_BYTES - dirLen, "SLIPCD.RES");
 	}
 
 	if (SlipMenu_FileExists(secondaryPath)) {
@@ -738,13 +795,13 @@ static bool SlipMenu_ApplyVehicleDriverFadePalette(const char *resPath, uint16_t
 	SlipResourcePayload payload = SlipResourceHost_Payload(resource);
 	SlipSprite sprite;
 	if (!SlipSprite_FromPayload(&payload, &sprite) || sprite.paletteOffset == 0 ||
-	    (size_t)sprite.paletteOffset + 4u > payload.size) {
+	    (size_t)sprite.paletteOffset + SLIP_PALETTE_HEADER_BYTES > payload.size) {
 		SlipResourceHost_Unlock(NULL, resource);
 		return false;
 	}
 	const uint8_t *const packet = payload.data + sprite.paletteOffset;
-	const uint16_t count = SlipBytes_ReadLE16(packet + 2u);
-	const size_t bytes = (size_t)count * 3u + 4u;
+	const uint16_t count = SlipBytes_ReadLE16(packet + SLIP_PALETTE_COUNT_OFFSET);
+	const size_t bytes = (size_t)count * SLIP_PALETTE_RGB_BYTES + SLIP_PALETTE_HEADER_BYTES;
 	if (bytes > sizeof(vehicleResources.sourcePalette) || payload.size - sprite.paletteOffset < bytes) {
 		SlipResourceHost_Unlock(NULL, resource);
 		return false;
@@ -752,19 +809,24 @@ static bool SlipMenu_ApplyVehicleDriverFadePalette(const char *resPath, uint16_t
 	memcpy(vehicleResources.sourcePalette, packet, bytes);
 	memcpy(vehicleResources.grayPalette, packet, bytes);
 	SlipResourceHost_Unlock(NULL, resource);
-	uint8_t *rgb = vehicleResources.grayPalette + 4u;
+	uint8_t *rgb = vehicleResources.grayPalette + SLIP_PALETTE_HEADER_BYTES;
+	/* Truncate each channel contribution separately, preserving the original palette. */
 	for (unsigned paletteEntry = 0; paletteEntry < count; ++paletteEntry) {
-		uint8_t gray = (uint8_t)(((uint16_t)rgb[0] * 0x55u) >> 8);
-		gray = (uint8_t)(gray + (((uint16_t)rgb[1] * 0x55u) >> 8));
-		gray = (uint8_t)(gray + (((uint16_t)rgb[2] * 0x55u) >> 8));
+		uint8_t gray =
+		    (uint8_t)(((uint16_t)rgb[0] * SLIP_MENU_GREYSCALE_CHANNEL_WEIGHT_Q8) >> SLIP_MENU_GREYSCALE_FRACTION_BITS);
+		gray = (uint8_t)(gray + (((uint16_t)rgb[1] * SLIP_MENU_GREYSCALE_CHANNEL_WEIGHT_Q8) >>
+		                         SLIP_MENU_GREYSCALE_FRACTION_BITS));
+		gray = (uint8_t)(gray + (((uint16_t)rgb[2] * SLIP_MENU_GREYSCALE_CHANNEL_WEIGHT_Q8) >>
+		                         SLIP_MENU_GREYSCALE_FRACTION_BITS));
 		rgb[0] = rgb[1] = rgb[2] = gray;
-		rgb += 3;
+		rgb += SLIP_PALETTE_RGB_BYTES;
 	}
 
 	const uint16_t blended = SlipPalette_Blend(vehicleResources.sourcePalette, vehicleResources.grayPalette,
 	                                           (int16_t)mix, &SlipSpriteHost_effectResources);
 	const uint8_t *const blendedData = SlipResourceHost_Lock(NULL, blended);
-	SlipVgaDac_WriteRange(SlipBytes_ReadLE16(blendedData), SlipBytes_ReadLE16(blendedData + 2u), blendedData + 4u);
+	SlipVgaDac_WriteRange(SlipBytes_ReadLE16(blendedData), SlipBytes_ReadLE16(blendedData + SLIP_PALETTE_COUNT_OFFSET),
+	                      blendedData + SLIP_PALETTE_HEADER_BYTES);
 	SlipResourceHost_Unlock(NULL, blended);
 	SlipResourceHost_Release(NULL, blended);
 	return true;
@@ -787,8 +849,12 @@ static bool SlipMenu_DrawVehicleDriverBackdrop(void) {
 	return SlipMenu_DrawVehicleResource(vehicleResources.assets.driverBackground, 0, 0, false, false);
 }
 
-#define MENU_FADE_STEPS 0x46u
-#define MENU_FADE_RATE 0x46u
+enum {
+	MENU_FADE_STEPS = 70,
+	MENU_FADE_RATE = 70,
+	MENU_FADE_OUTPUT_TOKEN = 0x3d434,
+	MENU_MILLISECONDS_PER_SECOND = 1000
+};
 
 typedef struct MenuFade {
 	int32_t fadeValue;
@@ -817,7 +883,7 @@ static const SlipTimedValueTimerCalls menuTimedValueTimer = {&g_menuFade, SlipMe
                                                              SlipMenu_RemoveTimedClock};
 
 static void SlipMenuFade_Start(int32_t from, int32_t to, uint32_t ticks, uint32_t mode) {
-	SlipTimedValues_Start(&menuTimedValues, 0x3d434, &g_menuFade.fadeValue, from, to, ticks, mode);
+	SlipTimedValues_Start(&menuTimedValues, MENU_FADE_OUTPUT_TOKEN, &g_menuFade.fadeValue, from, to, ticks, mode);
 }
 
 static void SlipMenuFade_Tick(void) { SlipTimedValues_Tick(&menuTimedValues); }
@@ -852,7 +918,7 @@ static void SlipMenu_BakeResourceSprite(uint16_t resource, const char *text, int
 		SlipGame_ResourceFailure();
 	RasterSurfaceBinding saved;
 	Raster_BindSprite((uint8_t *)sprite.pixels, sprite.width, sprite.height, &saved);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 0, (int16_t)(sprite.width - 1));
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, (int16_t)(sprite.width - 1));
 	SlipTextPosition position = {0, row};
 	SlipText_Draw(&SlipText_state, text, NULL, &position);
 	SlipResourceHost_Unlock(NULL, resource);
@@ -942,8 +1008,9 @@ static bool SlipMenu_PageSetup(const char *resPath, MenuPageId pageId) {
 
 static bool SlipMainMenu_DrawFrame(const char *resPath, MenuPageId pageId, int hoveredButton) {
 	const MenuPage *const page = &g_menuPages[pageId];
-	const uint32_t hostTicks = (uint32_t)((SlipSdl_TicksMs() - g_menuFade.hostStartMs) * 0x1234dcu /
-	                                      (1000u * (0x1234dcu / g_menuFade.hostRate)));
+	const uint32_t hostTicks =
+	    (uint32_t)((SlipSdl_TicksMs() - g_menuFade.hostStartMs) * HMI_TIMER_PIT_CLOCK_HZ /
+	               (MENU_MILLISECONDS_PER_SECOND * (HMI_TIMER_PIT_CLOCK_HZ / g_menuFade.hostRate)));
 	int32_t level;
 	int buttonIndex;
 
@@ -986,7 +1053,7 @@ static bool SlipMainMenu_DrawFrame(const char *resPath, MenuPageId pageId, int h
 		uint32_t buttonLevel = (uint32_t)level;
 
 		if (g_menuFadeOutSelection >= 0 && selected) {
-			buttonLevel = 0xffffu;
+			buttonLevel = UINT16_MAX;
 		}
 		const uint16_t resource = g_menuButtonCopies[buttonIndex][variant];
 		SlipResourceHost_Lock(NULL, resource);
@@ -1022,29 +1089,30 @@ static int SlipMenu_VehicleZoneAt(const SlipResourcePayload *zones, int x, int y
 	uint16_t offset;
 	size_t spanOffset;
 
-	if (zones == NULL || zones->data == NULL || zones->size < 2 || y < 0) {
+	if (zones == NULL || zones->data == NULL || zones->size < SLIP_INPUT_ZONE_HEADER_BYTES || y < 0) {
 		return -1;
 	}
 
 	data = zones->data;
 	rows = SlipBytes_ReadLE16(data);
-	if (y >= (int)rows || zones->size < 2u + (size_t)rows * 2u) {
+	if (y >= (int)rows ||
+	    zones->size < SLIP_INPUT_ZONE_HEADER_BYTES + (size_t)rows * SLIP_INPUT_ZONE_ROW_OFFSET_BYTES) {
 		return -1;
 	}
 
-	offset = SlipBytes_ReadLE16(data + 2u + (size_t)y * 2u);
+	offset = SlipBytes_ReadLE16(data + SLIP_INPUT_ZONE_HEADER_BYTES + (size_t)y * SLIP_INPUT_ZONE_ROW_OFFSET_BYTES);
 	if (offset >= zones->size) {
 		return -1;
 	}
 
 	spanOffset = offset;
-	while (spanOffset + 3u <= zones->size) {
+	while (spanOffset + SLIP_INPUT_ZONE_SPAN_BYTES <= zones->size) {
 		const int zoneId = data[spanOffset];
-		const int spanX = SlipBytes_ReadLE16(data + spanOffset + 1u);
+		const int spanX = SlipBytes_ReadLE16(data + spanOffset + SLIP_INPUT_ZONE_SELECTION_BYTES);
 		const int vehicle = zoneId == 0 ? -1 : zoneId - 1;
 
-		spanOffset += 3u;
-		if (spanX == 0xffff || x < spanX) {
+		spanOffset += SLIP_INPUT_ZONE_SPAN_BYTES;
+		if (spanX == UINT16_MAX || x < spanX) {
 			return vehicle >= 0 && vehicle < kDriverCount ? vehicle : -1;
 		}
 	}
@@ -1101,7 +1169,9 @@ static bool SlipMenu_BakeDriverCardLabels(const char *resPath, int driver) {
 	if (driverCardSetupExit.modify.exit == SLIP_RESOURCE_MODIFY_DISPLACED_RETURN) {
 		SlipResourceHost_ReportModifyContinuation(
 		    driverCardSetupExit.continuationReturnAddress, driverCardSetupExit.continuationOperand,
-		    driverCardSetupExit.continuationReturnAddress == 0x45d71 ? vehicleResources.grayPalette : NULL,
+		    driverCardSetupExit.continuationReturnAddress == SLIP_SELECTOR_CARD_MODIFY_CONTINUATION
+		        ? vehicleResources.grayPalette
+		        : NULL,
 		    driverCardSetupExit.modify);
 		return false;
 	}
@@ -1114,10 +1184,11 @@ static bool SlipMenu_DrawDriverSelect(const char *resPath, int driver) {
 	(void)driver;
 	void *const context = vehicleResourceCalls.context;
 	vehicleResourceCalls.drawSprite(context, vehicleResources.assets.driverBackground, 0, 0);
-	vehicleResourceCalls.drawSprite(context, vehicleResources.card, 27, 10);
+	vehicleResourceCalls.drawSprite(context, vehicleResources.card, kDriverCardOriginX, kDriverCardOriginY);
 	g_hoveredDriverAction = SlipMenu_HitTestDriverAction(SlipInput_Pointer().x, SlipInput_Pointer().y);
 	if (g_hoveredDriverAction >= 0 && g_hoveredDriverAction < kDriverActionCount)
-		vehicleResourceCalls.drawSprite(context, vehicleResources.hover[g_hoveredDriverAction], 0x7fff, 0);
+		vehicleResourceCalls.drawSprite(context, vehicleResources.hover[g_hoveredDriverAction],
+		                                SLIP_SPRITE_USE_STORED_POSITION, 0);
 	return true;
 }
 
@@ -1163,13 +1234,13 @@ static bool SlipMenu_DrawVehicleToDriverTransition(const char *resPath, int driv
 		Raster_SetClipRect((int16_t)bounds.left, (int16_t)bounds.top, (int16_t)bounds.right, (int16_t)bounds.bottom);
 	}
 	vehicleResourceCalls.zoom(vehicleResourceCalls.context, vehicleResources.card, (int16_t)g_vehicleZoomScale,
-	                          vehicleResources.zoomCenter, (SlipSelectorPoint){27, 10});
+	                          vehicleResources.zoomCenter, (SlipSelectorPoint){kDriverCardOriginX, kDriverCardOriginY});
 	g_vehicleZoomScale += DRIVER_ZOOM_STEP;
 	return true;
 }
 
 bool SlipMenu_DrawVehiclePanel(const char *resPath, int driver) {
-	char spriteName[32];
+	char spriteName[SLIP_MENU_DRIVER_SPRITE_NAME_BYTES];
 
 	SlipMenu_MakeDriverSpriteName(spriteName, sizeof(spriteName), "VIEWCAR", driver, ".SPR");
 	if (!SlipMenu_DrawSpriteFromRes(resPath, spriteName, true)) {
@@ -1202,7 +1273,7 @@ static void SlipMenu_TrackButtonSetup(void) {
 		SlipGame_ResourceFailure();
 	SlipText_SelectResourceFont(&SlipText_state, trackFontResource, &mainMenuFontCalls);
 	SlipText_SetColor(&SlipText_state, UINT16_MAX);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
 	SlipStringTable_SetLanguage(&SlipStringTable_state, (uint8_t)SlipConfig_Language());
 	if (!SlipStringTable_Load(&SlipStringTable_state, "CHTRACK ", &menuStringResources, &trackMenuStrings))
 		SlipGame_ResourceFailure();
@@ -1215,8 +1286,8 @@ static void SlipMenu_TrackButtonSetup(void) {
 	if (title.exit == SLIP_RESOURCE_MODIFY_DISPLACED_RETURN)
 		SlipRuntime_Fatal("DOS ResModify bug: malformed failure continuation at 0005ae71 is unsupported");
 	trackTitleResource = SlipResourceHost_ModifyReturnedSI(title);
-	const char *const titleText = SlipStringTable_Get(trackMenuStrings, 0x5449544c, &menuStringResources);
-	SlipMenu_BakeResourceSprite(trackTitleResource, titleText, 3);
+	const char *const titleText = SlipStringTable_Get(trackMenuStrings, SLIP_STRING_TITLE, &menuStringResources);
+	SlipMenu_BakeResourceSprite(trackTitleResource, titleText, kMenuTitleTextInsetY);
 	SlipStringTable_Unlock(trackMenuStrings, &menuStringResources);
 
 	for (unsigned variant = 0; variant < 2; ++variant) {
@@ -1243,7 +1314,7 @@ static void SlipMenu_TrackButtonSetup(void) {
 			g_trackButtons[trackIndex].width = sprite.width;
 			g_trackButtons[trackIndex].height = sprite.height;
 			SlipResourceHost_Unlock(NULL, resource);
-			SlipMenu_BakeResourceSprite(resource, g_trackLabels[trackIndex], 3);
+			SlipMenu_BakeResourceSprite(resource, g_trackLabels[trackIndex], kMenuTitleTextInsetY);
 		}
 	}
 
@@ -1317,17 +1388,19 @@ static bool SlipMenu_DrawTrackSelect(const char *resPath) {
 	return true;
 }
 
+enum { SLIP_TRACK_SELECT_GLOBE_GROW_RATE_Q14 = 3 * SLIP_Q14_ONE / 4 };
+
 static bool SlipMenu_DrawTrackSelectFrame(const char *resPath, int selectedTrack, int hoveredTrack, FocusSource focus) {
 	uint16_t menuTrackOneBased;
 	uint32_t growStep;
 	bool drewFrame;
 
 	TrackView_TrackGlobeFrameTimerUpdate();
-	if (g_trackGlobeGrow != 0x4000u) {
-		growStep = 0x3000u * (uint16_t)SlipFrameTimer_Step();
-		g_trackGlobeGrow = (uint16_t)(g_trackGlobeGrow + (growStep >> 14));
-		if ((int16_t)g_trackGlobeGrow > 0x4000) {
-			g_trackGlobeGrow = 0x4000u;
+	if (g_trackGlobeGrow != SLIP_Q14_ONE) {
+		growStep = SLIP_TRACK_SELECT_GLOBE_GROW_RATE_Q14 * (uint16_t)SlipFrameTimer_Step();
+		g_trackGlobeGrow = (uint16_t)(g_trackGlobeGrow + (growStep >> SLIP_Q14_FRACTION_BITS));
+		if ((int16_t)g_trackGlobeGrow > SLIP_Q14_ONE) {
+			g_trackGlobeGrow = SLIP_Q14_ONE;
 		}
 	}
 
@@ -1345,6 +1418,8 @@ static bool SlipMenu_DrawTrackSelectFrame(const char *resPath, int selectedTrack
 static bool SlipMenu_DrawGarageSprite(uint16_t resource, int x, int y);
 
 enum {
+	SLIP_CAMPAIGN_TITLE_MODIFY_CONTINUATION = 0x57496,
+	SLIP_CAMPAIGN_TITLE_MODIFY_OPERAND = 0x54388,
 	SLIP_GARAGE_FIRST_ACTION_TAG = 0x42555431,
 	SLIP_GARAGE_WEAPON_TITLE_TAG = 0x57455030,
 	SLIP_GARAGE_LEFT_WEAPON_POD_TAG = 0x57455031,
@@ -1352,6 +1427,25 @@ enum {
 	SLIP_GARAGE_WEAPON_PODS_ACCEPT_TAG = 0x52455033,
 	SLIP_GARAGE_CANCEL_TAG = 0x43414e43,
 	SLIP_GARAGE_EXIT_TAG = 0x45584954,
+	SLIP_GARAGE_MARKER_HALF_WIDTH = 24,
+	SLIP_GARAGE_MARKER_HALF_HEIGHT = 18,
+	SLIP_GARAGE_TURBO_PANEL_LEFT = 13,
+	SLIP_GARAGE_TURBO_PANEL_TOP = 83,
+	SLIP_GARAGE_SYSTEMS_PANEL_LEFT = 12,
+	SLIP_GARAGE_SYSTEMS_PANEL_TOP = 101,
+	SLIP_GARAGE_STATUS_TEXT_LEFT = 15,
+	SLIP_GARAGE_STATUS_TEXT_RIGHT = 148,
+	SLIP_GARAGE_CASH_TEXT_Y = 14,
+	SLIP_GARAGE_TURBO_TEXT_Y = 88,
+	SLIP_GARAGE_SYSTEM_TEXT_FIRST_X = 3,
+	SLIP_GARAGE_SYSTEM_TEXT_FIRST_Y = 59,
+	SLIP_GARAGE_SYSTEM_TEXT_ROW_SPACING = 7,
+	SLIP_GARAGE_STATUS_WEAPON_CLIP_TOP = 25,
+	SLIP_GARAGE_STATUS_WEAPON_CLIP_BOTTOM = 49,
+	SLIP_GARAGE_WEAPON_PANEL_LEFT = 12,
+	SLIP_GARAGE_WEAPON_PANEL_TOP = 82,
+	SLIP_GARAGE_WEAPON_NAME_Y = 28,
+	SLIP_GARAGE_WEAPON_CHARGE_SUFFIX_Y = 40,
 	SLIP_GARAGE_CURRENT_SYSTEM_FITTED = 1
 };
 
@@ -1369,9 +1463,9 @@ static void SlipMenu_DrawGarageTaggedButton(const SpriteButton *button, bool act
 	SlipMenu_DrawGarageSprite(active ? g_garageBackground : g_garageInactiveBackground, 0, 0);
 	Raster_SetClipRect(left, top, right, bottom);
 	if (tag != 0) {
-		SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, left, right);
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, left, right);
 		const char *const text = SlipStringTable_Get(g_garageStrings, tag, &menuStringResources);
-		SlipTextPosition position = {0, (int16_t)(top + 5)};
+		SlipTextPosition position = {0, (int16_t)(top + kGaragePanelLabelInsetY)};
 		SlipText_Draw(&SlipText_state, text, NULL, &position);
 		SlipStringTable_Unlock(g_garageStrings, &menuStringResources);
 	}
@@ -1401,10 +1495,10 @@ static int SlipMenu_GarageWeaponLoadedCount(int item) {
 	const SlipRacePlayerWeaponRecord *const weapon = SlipMenu_GarageWeaponRecordFromItem(item);
 	int load = (int)weapon->initialLoad;
 
-	if ((g_garageSystems & 4u) != 0) {
+	if ((g_garageSystems & SLIP_RACE_POWERUP_LOADER) != 0) {
 		load *= 2;
-		if (load > 9) {
-			load = 9;
+		if (load > kGarageLoaderMaximumLoad) {
+			load = kGarageLoaderMaximumLoad;
 		}
 	}
 	return load;
@@ -1429,7 +1523,7 @@ static void SlipMenu_InitializeGarageResources(int driver) {
 	SlipConfigHost_calls.language(NULL);
 	if (!SlipStringTable_Load(&SlipStringTable_state, "GARAGE  ", &menuStringResources, &g_garageStrings))
 		SlipGame_ResourceFailure();
-	char name[13];
+	char name[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 	SlipMenu_MakeDriverSpriteName(name, sizeof(name), "GARAGE", driver, "B.SPR");
 	SlipMenu_LoadGarageResource(name, &g_garageInactiveBackground);
 	SlipMenu_MakeDriverSpriteName(name, sizeof(name), "GARAGE", driver, "A.SPR");
@@ -1479,11 +1573,12 @@ static void SlipMenu_PrepareGarageStatus(void) {
 	SlipMenu_DrawGarageSprite(g_garageStatusOriginal, 0, 0);
 	SlipText_SelectResourceFont(&SlipText_state, g_garageWeaponFont, &SlipRaceHud_fontResources);
 	SlipText_SetColor(&SlipText_state, UINT16_MAX);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 15, 148);
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, SLIP_GARAGE_STATUS_TEXT_LEFT,
+	                  SLIP_GARAGE_STATUS_TEXT_RIGHT);
 	SlipTextArgument cash = {.dword = &g_garageRacer->bonusScore};
-	SlipTextPosition position = {15, 14};
+	SlipTextPosition position = {SLIP_GARAGE_STATUS_TEXT_LEFT, SLIP_GARAGE_CASH_TEXT_Y};
 	SlipText_Draw(&SlipText_state, "Cash: $%ld", &cash, &position);
-	char weaponLabels[2][24];
+	char weaponLabels[2][SLIP_RACE_WEAPON_LABEL_BYTES];
 	uint32_t weaponIds[2] = {g_garageRacer->primaryWeaponIndex, g_garageRacer->secondaryWeaponIndex};
 	uint32_t ammunition[2] = {g_garageRacer->primaryWeaponAmmo, g_garageRacer->secondaryWeaponAmmo};
 	for (unsigned slot = 0; slot < 2; ++slot) {
@@ -1497,47 +1592,52 @@ static void SlipMenu_PrepareGarageStatus(void) {
 	                              ? "Not Fitted"
 	                              : SlipRacePowerup_GetName(g_garageRacer->powerupRecord);
 	SlipTextArgument turboArgument = {.text = turbo};
-	position = (SlipTextPosition){15, 88};
+	position = (SlipTextPosition){SLIP_GARAGE_STATUS_TEXT_LEFT, SLIP_GARAGE_TURBO_TEXT_Y};
 	SlipText_Draw(&SlipText_state, "Turbo: %s", &turboArgument, &position);
-	static const char *const systems[3] = {"Charger", "Targetter", "Loader"};
+	static const char *const systems[] = {"Charger", "Targetter", "Loader"};
 	uint32_t fitted = g_garageRacer->powerupFlags;
-	for (unsigned system = 0; system < 3; ++system) {
+	for (unsigned system = 0; system < sizeof(systems) / sizeof(systems[0]); ++system) {
 		SlipTextArgument arguments[2] = {
 		    {.text = systems[system]},
 		    {.text = (fitted & SLIP_GARAGE_CURRENT_SYSTEM_FITTED) != 0 ? "Fitted" : "Not Fitted"}};
-		position = (SlipTextPosition){(int16_t)(3 - system), (int16_t)(59 + system * 7)};
+		position = (SlipTextPosition){
+		    (int16_t)(SLIP_GARAGE_SYSTEM_TEXT_FIRST_X - system),
+		    (int16_t)(SLIP_GARAGE_SYSTEM_TEXT_FIRST_Y + system * SLIP_GARAGE_SYSTEM_TEXT_ROW_SPACING)};
 		SlipText_Draw(&SlipText_state, "%s: %s", arguments, &position);
 		fitted >>= 1;
 	}
 	const int16_t left[2] = {18, 86};
 	const int16_t right[2] = {77, 146};
 	for (unsigned slot = 0; slot < 2; ++slot) {
-		Raster_SetClipRect(left[slot], 25, right[slot], 49);
-		SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, left[slot], right[slot]);
+		Raster_SetClipRect(left[slot], SLIP_GARAGE_STATUS_WEAPON_CLIP_TOP, right[slot],
+		                   SLIP_GARAGE_STATUS_WEAPON_CLIP_BOTTOM);
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, left[slot], right[slot]);
 		if (weaponIds[slot] != 0) {
 			/* The wrapped -1 table entry is the 'GE  ' bytes of GARAGE at4ba7e. */
-			static const uint16_t sourceCoordinatesByBiasedWeapon[13][2] = {
+			static const uint16_t sourceCoordinatesByBiasedWeapon[SLIP_RACE_BIASED_WEAPON_COUNT][2] = {
 			    {0x4547, 0x2020}, {0, 0},     {24, 99},   {92, 99},  {160, 99}, {228, 99}, {24, 129},
 			    {92, 129},        {160, 129}, {228, 129}, {24, 159}, {92, 159}, {160, 159}};
 			const uint16_t *const source = sourceCoordinatesByBiasedWeapon[weaponIds[slot] + 1u];
-			const int x = left[slot] - ((int)source[0] - 12);
-			const int y = 25 - ((int)source[1] - 82);
+			const int x = left[slot] - ((int)source[0] - SLIP_GARAGE_WEAPON_PANEL_LEFT);
+			const int y = SLIP_GARAGE_STATUS_WEAPON_CLIP_TOP - ((int)source[1] - SLIP_GARAGE_WEAPON_PANEL_TOP);
 			SlipMenu_DrawGarageSprite(g_garageWeapons, x, y);
 		}
 		SlipText_SelectResourceFont(&SlipText_state, g_garageWeaponFont, &SlipRaceHud_fontResources);
 		SlipText_SetColor(&SlipText_state, UINT16_MAX);
 		char *label = weaponLabels[slot];
 		const size_t length = strlen(label);
-		position = (SlipTextPosition){left[slot], 28};
+		position = (SlipTextPosition){left[slot], SLIP_GARAGE_WEAPON_NAME_Y};
 		if (label[length - 1u] == ']') {
-			const size_t suffixOffset = length - 3u;
+			/* Weapon labels end with a single-digit charge suffix, "[n]". */
+			const size_t chargeSuffixLength = sizeof("[n]") - 1u;
+			const size_t suffixOffset = length - chargeSuffixLength;
 			const char saved = label[suffixOffset];
 			label[suffixOffset] = 0;
 			SlipText_Draw(&SlipText_state, label, NULL, &position);
 			label[suffixOffset] = saved;
 			label += suffixOffset;
-			SlipText_SetStyle(&SlipText_state, 3, UINT16_MAX, left[slot], right[slot]);
-			position.y = 40;
+			SlipText_SetStyle(&SlipText_state, SLIP_TEXT_RIGHT_ALIGNED, UINT16_MAX, left[slot], right[slot]);
+			position.y = SLIP_GARAGE_WEAPON_CHARGE_SUFFIX_Y;
 		}
 		SlipText_Draw(&SlipText_state, label, NULL, &position);
 	}
@@ -1547,12 +1647,14 @@ static void SlipMenu_PrepareGarageStatus(void) {
 
 static void SlipMenu_DrawGarageGargotAtCenter(const char *resPath, int centerX, int centerY) {
 	(void)resPath;
-	SlipMenu_DrawGarageSprite(g_garageMarker, centerX - 24, centerY - 18);
+	SlipMenu_DrawGarageSprite(g_garageMarker, centerX - SLIP_GARAGE_MARKER_HALF_WIDTH,
+	                          centerY - SLIP_GARAGE_MARKER_HALF_HEIGHT);
 }
 
 static void SlipMenu_DrawGarageRectText(const SpriteButton *button, const char *text, const SlipTextArgument *arguments,
                                         int row) {
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, (int16_t)button->x, (int16_t)(button->x + button->width - 1));
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, (int16_t)button->x,
+	                  (int16_t)(button->x + button->width - 1));
 	SlipTextPosition position = {(int16_t)button->x, (int16_t)(button->y + row)};
 	SlipText_Draw(&SlipText_state, text, arguments, &position);
 }
@@ -1606,7 +1708,7 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 	}
 
 	if (panel == GARAGE_PANEL_WEAPON_GRID) {
-		if (!SlipMenu_DrawGarageSprite(g_garageWeapons, 12, 82))
+		if (!SlipMenu_DrawGarageSprite(g_garageWeapons, SLIP_GARAGE_WEAPON_PANEL_LEFT, SLIP_GARAGE_WEAPON_PANEL_TOP))
 			return false;
 		SlipText_SelectResourceFont(&SlipText_state, g_garageWeaponFont, &SlipRaceHud_fontResources);
 		SlipText_SetColor(&SlipText_state, UINT16_MAX);
@@ -1615,9 +1717,10 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 			SlipMenu_DrawGarageRectText(&g_garageWeaponGridButtons[itemIndex], weapon->displayName, NULL, 1);
 		}
 		const SpriteButton *const cancel = &g_garageWeaponGridButtons[kGarageWeaponGridActionCount - 1];
-		SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, (int16_t)cancel->x, (int16_t)(cancel->x + cancel->width - 1));
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, (int16_t)cancel->x,
+		                  (int16_t)(cancel->x + cancel->width - 1));
 		const char *const label = SlipStringTable_Get(g_garageStrings, SLIP_GARAGE_CANCEL_TAG, &menuStringResources);
-		SlipTextPosition position = {(int16_t)cancel->x, (int16_t)(cancel->y + 10)};
+		SlipTextPosition position = {(int16_t)cancel->x, (int16_t)(cancel->y + kGaragePriceAndCancelInsetY)};
 		SlipText_Draw(&SlipText_state, label, NULL, &position);
 		SlipStringTable_Unlock(g_garageStrings, &menuStringResources);
 		activeItem = SlipMenu_FocusedItemIndex(g_garagePanelFocus, selectedPanelItem, hoveredPanelItem);
@@ -1629,25 +1732,26 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 			SlipText_SelectResourceFont(&SlipText_state, g_garageResultsFont, &SlipRaceHud_fontResources);
 			SlipText_SetColor(&SlipText_state, kGarageAffordablePriceColor);
 			const SpriteButton *const button = &g_garageWeaponGridButtons[activeItem];
-			SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, (int16_t)button->x,
+			SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, (int16_t)button->x,
 			                  (int16_t)(button->x + button->width - 1));
 			if ((int32_t)cost > g_garageCash)
 				SlipText_SetColor(&SlipText_state, kGarageUnaffordablePriceColor);
-			SlipTextPosition pricePosition = {(int16_t)button->x, (int16_t)(button->y + 10)};
+			SlipTextPosition pricePosition = {(int16_t)button->x, (int16_t)(button->y + kGaragePriceAndCancelInsetY)};
 			SlipText_Draw(&SlipText_state, "$%d", &argument, &pricePosition);
 		}
 		return true;
 	}
 
 	if (panel == GARAGE_PANEL_TURBO) {
-		if (!SlipMenu_DrawGarageSprite(g_garageTurboPanel, 13, 83))
+		if (!SlipMenu_DrawGarageSprite(g_garageTurboPanel, SLIP_GARAGE_TURBO_PANEL_LEFT, SLIP_GARAGE_TURBO_PANEL_TOP))
 			return false;
 		SlipText_SelectResourceFont(&SlipText_state, g_garageWeaponFont, &SlipRaceHud_fontResources);
 		SlipText_SetColor(&SlipText_state, UINT16_MAX);
 		for (itemIndex = 0; itemIndex < kGarageTurboActionCount - 1; ++itemIndex)
 			SlipMenu_DrawGarageRectText(&g_garageTurboButtons[itemIndex], SlipRacePowerup_GetName(itemIndex), NULL, 2);
 		const SpriteButton *const cancel = &g_garageTurboButtons[kGarageTurboActionCount - 1];
-		SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, (int16_t)cancel->x, (int16_t)(cancel->x + cancel->width - 1));
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, (int16_t)cancel->x,
+		                  (int16_t)(cancel->x + cancel->width - 1));
 		const char *const label = SlipStringTable_Get(g_garageStrings, SLIP_GARAGE_CANCEL_TAG, &menuStringResources);
 		SlipText_DrawCentered(&SlipText_state, label, NULL, (int16_t)cancel->x, (uint32_t)cancel->y,
 		                      (uint32_t)(cancel->y + cancel->height - 1));
@@ -1660,7 +1764,7 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 			const SpriteButton *const button = &g_garageTurboButtons[activeItem];
 			SlipText_SelectResourceFont(&SlipText_state, g_garageResultsFont, &SlipRaceHud_fontResources);
 			SlipText_SetColor(&SlipText_state, kGarageAffordablePriceColor);
-			SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, (int16_t)button->x,
+			SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, (int16_t)button->x,
 			                  (int16_t)(button->x + button->width - 1));
 			if (activeItem != g_garageTurbo) {
 				const int cost = SlipRacePowerup_GetPrice(activeItem);
@@ -1668,7 +1772,7 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 				SlipTextArgument argument = {.word = &costWord};
 				if (cost > g_garageCash)
 					SlipText_SetColor(&SlipText_state, kGarageUnaffordablePriceColor);
-				SlipTextPosition position = {(int16_t)button->x, (int16_t)(button->y + 10)};
+				SlipTextPosition position = {(int16_t)button->x, (int16_t)(button->y + kGaragePriceAndCancelInsetY)};
 				SlipText_Draw(&SlipText_state, "$%d", &argument, &position);
 			}
 		}
@@ -1676,7 +1780,8 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 	}
 
 	if (panel == GARAGE_PANEL_SYSTEMS) {
-		if (!SlipMenu_DrawGarageSprite(g_garageSystemsPanel, 12, 101))
+		if (!SlipMenu_DrawGarageSprite(g_garageSystemsPanel, SLIP_GARAGE_SYSTEMS_PANEL_LEFT,
+		                               SLIP_GARAGE_SYSTEMS_PANEL_TOP))
 			return false;
 		SlipText_SelectResourceFont(&SlipText_state, g_garageWeaponFont, &SlipRaceHud_fontResources);
 		SlipText_SetColor(&SlipText_state, UINT16_MAX);
@@ -1684,7 +1789,8 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 			SlipMenu_DrawGarageRectText(&g_garageSystemsButtons[itemIndex], g_garageSystemsItems[itemIndex].name, NULL,
 			                            2);
 		const SpriteButton *const cancel = &g_garageSystemsButtons[kGarageSystemsActionCount - 1];
-		SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, (int16_t)cancel->x, (int16_t)(cancel->x + cancel->width - 1));
+		SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, (int16_t)cancel->x,
+		                  (int16_t)(cancel->x + cancel->width - 1));
 		const char *const label = SlipStringTable_Get(g_garageStrings, SLIP_GARAGE_EXIT_TAG, &menuStringResources);
 		SlipText_DrawCentered(&SlipText_state, label, NULL, (int16_t)cancel->x, (uint32_t)cancel->y,
 		                      (uint32_t)(cancel->y + cancel->height - 1));
@@ -1701,7 +1807,7 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 			const SpriteButton *const button = &g_garageSystemsButtons[activeItem];
 			SlipText_SelectResourceFont(&SlipText_state, g_garageResultsFont, &SlipRaceHud_fontResources);
 			SlipText_SetColor(&SlipText_state, kGarageAffordablePriceColor);
-			SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, (int16_t)button->x,
+			SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, (int16_t)button->x,
 			                  (int16_t)(button->x + button->width - 1));
 			if ((g_garageSystems & (SLIP_GARAGE_CURRENT_SYSTEM_FITTED << activeItem)) == 0) {
 				const int cost = g_garageSystemsItems[activeItem].cost[0];
@@ -1709,7 +1815,7 @@ static bool SlipMenu_DrawGarageView(const char *resPath, int driver, int selecte
 				SlipTextArgument argument = {.word = &costWord};
 				if (cost > g_garageCash)
 					SlipText_SetColor(&SlipText_state, kGarageUnaffordablePriceColor);
-				SlipTextPosition position = {(int16_t)button->x, (int16_t)(button->y + 10)};
+				SlipTextPosition position = {(int16_t)button->x, (int16_t)(button->y + kGaragePriceAndCancelInsetY)};
 				SlipText_Draw(&SlipText_state, "$%d", &argument, &position);
 			}
 		}
@@ -1747,11 +1853,11 @@ static int SlipMenu_HitTestTrackButton(int x, int y) {
 }
 
 static int SlipMenu_HitTestDriverAction(int x, int y) {
-	const int localX = x - 0x1b;
-	const int localY = y - 0x0a;
+	const int localX = x - kDriverCardOriginX;
+	const int localY = y - kDriverCardOriginY;
 	int actionIndex;
 
-	for (actionIndex = 0; actionIndex < 4; ++actionIndex) {
+	for (actionIndex = 0; actionIndex < SLIP_SELECTOR_ACTION_COUNT; ++actionIndex) {
 		const SlipSelectorRectangle *const zone = &vehicleResources.actionRects[actionIndex];
 		if (localX >= zone->left && localX <= zone->right && localY >= zone->top && localY <= zone->bottom) {
 			return actionIndex;
@@ -1940,39 +2046,39 @@ static SlipInputCode SlipMenu_SdlKeyToDosScan(int key) {
 	case SDLK_SPACE:
 		return SLIP_INPUT_SCAN_SPACE;
 	case SDLK_LSHIFT:
-		return 0x2a;
+		return SLIP_INPUT_SCAN_LEFT_SHIFT;
 	case SDLK_INSERT:
-		return 0x52;
+		return SLIP_INPUT_SCAN_INSERT;
 	case SDLK_DELETE:
-		return 0x53;
+		return SLIP_INPUT_SCAN_DELETE;
 	case SDLK_PAGEUP:
-		return 0x49;
+		return SLIP_INPUT_SCAN_PAGE_UP;
 	case SDLK_PAGEDOWN:
-		return 0x51;
+		return SLIP_INPUT_SCAN_PAGE_DOWN;
 	case SDLK_KP_PLUS:
-		return 0x4e;
+		return SLIP_INPUT_SCAN_KEYPAD_PLUS;
 	case SDLK_KP_MINUS:
-		return 0x4a;
+		return SLIP_INPUT_SCAN_KEYPAD_MINUS;
 	case SDLK_F1:
-		return 0x3b;
+		return SLIP_INPUT_SCAN_F1;
 	case SDLK_F2:
-		return 0x3c;
+		return SLIP_INPUT_SCAN_F2;
 	case SDLK_F3:
-		return 0x3d;
+		return SLIP_INPUT_SCAN_F3;
 	case SDLK_F4:
-		return 0x3e;
+		return SLIP_INPUT_SCAN_F4;
 	case SDLK_F5:
-		return 0x3f;
+		return SLIP_INPUT_SCAN_F5;
 	case SDLK_F6:
-		return 0x40;
+		return SLIP_INPUT_SCAN_F6;
 	case SDLK_F7:
-		return 0x41;
+		return SLIP_INPUT_SCAN_F7;
 	case SDLK_F8:
-		return 0x42;
+		return SLIP_INPUT_SCAN_F8;
 	case SDLK_F9:
-		return 0x43;
+		return SLIP_INPUT_SCAN_F9;
 	case SDLK_F10:
-		return 0x44;
+		return SLIP_INPUT_SCAN_F10;
 	case SDLK_UP:
 		return SLIP_INPUT_SCAN_UP;
 	case SDLK_DOWN:
@@ -1982,45 +2088,45 @@ static SlipInputCode SlipMenu_SdlKeyToDosScan(int key) {
 	case SDLK_RIGHT:
 		return SLIP_INPUT_SCAN_RIGHT;
 	case SDLK_RSHIFT:
-		return 0x36;
+		return SLIP_INPUT_SCAN_RIGHT_SHIFT;
 	case SDLK_CAPSLOCK:
-		return 0x3a;
+		return SLIP_INPUT_SCAN_CAPS_LOCK;
 	case SDLK_NUMLOCKCLEAR:
-		return 0x45;
+		return SLIP_INPUT_SCAN_NUM_LOCK;
 	case SDLK_HOME:
-		return 0x47;
+		return SLIP_INPUT_SCAN_HOME;
 	case SDLK_END:
-		return 0x4f;
+		return SLIP_INPUT_SCAN_END;
 	case SDLK_KP_DIVIDE:
-		return 0x35;
+		return SLIP_INPUT_SCAN_KEYPAD_DIVIDE;
 	case SDLK_KP_MULTIPLY:
-		return 0x37;
+		return SLIP_INPUT_SCAN_KEYPAD_MULTIPLY;
 	case SDLK_KP_0:
-		return 0x52;
+		return SLIP_INPUT_SCAN_INSERT;
 	case SDLK_KP_1:
-		return 0x4f;
+		return SLIP_INPUT_SCAN_END;
 	case SDLK_KP_2:
-		return 0x50;
+		return SLIP_INPUT_SCAN_DOWN;
 	case SDLK_KP_3:
-		return 0x51;
+		return SLIP_INPUT_SCAN_PAGE_DOWN;
 	case SDLK_KP_4:
-		return 0x4b;
+		return SLIP_INPUT_SCAN_LEFT;
 	case SDLK_KP_5:
-		return 0x4c;
+		return SLIP_INPUT_SCAN_KEYPAD_CENTER;
 	case SDLK_KP_6:
-		return 0x4d;
+		return SLIP_INPUT_SCAN_RIGHT;
 	case SDLK_KP_7:
-		return 0x47;
+		return SLIP_INPUT_SCAN_HOME;
 	case SDLK_KP_8:
-		return 0x48;
+		return SLIP_INPUT_SCAN_UP;
 	case SDLK_KP_9:
-		return 0x49;
+		return SLIP_INPUT_SCAN_PAGE_UP;
 	case SDLK_KP_PERIOD:
-		return 0x53;
+		return SLIP_INPUT_SCAN_DELETE;
 	case SDLK_F11:
-		return 0x57;
+		return SLIP_INPUT_SCAN_F11;
 	case SDLK_F12:
-		return 0x58;
+		return SLIP_INPUT_SCAN_F12;
 	default:
 		return SLIP_INPUT_SCAN_NONE;
 	}
@@ -2061,7 +2167,7 @@ static void SlipSdlInput_ApplyEvent(const SDL_Event *event, SDL_Renderer *render
 		bool keyDown = event->type == SDL_EVENT_KEY_DOWN;
 
 		inputCode = SlipMenu_SdlKeyToDosScan(SlipMenu_EventKeycode(event));
-		if (inputCode >= 0 && inputCode < 256) {
+		if (inputCode >= 0 && inputCode < SLIP_INPUT_CODE_COUNT) {
 			bool extended = false;
 			switch (SlipMenu_EventKeycode(event)) {
 			case SDLK_RCTRL:
@@ -2097,8 +2203,8 @@ static void SlipSdlInput_ApplyEvent(const SDL_Event *event, SDL_Renderer *render
 			SlipInput_held[inputCode] = inputDown;
 		}
 		if (SlipMenu_WindowToLogical(renderer, event->button.x, event->button.y, &mouseX, &mouseY)) {
-			SlipInput_pointerX = mouseX * 0x10000;
-			SlipInput_pointerY = mouseY * 0x10000;
+			SlipInput_pointerX = mouseX * SLIP_INPUT_POINTER_ONE;
+			SlipInput_pointerY = mouseY * SLIP_INPUT_POINTER_ONE;
 		}
 	}
 	if (event->type == SDL_EVENT_MOUSE_MOTION) {
@@ -2106,8 +2212,8 @@ static void SlipSdlInput_ApplyEvent(const SDL_Event *event, SDL_Renderer *render
 		int mouseY;
 
 		if (SlipMenu_WindowToLogical(renderer, event->motion.x, event->motion.y, &mouseX, &mouseY)) {
-			SlipInput_pointerX = mouseX * 0x10000;
-			SlipInput_pointerY = mouseY * 0x10000;
+			SlipInput_pointerX = mouseX * SLIP_INPUT_POINTER_ONE;
+			SlipInput_pointerY = mouseY * SLIP_INPUT_POINTER_ONE;
 		}
 	}
 	if (event->type == SDL_EVENT_QUIT || event->type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
@@ -2117,7 +2223,7 @@ static void SlipSdlInput_ApplyEvent(const SDL_Event *event, SDL_Renderer *render
 }
 
 static void SlipMenu_SetStatusWindowTitle(SDL_Window *window, const char *status) {
-	char title[128];
+	char title[SLIP_MENU_WINDOW_TITLE_BYTES];
 
 	snprintf(title, sizeof(title), "Slipstream 5000 SDL Port - %s", status);
 	SDL_SetWindowTitle(window, title);
@@ -2125,7 +2231,7 @@ static void SlipMenu_SetStatusWindowTitle(SDL_Window *window, const char *status
 }
 
 static void SlipMenu_SetDriverWindowTitle(SDL_Window *window, const char *status, int driver) {
-	char title[128];
+	char title[SLIP_MENU_WINDOW_TITLE_BYTES];
 
 	snprintf(title, sizeof(title), "%s - driver %d", status, driver + 1);
 	SlipMenu_SetStatusWindowTitle(window, title);
@@ -2222,7 +2328,7 @@ static int SlipMainMenu_Show(MainMenuFirstLabel firstLabel, uint16_t buttonCount
 
 	if (!SlipTimedValues_Initialize(&menuTimedValues, menuTimedValueOutputs, MENU_FADE_RATE, 1, &menuTimedValueTimer))
 		SlipGame_UnexpectedFailure();
-	SlipMenuFade_Start(0, 0xffff, MENU_FADE_STEPS, 0);
+	SlipMenuFade_Start(0, UINT16_MAX, MENU_FADE_STEPS, 0);
 	SlipMenuSound_Play();
 	SlipFrameTimer_Reset();
 
@@ -2240,8 +2346,8 @@ static int SlipMainMenu_Show(MainMenuFirstLabel firstLabel, uint16_t buttonCount
 		     SlipInput_pressed[SLIP_INPUT_SCAN_LEFT] || SlipInput_pressed[SLIP_INPUT_SCAN_RIGHT])) {
 			SlipInput_UpdateNavigation(SlipInput_pressed);
 			const uint16_t current = navigationTable.currentItem;
-			SlipInput_pointerX = (int32_t)navigationTable.centers[current][0] * 0x10000;
-			SlipInput_pointerY = (int32_t)navigationTable.centers[current][1] * 0x10000;
+			SlipInput_pointerX = (int32_t)navigationTable.centers[current][0] * SLIP_INPUT_POINTER_ONE;
+			SlipInput_pointerY = (int32_t)navigationTable.centers[current][1] * SLIP_INPUT_POINTER_ONE;
 		}
 		SlipInput_UpdatePointer();
 		if (quitRequested) {
@@ -2262,7 +2368,7 @@ static int SlipMainMenu_Show(MainMenuFirstLabel firstLabel, uint16_t buttonCount
 		if ((inputCode == SLIP_INPUT_SCAN_ENTER || inputCode == SLIP_INPUT_MOUSE_LEFT) && hoveredItem != 0) {
 			selection = (int16_t)hoveredItem;
 			g_menuFadeOutSelection = selection - 1;
-			SlipMenuFade_Start(0xffff, 0, MENU_FADE_STEPS, SLIP_TIMED_VALUE_PRESERVE_OUTPUT);
+			SlipMenuFade_Start(UINT16_MAX, 0, MENU_FADE_STEPS, SLIP_TIMED_VALUE_PRESERVE_OUTPUT);
 			SlipMenuSound_Play();
 		}
 		if (inputCode != SLIP_INPUT_SCAN_NONE) {
@@ -2282,7 +2388,7 @@ static int SlipMainMenu_Show(MainMenuFirstLabel firstLabel, uint16_t buttonCount
 			selection = -1;
 			break;
 		}
-	} while (selection == 0 || SlipTimedValues_Active(&menuTimedValues, 0x3d434));
+	} while (selection == 0 || SlipTimedValues_Active(&menuTimedValues, MENU_FADE_OUTPUT_TOKEN));
 
 	if (selection > 0 && !quitRequested) {
 		SlipMainMenu_DrawFrame(g_mainMenuResPath, menuPage, hoveredItem == 0 ? -1 : (int)hoveredItem - 1);
@@ -2316,16 +2422,17 @@ static LinkMenuDispatchResult SlipLinkMenu_DispatchSelection(int selection) {
 }
 
 static int SlipRaceLink_Setup(void) {
-	if (SlipRace_gameMode == 0 || SlipRace_gameMode == 1) {
+	if (SlipRace_gameMode == SLIP_RACE_GAME_SINGLE_PLAYER || SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN) {
 		return 0;
 	}
 	return 1;
 }
 
 static int SlipMainMenu_RunFlow(void) {
-	static const SlipRaceType onePlayerRaceTypes[4] = {0, SLIP_RACE_TYPE_PRACTICE, SLIP_RACE_TYPE_SINGLE,
-	                                                   SLIP_RACE_TYPE_CHAMPIONSHIP};
-	static const SlipRaceType twoPlayerRaceTypes[3] = {0, SLIP_RACE_TYPE_SINGLE, SLIP_RACE_TYPE_SINGLE};
+	static const SlipRaceType onePlayerRaceTypes[MAIN_MENU_ONE_PLAYER_OPTION_COUNT + 1] = {
+	    0, SLIP_RACE_TYPE_PRACTICE, SLIP_RACE_TYPE_SINGLE, SLIP_RACE_TYPE_CHAMPIONSHIP};
+	static const SlipRaceType twoPlayerRaceTypes[MAIN_MENU_TWO_PLAYER_OPTION_COUNT + 1] = {0, SLIP_RACE_TYPE_SINGLE,
+	                                                                                       SLIP_RACE_TYPE_SINGLE};
 	int selection;
 
 	SlipConfig_mode = -1;
@@ -2333,17 +2440,17 @@ static int SlipMainMenu_RunFlow(void) {
 	if (SlipMainMenu_demoSelection != 0) {
 		SlipRace_type = SLIP_RACE_TYPE_SINGLE;
 		SlipRace_secondPlayerEnabled = 1;
-		SlipRace_gameMode = 0;
+		SlipRace_gameMode = SLIP_RACE_GAME_SINGLE_PLAYER;
 		return SlipMainMenu_demoSelection;
 	}
 
 	for (;;) {
-		selection = SlipMainMenu_Show(MAIN_MENU_FIRST_LABEL_OPT1, 5);
+		selection = SlipMainMenu_Show(MAIN_MENU_FIRST_LABEL_OPT1, MAIN_MENU_TOP_OPTION_COUNT);
 		if (selection == -1 || selection == 0) {
 			return selection;
 		}
-		if (selection == 1) {
-			selection = SlipMainMenu_Show(MAIN_MENU_FIRST_LABEL_OP11, 3);
+		if (selection == MAIN_MENU_SELECTION_SINGLE_PLAYER) {
+			selection = SlipMainMenu_Show(MAIN_MENU_FIRST_LABEL_OP11, MAIN_MENU_ONE_PLAYER_OPTION_COUNT);
 			if (selection == -1) {
 				return selection;
 			}
@@ -2351,16 +2458,16 @@ static int SlipMainMenu_RunFlow(void) {
 				continue;
 			}
 			SlipRace_type = onePlayerRaceTypes[selection];
-			SlipRace_racerCount = 10;
-			SlipRace_gameMode = 0;
+			SlipRace_racerCount = SLIP_RACE_RACER_COUNT;
+			SlipRace_gameMode = SLIP_RACE_GAME_SINGLE_PLAYER;
 			SlipRace_secondPlayerEnabled = 1;
-			return 1;
+			return MAIN_MENU_DISPATCH_RACE_SETUP;
 		}
-		if (selection == 2) {
+		if (selection == MAIN_MENU_SELECTION_LINK) {
 			for (;;) {
 				LinkMenuDispatchResult linkResult;
 
-				selection = SlipMainMenu_Show(MAIN_MENU_FIRST_LABEL_LNK1, 4);
+				selection = SlipMainMenu_Show(MAIN_MENU_FIRST_LABEL_LNK1, MAIN_MENU_LINK_OPTION_COUNT);
 				if (selection == -1) {
 					return selection;
 				}
@@ -2376,37 +2483,37 @@ static int SlipMainMenu_RunFlow(void) {
 				if (linkResult.secondPlayerEnabled == 0) {
 					SlipRace_type = SLIP_RACE_TYPE_SINGLE;
 				} else {
-					selection = SlipMainMenu_Show(MAIN_MENU_FIRST_LABEL_OP21, 2);
+					selection = SlipMainMenu_Show(MAIN_MENU_FIRST_LABEL_OP21, MAIN_MENU_TWO_PLAYER_OPTION_COUNT);
 					if (selection == -1) {
 						return selection;
 					}
 					if (selection == 0) {
 						continue;
 					}
-					SlipRace_racerCount = selection == 1 ? 2u : 10u;
+					SlipRace_racerCount = selection == 1 ? 2u : SLIP_RACE_RACER_COUNT;
 					SlipRace_type = twoPlayerRaceTypes[selection];
 				}
 				if (SlipRaceLink_Setup() == 0) {
-					return 1;
+					return MAIN_MENU_DISPATCH_RACE_SETUP;
 				}
 			}
 			continue;
 		}
-		if (selection == 3 || selection == 4) {
+		if (selection == MAIN_MENU_DISPATCH_LOAD_GAME || selection == MAIN_MENU_DISPATCH_CONFIGURATION) {
 			return selection;
 		}
-		return 2;
+		return MAIN_MENU_DISPATCH_SHOWCASE;
 	}
 }
 
 static void SlipMenu_RaceConfiguration(void) {
 	const uint16_t font = SlipConfigHost_calls.currentFont(SlipConfigHost_calls.context);
-	uint8_t palette[256][3];
-	SlipVgaDac_ReadRange(0, 256, palette[0]);
+	uint8_t palette[SLIP_VGA_DAC_PALETTE_COUNT][SLIP_VGA_DAC_CHANNEL_COUNT];
+	SlipVgaDac_ReadRange(0, SLIP_VGA_DAC_PALETTE_COUNT, palette[0]);
 	SlipConfigMenu_state.allowDifficulty = 0;
 	SlipConfigMenu_Run(&SlipConfigMenu_state, &SlipConfigHost_calls);
 	SlipConfigMenu_state.allowDifficulty = 1;
-	SlipVgaDac_WriteRange(0, 256, palette[0]);
+	SlipVgaDac_WriteRange(0, SLIP_VGA_DAC_PALETTE_COUNT, palette[0]);
 	SlipConfigHost_calls.selectFont(SlipConfigHost_calls.context, font);
 	SlipRaceSession_ApplyConfigurationValues();
 	SlipRaceHud_ResetConsole(&SlipRaceSession_hudState);
@@ -2455,7 +2562,7 @@ static void SlipMenu_EnterVehicleToDriver(SDL_Window *window, AppMode *mode, int
 
 static void SlipMenu_EnterDriverSelect(SDL_Window *window, AppMode *mode, int *hoveredButton, bool *redraw) {
 	vehicleResources.voice = 0;
-	g_selectedDriverAction = 0;
+	g_selectedDriverAction = kDriverActionAccept;
 	g_hoveredDriverAction = -1;
 	*mode = APP_MODE_DRIVER_SELECT;
 	*hoveredButton = -1;
@@ -2508,7 +2615,9 @@ static void SlipMenu_StartSelectedRace(const char *resPath, AppMode *mode) {
 	*mode = APP_MODE_RACE;
 
 	if (SlipRace_type != SLIP_RACE_TYPE_PRACTICE)
-		SlipRaceRecording_Install(SlipRace_gameMode == 0 ? 6 : 12, 100000, &SlipRaceSession_recordingHost);
+		SlipRaceRecording_Install(SlipRace_gameMode == SLIP_RACE_GAME_SINGLE_PLAYER ? SLIP_RECORDING_CONTROL_BYTES
+		                                                                            : 2 * SLIP_RECORDING_CONTROL_BYTES,
+		                          SLIP_RECORDING_DEFAULT_CAPACITY_BYTES, &SlipRaceSession_recordingHost);
 	SlipRaceSession_StartNew(resPath, trackIndex, &SlipRace_racerTable, (uint32_t)SlipConfig_environmentDetail,
 	                         (uint32_t)SlipConfig_shading, (uint32_t)SlipConfig_textures, (uint32_t)SlipConfig_shadows);
 }
@@ -2516,7 +2625,7 @@ static void SlipMenu_StartSelectedRace(const char *resPath, AppMode *mode) {
 static void SlipMenu_EnterGarageView(SDL_Window *window, AppMode *mode, bool *redraw, uint32_t playerNumber);
 
 static uint32_t SlipMenu_TrackLimit(void) {
-	if (SlipRace_gameMode != 0)
+	if (SlipRace_gameMode != SLIP_RACE_GAME_SINGLE_PLAYER)
 		return SLIP_CONFIG_TRACK_COUNT;
 	return SlipConfig_TrackProgress();
 }
@@ -2559,7 +2668,7 @@ static void SlipMenu_EnterGarageView(SDL_Window *window, AppMode *mode, bool *re
 	SlipMenu_InitializeGarageResources(g_selectedDriver);
 	*mode = APP_MODE_GARAGE;
 	g_garagePanel = GARAGE_PANEL_NONE;
-	g_selectedGarageAction = 0;
+	g_selectedGarageAction = kGarageActionWeapons;
 	g_selectedGaragePanelItem = 0;
 	g_selectedGarageWeaponPod = 0;
 
@@ -2591,24 +2700,24 @@ static void SlipMenu_SelectGarageAction(const char *resPath, SDL_Window *window,
 	g_selectedGaragePanelItem = 0;
 	g_garageActionFocus = FOCUS_NONE;
 	g_garagePanelFocus = FOCUS_NONE;
-	if (action == 0) {
+	if (action == kGarageActionWeapons) {
 		g_garagePanel = GARAGE_PANEL_WEAPON_PODS;
 		SlipMenu_PrepareGarageStatus();
 		SlipMenu_SetStatusWindowTitle(window, g_garageActionLabels[action]);
-	} else if (action == 1) {
+	} else if (action == kGarageActionTurbo) {
 		g_garagePanel = GARAGE_PANEL_TURBO;
 		SlipMenu_SetStatusWindowTitle(window, g_garageActionLabels[action]);
-	} else if (action == 2) {
+	} else if (action == kGarageActionSystems) {
 		g_garagePanel = GARAGE_PANEL_SYSTEMS;
 		SlipMenu_SetStatusWindowTitle(window, g_garageActionLabels[action]);
 	} else {
 
 		SlipMenu_ReleaseGarageResources();
 		g_garagePanel = GARAGE_PANEL_NONE;
-		SlipMenu_SetStatusWindowTitle(window, g_garageActionLabels[3]);
+		SlipMenu_SetStatusWindowTitle(window, g_garageActionLabels[kGarageActionStartRace]);
 		if (mode != NULL) {
 
-			if (SlipRace_gameMode == 1 && g_garageRacer->racerType == 0)
+			if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN && g_garageRacer->racerType == SLIP_RACER_PLAYER_ONE)
 				SlipMenu_EnterGarageView(window, mode, redraw, 2u);
 			else
 				SlipMenu_StartSelectedRace(resPath, mode);
@@ -2642,7 +2751,7 @@ static void SlipMenu_ReturnToGarageWeaponPods(SDL_Window *window) {
 	g_selectedGaragePanelItem = g_selectedGarageWeaponPod;
 	g_hoveredGaragePanelItem = -1;
 	g_garagePanelFocus = FOCUS_NONE;
-	SlipMenu_SetStatusWindowTitle(window, g_garageActionLabels[0]);
+	SlipMenu_SetStatusWindowTitle(window, g_garageActionLabels[kGarageActionWeapons]);
 }
 
 static void SlipMenu_SelectGaragePanelItem(SDL_Window *window, int item, bool *redraw) {
@@ -2825,40 +2934,43 @@ static void SlipMenu_CampaignPresenterQueue(void *context, const uint8_t *progra
 	SlipPresenter_Queue(program, size);
 }
 
-static SlipView3DMatrix campaignGlobe = {{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
+static SlipView3DMatrix campaignGlobe = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 
 bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview) {
-	static const char *const names[11] = {NULL,         "CHIINT.ANN", "HAWINT.ANN", "TOKINT.ANN",
-	                                      "NORINT.ANN", "CAVINT.ANN", "COLINT.ANN", "AMAINT.ANN",
-	                                      "LONINT.ANN", "EGYINT.ANN", "NYCINT.ANN"};
-	static const char *const titles[10] = {"Chicago", "Hawaii", "Tokyo",  "Norway", "France",
-	                                       "Arizona", "Amazon", "London", "Egypt",  "New York"};
-	char secondaryPath[512], name[13];
-	const char *archives[2];
+	/* Track scripts switch from TTTINT.ANN to TTTIN1.ANN after the preview. */
+	enum { SLIP_MENU_CAMPAIGN_SCRIPT_VARIANT_OFFSET = 5 };
+
+	static const char *const names[SLIP_RACE_TRACK_COUNT + 1] = {NULL,         "CHIINT.ANN", "HAWINT.ANN", "TOKINT.ANN",
+	                                                             "NORINT.ANN", "CAVINT.ANN", "COLINT.ANN", "AMAINT.ANN",
+	                                                             "LONINT.ANN", "EGYINT.ANN", "NYCINT.ANN"};
+	static const char *const titles[SLIP_RACE_TRACK_COUNT] = {"Chicago", "Hawaii", "Tokyo",  "Norway", "France",
+	                                                          "Arizona", "Amazon", "London", "Egypt",  "New York"};
+	char secondaryPath[SLIP_MENU_ARCHIVE_PATH_BYTES], name[SLIP_RESOURCE_NAME_BUFFER_BYTES];
+	const char *archives[SLIP_MENU_ARCHIVE_CAPACITY];
 	const size_t count = SlipMenu_BuildArchiveList(g_mainMenuResPath, secondaryPath, archives);
 	TrackViewResourceHandleRegistry registry = {.archives = archives, .archiveCount = count, .hostResources = true};
 	uint16_t titleResource, titleFontResource, starsResource, scriptResource, globeResource, flagResource;
 	SlipResourcePayload script;
 	SlipStringTableSlot *strings;
-	SlipRaceIntroScript state = {.cursor = 16};
+	SlipRaceIntroScript state = {.cursor = SLIP_RACE_INTRO_SCRIPT_HEADER_BYTES};
 	SlipRaceIntroResources resources = {&registry, SlipMenu_CampaignSampleSize, SlipMenu_CampaignSampleLoad,
 	                                    SlipMenu_CampaignSampleRelease};
 	SlipRaceIntroScriptHost host = {
 	    &registry, SlipMenu_CampaignVoiceStopped, SlipMenu_CampaignVoicePlay, SlipMenu_CampaignResetConsole, NULL,
 	    NULL};
-	if (track == 0 || track > 10 || count == 0)
+	if (track == 0 || track > SLIP_RACE_TRACK_COUNT || count == 0)
 		SlipRuntime_Fatal("Invalid campaign presenter track.");
 
 	SlipStringTable_SetLanguage(&SlipStringTable_state, (uint8_t)SlipConfig_language);
-	SlipRenderer_Initialize(&SlipRendererHost_state, 150, &SlipRendererHost_lifecycleCalls);
-	SlipDraw3D_SetMinimumDepth(0x0c);
-	SlipDraw3D_SetMaximumDepth(0x7fffffff);
+	SlipRenderer_Initialize(&SlipRendererHost_state, kCampaignVertexCapacity, &SlipRendererHost_lifecycleCalls);
+	SlipDraw3D_SetMinimumDepth(kCampaignMinimumDepth);
+	SlipDraw3D_SetMaximumDepth(INT32_MAX);
 	SlipDraw3D_ResetLighting();
-	SlipDraw3D_SetAmbientLight(0x1800);
-	SlipDraw3D_SetLightVector(0, (int16_t)0xc000, 0, 0x2800);
+	SlipDraw3D_SetAmbientLight(kCampaignAmbientLightQ14);
+	SlipDraw3D_SetLightVector(0, -SLIP_Q14_ONE, 0, kCampaignDirectLightQ14);
 	SlipDraw3D_SetDepthFade(0, 0, 0);
 	SlipRenderer_SetFlags(&SlipRendererHost_state, SLIP_RENDER_ALTERNATE_TEXTURE_RASTER);
-	const SlipView3DMatrix cameraIdentity = {{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
+	const SlipView3DMatrix cameraIdentity = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 	SlipRenderer_SetCamera(&SlipRendererHost_state, (SlipView3DVec32){0, 0, 0}, &cameraIdentity);
 	SlipShape3D_Initialize();
 	uint16_t materialResource;
@@ -2876,7 +2988,8 @@ bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview) {
 		SlipGame_ResourceFailure();
 	SlipResourceModifyResult modifiedTitle = SlipResourceHost_Modify(NULL, titleResource);
 	if (modifiedTitle.exit == SLIP_RESOURCE_MODIFY_DISPLACED_RETURN) {
-		SlipResourceHost_ReportModifyContinuation(0x57496, 0x54388, NULL, modifiedTitle);
+		SlipResourceHost_ReportModifyContinuation(SLIP_CAMPAIGN_TITLE_MODIFY_CONTINUATION,
+		                                          SLIP_CAMPAIGN_TITLE_MODIFY_OPERAND, NULL, modifiedTitle);
 		return false;
 	}
 	titleResource = SlipResourceHost_ModifyReturnedSI(modifiedTitle);
@@ -2893,31 +3006,32 @@ bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview) {
 		SlipRuntime_Fatal("Invalid campaign title host view.");
 	RasterSurfaceBinding savedTitleSurface;
 	Raster_BindSprite((uint8_t *)titleSprite.pixels, titleSprite.width, titleSprite.height, &savedTitleSurface);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 0, (int16_t)(titleSprite.width - 1));
-	SlipTextPosition titlePosition = {0, 3};
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, (int16_t)(titleSprite.width - 1));
+	SlipTextPosition titlePosition = {0, kMenuTitleTextInsetY};
 	SlipText_Draw(&SlipText_state, titles[track - 1], NULL, &titlePosition);
 	SlipResourceHost_Unlock(NULL, titleResource);
 	Raster_RestoreScreen(&savedTitleSurface);
 	SlipResourceHost_Release(NULL, titleFontResource);
 
 	strcpy(name, names[track]);
-	name[5] = afterPreview != 0 ? '1' : 'T';
+	name[SLIP_MENU_CAMPAIGN_SCRIPT_VARIANT_OFFSET] = afterPreview != 0 ? '1' : 'T';
 
 	if (!SlipResourceHost_Load(NULL, name, &scriptResource))
 		SlipGame_ResourceFailure();
 	SlipResourceHost_LockWritable(NULL, scriptResource);
 	script = SlipResourceHost_Payload(scriptResource);
-	if (script.size < 16)
+	if (script.size < SLIP_RACE_INTRO_SCRIPT_HEADER_BYTES)
 		SlipRuntime_Fatal("Invalid campaign ANN host view.");
-	char stringBase[9];
-	memcpy(stringBase, script.data, 8);
-	stringBase[8] = 0;
+	char stringBase[SLIP_RACE_INTRO_STRING_NAME_BYTES + 1];
+	memcpy(stringBase, script.data + SLIP_RACE_INTRO_STRING_NAME_OFFSET, SLIP_RACE_INTRO_STRING_NAME_BYTES);
+	stringBase[SLIP_RACE_INTRO_STRING_NAME_BYTES] = 0;
 	if (!SlipStringTable_Load(&SlipStringTable_state, stringBase, &menuStringResources, &strings))
 		SlipGame_ResourceFailure();
 	if (!SlipRaceIntro_PreloadResource(scriptResource, (uint16_t)SlipConfig_language, &resources))
 		SlipGame_ResourceFailure();
 
-	if (!SlipPresenter_Initialize(SlipBytes_ReadLE16(script.data + 8), archives, count))
+	if (!SlipPresenter_Initialize(SlipBytes_ReadLE16(script.data + SLIP_RACE_INTRO_PRESENTER_VARIANT_OFFSET), archives,
+	                              count))
 		SlipGame_ResourceFailure();
 	SlipPresenter_Queue(SlipPresenter_idle, sizeof(SlipPresenter_idle));
 
@@ -2932,7 +3046,7 @@ bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview) {
 		SlipRuntime_Fatal("Invalid campaign stars host view.");
 	SlipSprite_ApplyPalette(&starSprite);
 	SlipResourceHost_Unlock(NULL, starsResource);
-	Raster_SetClipRect(0, 0, 319, 199);
+	Raster_SetClipRect(0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 
 	uint32_t captionEdgeOrSpeechSize = SLIPSTREAM_SCREEN_HEIGHT - 1;
 	SlipFrameTimer_Reset();
@@ -2948,23 +3062,28 @@ bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview) {
 		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
 		SlipTrackGlobe_UpdateGivenMatrix(g_mainMenuResPath, track, &campaignGlobe, captionEdgeOrSpeechSize);
 		vehicleResourceCalls.drawSprite(NULL, starsResource, 0, 0);
-		SlipTrackGlobe_DrawGivenResources(g_mainMenuResPath, track, 0x4000, &campaignGlobe, globeResource,
+		SlipTrackGlobe_DrawGivenResources(g_mainMenuResPath, track, SLIP_Q14_ONE, &campaignGlobe, globeResource,
 		                                  flagResource);
-		SlipPresenter_Draw(g_framebuffer, 320, 182, 25);
+		SlipPresenter_Draw(g_framebuffer, SLIPSTREAM_SCREEN_WIDTH, kCampaignPresenterX, kCampaignPresenterY);
 		vehicleResourceCalls.drawSprite(NULL, titleResource, INT16_MAX, 0);
-		if (state.caption != 0 &&
-		    !(SlipConfig_language != 0 && menuSound != NULL && menuSound->digitalCard != 0 && SlipConfig_speech != 0)) {
+		if (state.caption != 0 && !(SlipConfig_language != SLIP_CONFIG_LANGUAGE_ENGLISH && menuSound != NULL &&
+		                            menuSound->digitalCard != 0 && SlipConfig_speech != 0)) {
 
 			SlipText_SelectResourceFont(&SlipText_state, SlipMenu_resources.smallFont, &mainMenuFontCalls);
-			SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 184, 308);
+			SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX,
+			                  kCampaignCaptionLeft + kCampaignCaptionShadowOffset,
+			                  kCampaignCaptionRight + kCampaignCaptionShadowOffset);
 			const char *const caption = SlipStringTable_Get(strings, state.caption, &menuStringResources);
-			SlipText_SetColor(&SlipText_state, 0x84);
-			SlipText_DrawCentered(&SlipText_state, caption, NULL, 184, 127, 196);
-			SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 185, 309);
-			SlipText_SetColor(&SlipText_state, 0x8d);
-			SlipText_DrawCentered(&SlipText_state, caption, NULL, 185, 127, 196);
+			SlipText_SetColor(&SlipText_state, kCampaignCaptionShadowColour);
+			SlipText_DrawCentered(&SlipText_state, caption, NULL, kCampaignCaptionLeft + kCampaignCaptionShadowOffset,
+			                      kCampaignCaptionTop, kCampaignCaptionBottom);
+			SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, kCampaignCaptionLeft,
+			                  kCampaignCaptionRight);
+			SlipText_SetColor(&SlipText_state, kCampaignCaptionColour);
+			SlipText_DrawCentered(&SlipText_state, caption, NULL, kCampaignCaptionLeft, kCampaignCaptionTop,
+			                      kCampaignCaptionBottom);
 			SlipStringTable_Unlock(strings, &menuStringResources);
-			captionEdgeOrSpeechSize = 309;
+			captionEdgeOrSpeechSize = kCampaignCaptionRight;
 		}
 		SlipMenu_PresentFrame();
 		const uint16_t delta = (uint16_t)SlipFrameTimer_Values().deltaMilliseconds;
@@ -3005,10 +3124,10 @@ bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview) {
 static uint32_t championshipStage;
 
 static void SlipCampaign_Stage(SDL_Window *window, AppMode *mode, bool *redraw) {
-	static const uint8_t stages[10] = {6, 1, 7, 8, 4, 9, 5, 2, 3, 10};
+	static const uint8_t stages[SLIP_RACE_TRACK_COUNT] = {6, 1, 7, 8, 4, 9, 5, 2, 3, 10};
 	const uint16_t track = stages[championshipStage - 1];
-	char secondaryPath[512];
-	const char *archives[2];
+	char secondaryPath[SLIP_MENU_ARCHIVE_PATH_BYTES];
+	const char *archives[SLIP_MENU_ARCHIVE_CAPACITY];
 	const size_t count = SlipMenu_BuildArchiveList(g_mainMenuResPath, secondaryPath, archives);
 	TrackViewResourceHandleRegistry registry = {.archives = archives, .archiveCount = count, .hostResources = true};
 	SlipRaceIntroResources resources = {&registry, SlipMenu_CampaignSampleSize, SlipMenu_CampaignSampleLoad,
@@ -3048,7 +3167,7 @@ static void SlipCampaign_Continue(SDL_Window *window, AppMode *mode, bool *redra
 static void SlipDriverSelect_Action(SDL_Window *window, AppMode *mode, int action, int *hoveredButton, bool *redraw) {
 	if (driverCardResourcesActive && menuSound != NULL)
 		SlipGameSound_Stop(menuSound, vehicleResources.voice);
-	if (action == 0) {
+	if (action == kDriverActionAccept) {
 		if (driverCardResourcesActive)
 			SlipVehicleSelector_CardRelease(&vehicleResources, &vehicleResourceCalls);
 		driverCardResourcesActive = false;
@@ -3063,7 +3182,7 @@ static void SlipDriverSelect_Action(SDL_Window *window, AppMode *mode, int actio
 			if (g_excludedDriver == 0) {
 				g_playerOneDriver = (uint16_t)(g_selectedDriver + 1);
 				g_playerTwoDriver = 0;
-				if (SlipRace_gameMode == 1) {
+				if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN) {
 					SlipMenu_EnterVehicleSelect(window, mode, g_selectedRaceType, hoveredButton, redraw,
 					                            g_playerOneDriver);
 					return;
@@ -3074,7 +3193,7 @@ static void SlipDriverSelect_Action(SDL_Window *window, AppMode *mode, int actio
 			g_selectedDriver = g_playerOneDriver - 1;
 			SlipMenu_EnterTrackSelect(window, mode, APP_MODE_DRIVER_SELECT, redraw);
 		}
-	} else if (action == 1) {
+	} else if (action == kDriverActionCancel) {
 
 		SlipMenuMusic_Branch(0);
 		if (driverCardResourcesActive) {
@@ -3082,11 +3201,11 @@ static void SlipDriverSelect_Action(SDL_Window *window, AppMode *mode, int actio
 			RasterSurfaceBounds bounds = Raster_GetSurfaceBounds();
 			Raster_SetClipRect((int16_t)bounds.left, (int16_t)bounds.top, (int16_t)bounds.right,
 			                   (int16_t)bounds.bottom);
-			for (int16_t scale = 0x4000; scale >= 0; scale -= 0x400) {
+			for (int16_t scale = SLIP_Q14_ONE; scale >= 0; scale -= kDriverCardZoomStepQ14) {
 				vehicleResourceCalls.poll(context);
 				vehicleResourceCalls.drawSprite(context, vehicleResources.assets.driverBackground, 0, 0);
 				vehicleResourceCalls.zoom(context, vehicleResources.card, scale, vehicleResources.zoomCenter,
-				                          (SlipSelectorPoint){27, 10});
+				                          (SlipSelectorPoint){kDriverCardOriginX, kDriverCardOriginY});
 				vehicleResourceCalls.present(context);
 			}
 			if (vehicleResources.speech != 0) {
@@ -3094,7 +3213,9 @@ static void SlipDriverSelect_Action(SDL_Window *window, AppMode *mode, int actio
 				SlipResourceHost_Release(NULL, vehicleResources.speech);
 			}
 			SlipResourceHost_Release(NULL, vehicleResources.card);
-			for (unsigned hoverSpriteIndex = 0; hoverSpriteIndex < 3; ++hoverSpriteIndex)
+			for (unsigned hoverSpriteIndex = 0;
+			     hoverSpriteIndex < sizeof(vehicleResources.hover) / sizeof(vehicleResources.hover[0]);
+			     ++hoverSpriteIndex)
 				SlipResourceHost_Release(NULL, vehicleResources.hover[hoverSpriteIndex]);
 			driverCardResourcesActive = false;
 			vehicleResources.confirmed = 0;
@@ -3118,7 +3239,7 @@ bool SlipMenu_DebugAcceptSplitDrivers(void) {
 	int hovered = -1;
 	bool redraw = false;
 	g_selectedRaceType = ONE_PLAYER_RACE_SINGLE;
-	SlipRace_gameMode = 1;
+	SlipRace_gameMode = SLIP_RACE_GAME_SPLIT_SCREEN;
 	g_excludedDriver = 0;
 	g_selectedDriver = 3;
 	SlipDriverSelect_Action(NULL, &mode, 0, &hovered, &redraw);
@@ -3133,7 +3254,7 @@ bool SlipMenu_DebugAcceptSplitDrivers(void) {
 	racers.racerCount = 2;
 	SlipRace_BuildRacerTable(&racers, g_playerOneDriver, g_playerTwoDriver);
 	return racers.records[0].tuningIndex == 4 && racers.records[1].tuningIndex == 8 &&
-	       racers.records[0].racerType == 0 && racers.records[1].racerType == 1;
+	       racers.records[0].racerType == SLIP_RACER_PLAYER_ONE && racers.records[1].racerType == SLIP_RACER_PLAYER_TWO;
 }
 
 bool SlipMenu_DebugAcceptChampionship(void) {
@@ -3142,7 +3263,7 @@ bool SlipMenu_DebugAcceptChampionship(void) {
 	bool redraw = false;
 	g_selectedRaceType = ONE_PLAYER_RACE_CHAMPIONSHIP;
 	SlipRace_type = SLIP_RACE_TYPE_CHAMPIONSHIP;
-	SlipRace_gameMode = 0;
+	SlipRace_gameMode = SLIP_RACE_GAME_SINGLE_PLAYER;
 	SlipRace_racerCount = 10;
 	g_selectedDriver = 0;
 	SlipDriverSelect_Action(NULL, &mode, 0, &hovered, &redraw);
@@ -3158,9 +3279,12 @@ static bool SlipMenu_DebugRenderGaragePanel(const char *resPath, int panel, int 
 	g_garagePanelFocus = savedFocus;
 	if (!rendered)
 		return false;
-	uint32_t hash = 2166136261u;
+
+	enum { FNV1A_OFFSET_BASIS = 2166136261u, FNV1A_PRIME = 16777619u };
+
+	uint32_t hash = FNV1A_OFFSET_BASIS;
 	for (size_t pixelIndex = 0; pixelIndex < sizeof(g_framebuffer); ++pixelIndex)
-		hash = (hash ^ g_framebuffer[pixelIndex]) * 16777619u;
+		hash = (hash ^ g_framebuffer[pixelIndex]) * FNV1A_PRIME;
 	printf("garage_render panel=%s focused=%d font=%u resource_backed=%u pixels_fnv1a=%08x\n", label, focusedItem,
 	       SlipText_state.fontResource, SlipText_state.fontResources == &SlipRaceHud_fontResources, hash);
 	return SlipText_state.fontResources == &SlipRaceHud_fontResources &&
@@ -3230,13 +3354,14 @@ bool SlipMenu_DebugSplitGarage(const char *resPath) {
 	SlipMainMenu_hiddenToggle = 1;
 	SlipMenu_SelectGaragePanelItem(NULL, 0, &redraw);
 	SlipMainMenu_hiddenToggle = 0;
-	if (g_garageCash != -1 || g_garageSystems != (originalSystems | 1u) ||
+	if (g_garageCash != -1 || g_garageSystems != (originalSystems | SLIP_RACE_POWERUP_RAPID_WEAPONS) ||
 	    g_garageRacer->powerupFlags != originalSystems)
 		return false;
 	if (!SlipMenu_DebugRenderGaragePanel(resPath, GARAGE_PANEL_SYSTEMS, 0, "systems-fitted"))
 		return false;
 	SlipMenu_SelectGaragePanelItem(NULL, 3, &redraw);
-	if (g_garageRacer->powerupFlags != (originalSystems | 1u) || g_garageRacer->bonusScore != UINT32_MAX)
+	if (g_garageRacer->powerupFlags != (originalSystems | SLIP_RACE_POWERUP_RAPID_WEAPONS) ||
+	    g_garageRacer->bonusScore != UINT32_MAX)
 		return false;
 	g_garageCash = (int)firstCash;
 	g_garageRacer->bonusScore = firstCash;
@@ -3401,8 +3526,8 @@ void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer 
 		} else if (haveMainMenu && appMode == APP_MODE_DRIVER_SELECT &&
 		           (scanCode == SLIP_INPUT_SCAN_ENTER || scanCode == SLIP_INPUT_SCAN_SPACE)) {
 			int action = g_hoveredDriverAction >= 0 ? g_hoveredDriverAction : g_selectedDriverAction;
-			if (action == 3)
-				action = 0;
+			if (action == kDriverActionPlaySpeech)
+				action = kDriverActionAccept;
 			SlipDriverSelect_Action(window, &appMode, action, &hoveredButton, &redraw);
 		} else if (haveMainMenu && appMode == APP_MODE_VEHICLE_VIEW &&
 		           (scanCode == SLIP_INPUT_SCAN_ENTER || scanCode == SLIP_INPUT_SCAN_SPACE)) {
@@ -3508,7 +3633,7 @@ void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer 
 		int hit;
 		if (SlipMenu_WindowToLogical(renderer, event->button.x, event->button.y, &x, &y)) {
 			hit = SlipMenu_HitTestDriverAction(x, y);
-			if (hit == 3) {
+			if (hit == kDriverActionPlaySpeech) {
 				if (vehicleResources.speech != 0 && menuSound != NULL) {
 					SlipGameSound_Stop(menuSound, vehicleResources.voice);
 					uint32_t bytes;
@@ -3596,14 +3721,14 @@ static bool SlipMainMenu_Attract(const char *resPath) {
 	do {
 		SlipRacePlayer_demoAiEnabled = 1;
 		SlipRace_type = SLIP_RACE_TYPE_SINGLE;
-		SlipRace_gameMode = 0;
+		SlipRace_gameMode = SLIP_RACE_GAME_SINGLE_PLAYER;
 		uint16_t track, driver;
 		do {
-			track = (uint16_t)(SlipRandom_Range(9) + 1);
+			track = (uint16_t)(SlipRandom_Range(SLIP_RACE_TRACK_COUNT - 1) + 1);
 		} while (track == SlipRacePlayer_track);
 		SlipRacePlayer_track = track;
 		do {
-			driver = (uint16_t)(SlipRandom_Range(9) + 1);
+			driver = (uint16_t)(SlipRandom_Range(SLIP_RACE_RACER_COUNT - 1) + 1);
 		} while (driver == g_playerOneDriver);
 		g_playerOneDriver = driver;
 		g_playerTwoDriver = 0;
@@ -3676,8 +3801,8 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 			SlipMenu_EnterVehicleSelect(window, &appMode, g_selectedRaceType, &hoveredButton, &redraw, 0);
 			break;
 		case MAIN_MENU_DISPATCH_SHOWCASE: {
-			char secondaryPath[512];
-			const char *archives[2];
+			char secondaryPath[SLIP_MENU_ARCHIVE_PATH_BYTES];
+			const char *archives[SLIP_MENU_ARCHIVE_CAPACITY];
 			const size_t archiveCount = SlipMenu_BuildArchiveList(resPath, secondaryPath, archives);
 			SlipView3DMaths maths = {0};
 			if (!SlipView3D_LoadMathsFromArchives(&maths, archives, archiveCount))
@@ -3697,10 +3822,10 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 			SlipMenuSound_Release();
 			if (loaded) {
 				SlipRace_type = SLIP_RACE_TYPE_CHAMPIONSHIP;
-				SlipRace_gameMode = 0;
+				SlipRace_gameMode = SLIP_RACE_GAME_SINGLE_PLAYER;
 				for (uint16_t racerIndex = 0; racerIndex < SlipRace_racerTable.racerCount; ++racerIndex) {
 					const SlipRaceRacerState *const racer = &SlipRace_racerTable.records[racerIndex];
-					if (racer->racerType == 0) {
+					if (racer->racerType == SLIP_RACER_PLAYER_ONE) {
 						g_playerOneDriver = racer->tuningIndex;
 						g_playerTwoDriver = 0;
 						g_selectedDriver = g_playerOneDriver - 1;
@@ -3816,7 +3941,7 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 						SlipChampionship_AwardRace(&SlipRace_racerTable);
 
 					championshipStandings:;
-						static const uint32_t championshipRounds[3] = {6, 8, 10};
+						static const uint32_t championshipRounds[SLIP_CONFIG_DIFFICULTY_COUNT] = {6, 8, 10};
 						const uint32_t rounds = championshipRounds[SlipConfig_CurrentMode()];
 						if (championshipStage != rounds) {
 							for (;;) {
@@ -3834,7 +3959,7 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 								SlipGame_ResourceFailure();
 							for (uint16_t index = 0; index < SlipRace_racerTable.racerCount; ++index) {
 								SlipRaceRacerState *const racer = &SlipRace_racerTable.records[index];
-								racer->racePosition = (uint16_t)(11 - racer->racePosition);
+								racer->racePosition = (uint16_t)(SLIP_RACE_RACER_COUNT + 1 - racer->racePosition);
 							}
 							SlipCampaign_Stage(window, &appMode, &redraw);
 							return true;
@@ -3853,7 +3978,7 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 			}
 		} else if (appMode == APP_MODE_GARAGE) {
 			SlipInputNavigationTable *const navigation =
-			    &SlipInput_garageNavigation[g_garagePanel < 0 ? 4 : g_garagePanel];
+			    &SlipInput_garageNavigation[g_garagePanel < 0 ? SLIP_INPUT_GARAGE_MAIN_TABLE : g_garagePanel];
 			if (SlipInput_navigation.active != navigation)
 				SlipInput_SetNavigation(navigation);
 			SlipInput_UpdatePointer();

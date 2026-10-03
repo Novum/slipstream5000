@@ -1,6 +1,9 @@
 #include "race_player.h"
+#include "actor_tags.h"
 #include "artic_slot.h"
 #include "byte_order.h"
+#include "config_settings.h"
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "guided_projectile_creation.h"
 #include "race_bonus.h"
@@ -12,9 +15,114 @@
 #include "race_voice_host.h"
 #include "raster/raster.h"
 #include "runtime.h"
+#include "track_format.h"
 #include "track_view_render.h"
 
 #include <string.h>
+
+enum {
+	SLIP_RACE_WRECK_MINIMUM_BOUNCES = 2,
+	SLIP_RACE_TARGET_RANGE_DOUBLING_BIT = 2u,
+	SLIP_RACE_WEAPON_SMOKE_DURATION_MS = 4000,
+	SLIP_RACE_DAMAGE_SMOKE_DURATION_MS = 4000,
+	SLIP_RACE_DAMAGE_WRECK_DURATION_MS = 5000,
+	SLIP_RACE_DAMAGE_WRECK_DEBRIS_COUNT = 15,
+	SLIP_RACE_DAMAGE_HIT_DEBRIS_COUNT = 3,
+	SLIP_RACE_PROJECTILE_HIT_DEBRIS_COUNT = 5,
+	SLIP_RACE_BOUNCE_EFFECT_PARTICLE_COUNT = 6,
+	SLIP_RACE_ROAD_COORDINATE_INTERVAL_MS = 3000,
+	SLIP_RACE_WEAPON_SELECTION_INTERVAL_MS = 15000,
+	SLIP_RACE_IMPACT_PENALTY_MS = 250,
+	SLIP_RACE_INVERTED_CONTROLS_MS = 5000,
+	SLIP_RACE_POWERUP_SPEED_MS = 5000,
+	SLIP_RACE_SPEED_LIMIT_MS = 10000,
+	SLIP_RACE_FORCED_ACCELERATE_MS = 4000,
+	SLIP_RACE_AMPLIFIED_CONTROLS_MS = 10000,
+	SLIP_RACE_COLLISION_COOLDOWN_MS = 400,
+	SLIP_RACE_DAMAGE_COOLDOWN_MS = 3000,
+	SLIP_RACE_WEAPON_SELECTION_AFTER_FIRE_MS = 6000,
+	SLIP_RACE_REPAIR_RATE_Q16 = 25 << 16,
+	SLIP_RACE_MAXIMUM_DAMAGE_Q16 = 100 << 16,
+	SLIP_RACE_BONUS_CREDIT_AMOUNT = 50,
+	SLIP_RACE_LASER_SPEED = 488000,
+	SLIP_RACE_WEAPON_TARGET_MAXIMUM_DISTANCE = 976000,
+	SLIP_RACE_WEAPON_TARGET_MINIMUM_Z = 2440,
+	SLIP_RACE_AI_TARGET_ACTOR_HANDLE_MASK = 0x0cu,
+	SLIP_RACE_RECOVERY_STEER_TO_FORWARD_POINT = 1u,
+	SLIP_RACE_RECOVERY_LEVELING_TIMER_EXPIRED = 2u,
+	SLIP_RACE_RECOVERY_CLEAR_FORWARD_STEERING_MASK = UINT16_MAX ^ SLIP_RACE_RECOVERY_STEER_TO_FORWARD_POINT,
+
+	SLIP_RACE_LASER_LIFETIME_MS = 5000,
+	SLIP_RACE_LASER_TARGET_ALIGNMENT_Q14 = 13312,
+	SLIP_RACE_LASER_PACKED_COLOURS = 0x00fd00feu,
+	SLIP_RACE_BLASTER_PACKED_COLOURS = 0x0040004fu,
+	SLIP_RACE_DAMAGE_DEBRIS_RANDOM_LIMIT = 28672,
+	SLIP_RACE_VOICE_EXPLOSION = 0x40,
+	SLIP_RACE_IMPACT_VOICE_TRIGGER_IMPULSE_X_HIGH_WORD = 2,
+	SLIP_RACE_TRACK_POINT_SKIP_DISTANCE = 2048,
+	SLIP_RACE_RECOVERY_MINIMUM_SPEED = 71500,
+	SLIP_RACE_RECOVERY_PITCH_LIMIT = 12288,
+	SLIP_RACE_RECOVERY_SEED_NEGATIVE_FLAG = 0x8000,
+	SLIP_RACE_RECOVERY_ANGLE_LIMIT = 65536,
+	SLIP_RACE_RECOVERY_TRAVEL_SPEED = 488000,
+	SLIP_RACE_RECOVERY_MAXIMUM_DURATION_MS = 5000,
+	SLIP_RACE_MILLISECONDS_PER_SECOND = 1000,
+	SLIP_RACE_COLLISION_SCALE_FRACTION_BITS = 32,
+	SLIP_RACE_IMPACT_MINIMUM_IMPULSE_SCALE = 14300,
+	SLIP_RACE_IMPACT_HALF_GAIN_SHIFT = 1,
+	SLIP_RACE_BOUNCE_RECOVERY_SPEED_SHIFT = 1,
+	SLIP_RACE_RECOVERY_DIRECTION_RATE_SHIFT = 1,
+	SLIP_RACE_RECOVERY_PITCH_GAIN_SHIFT = 1,
+	SLIP_RACE_WRECK_VERTICAL_BOUNCE_SHIFT = 1,
+	SLIP_RACE_AVOIDANCE_CLEARANCE_SHIFT = 1,
+	SLIP_RACE_STEERING_RESPONSE_SHIFT = 1,
+	SLIP_RACE_IMPACT_HANDLING_DAMAGE_Q16 = 4 << 16,
+	SLIP_RACE_IMPACT_ADDITIONAL_DAMAGE_Q16 = 2 << 16,
+	SLIP_RACE_BOUNCE_MOVEMENT_DAMAGE_Q16 = 2 << 16,
+	SLIP_RACE_BOUNCE_HANDLING_DAMAGE_Q16 = 1 << 16,
+	SLIP_RACE_BOUNCE_SHAKE_MINIMUM_SPEED = 143000,
+	SLIP_RACE_BOUNCE_RECOVERY_DURATION_MS = 1000,
+	SLIP_RACE_BOUNCE_RECOVERY_TURN_RATE = 57344,
+	SLIP_RACE_BOUNCE_DEFLECTION_Q14 = 3 * SLIP_Q14_ONE / 4,
+	SLIP_RACE_WEAPON_COOLDOWN_MS = 500,
+	SLIP_RACE_POWERUP_WEAPON_COOLDOWN_MS = 300,
+	SLIP_RACE_JET_MAXIMUM_SPEED = 143000,
+	SLIP_RACE_JET_ANGLE_SPEED_MULTIPLIER = 7508,
+	SLIP_RACE_JET_ANGLE_PRODUCT_SHIFT = 16,
+	SLIP_RACE_FAN_ROTATION_RATE = 32767,
+	SLIP_RACE_WRECK_CONTACT_NORMAL_Y_LIMIT_Q14 = -256,
+	SLIP_RACE_WRECK_CONTACT_DEFLECTION_Q14 = 256,
+	SLIP_RACE_WRECK_BOUNCE_SPEED_SCALE_Q14 = 3 * SLIP_Q14_ONE / 4,
+	SLIP_RACE_WRECK_STOPPED_LIFETIME_MS = 2000,
+	SLIP_RACE_WRECK_EXPLOSION_RANGE = 2928,
+	SLIP_RACE_WRECK_GRAVITY = 31392,
+	SLIP_RACE_WRECK_ROTATION_RATE_SHIFT = 3,
+	SLIP_RACE_WRECK_MINIMUM_VERTICAL_SPEED = -57200,
+	SLIP_RACE_WRECK_ALIGNMENT_RATE_SHIFT = 4,
+	SLIP_RACE_RECOVERY_NORMAL_ALIGNMENT_LIMIT_Q14 = 256,
+	SLIP_RACE_RECOVERY_COLLISION_SPEED_SHIFT = 1,
+	SLIP_RACE_RECOVERY_COLLISION_DEFLECTION_Q14 = SLIP_Q14_ONE / 4,
+	SLIP_RACE_RECOVERY_DEFAULT_TURN_RATE = 65536,
+	SLIP_RACE_TRACK_SEPARATION_MARGIN = 488,
+	SLIP_RACE_COLLISION_IMPULSE_DRAG_SHIFT = 2,
+	SLIP_RACE_TRACK_SEPARATION_MAXIMUM_ATTEMPTS = 8,
+	SLIP_RACE_VIEW_SHAKE_DURATION_MS = 300,
+	SLIP_RACE_DAMAGE_SMOKE_THRESHOLD_Q16 = 9 << 16,
+	SLIP_RACE_AI_REFUEL_DAMAGE_THRESHOLD_Q16 = 50 << 16,
+	SLIP_RACE_AI_DEFAULT_BRANCH_RANDOM_LIMIT = 2560,
+	SLIP_RACE_AI_NEIGHBOUR_BRANCH_RANDOM_LIMIT = 24576,
+	SLIP_RACE_AI_BRANCH_MINIMUM_RACE_DISTANCE = 488000,
+	SLIP_RACE_AI_AVOIDANCE_MAXIMUM_DISTANCE = 97600,
+	SLIP_RACE_AI_TURBO_RANDOM_LIMIT = 8192,
+	SLIP_RACE_AI_AVOIDANCE_EXTENT_MARGIN = 4880,
+	SLIP_RACE_AI_ROAD_VALUE_MINIMUM = 12688,
+	SLIP_RACE_AI_DOOR_INITIAL_DELAY_MS = 1000,
+	SLIP_RACE_AI_DOOR_SPEED = 21450,
+	SLIP_RACE_AVOIDANCE_UPPER_WORD_MASK = 0xffff0000u
+};
+
+static const uint32_t SLIP_RACE_IMPACT_SPEED_SCALE_Q32 = 0xa0000000u;
+static const uint32_t SLIP_RACE_BOUNCE_SPEED_SCALE_Q32 = 0xc0000000u;
 
 static SlipRacePlayerHostBindings *SlipRacePlayer_hostContext;
 
@@ -106,7 +214,7 @@ static uint32_t SlipRacePlayer_ProjectileEvent(uint32_t eventCode, uint32_t even
                                                uint32_t eventFlags, uint16_t objectOffset, uintptr_t dispatchData,
                                                uint32_t dispatchFrame);
 
-const SlipRacePlayerWeaponRecord SlipRacePlayer_records[12] = {
+const SlipRacePlayerWeaponRecord SlipRacePlayer_records[SLIP_RACE_WEAPON_COUNT] = {
     {"Blaster",
      {0x00000000u, 0x00000000u, 0x00000000u},
      0xFFFFFFFFu,
@@ -142,7 +250,7 @@ const SlipRacePlayerWeaponRecord SlipRacePlayer_records[12] = {
      SlipRaceSession_FireSuperFrag,
      0x00000145u,
      0x00040000u,
-     0x00190000u},
+     SLIP_RACE_REPAIR_RATE_Q16},
     {"Seeker",
      {0x0000028Au, 0x000002BCu, 0x000002EEu},
      0x00000003u,
@@ -159,7 +267,7 @@ const SlipRacePlayerWeaponRecord SlipRacePlayer_records[12] = {
      0x00004000u,
      SlipRaceSession_FireSuperSeeker,
      0x00000145u,
-     0x00190000u,
+     SLIP_RACE_REPAIR_RATE_Q16,
      0x00040000u},
     {"Ambler",
      {0x000002BCu, 0x000002EEu, 0x00000320u},
@@ -177,8 +285,8 @@ const SlipRacePlayerWeaponRecord SlipRacePlayer_records[12] = {
      0x00004000u,
      SlipRaceSession_FireScrambler,
      0x00000145u,
-     0x00190000u,
-     0x00190000u},
+     SLIP_RACE_REPAIR_RATE_Q16,
+     SLIP_RACE_REPAIR_RATE_Q16},
     {"Hyper Neuro",
      {0x000001F4u, 0x00000226u, 0x00000258u},
      0x00000003u,
@@ -223,36 +331,38 @@ extern SlipRacePlayerControl SlipRace_controls;
 int32_t SlipConfig_mode;
 int32_t SlipConfig_fallbackMode = 1;
 
-const int32_t SlipRacePlayer_propulsionTables[3][10][4] = {{{0x3e00, 0x3600, 0x3500, 0x2100},
-                                                            {0x4500, 0x4200, 0x3d00, 0x3800},
-                                                            {0x5400, 0x4700, 0x4000, 0x3800},
-                                                            {0x4400, 0x4000, 0x3a00, 0x3800},
-                                                            {0x3800, 0x3500, 0x3000, 0x2d00},
-                                                            {0x3000, 0x2a00, 0x2800, 0x2000},
-                                                            {0x3c00, 0x3900, 0x3400, 0x2b00},
-                                                            {0x4000, 0x3a00, 0x3600, 0x3200},
-                                                            {0x3d00, 0x3800, 0x3200, 0x3000},
-                                                            {0x3f00, 0x3a00, 0x3700, 0x3100}},
-                                                           {{0x49aa, 0x3f80, 0x3cb0, 0x3248},
-                                                            {0x4a80, 0x4780, 0x4380, 0x3c00},
-                                                            {0x5080, 0x4880, 0x4000, 0x3800},
-                                                            {0x4caa, 0x4aaa, 0x47aa, 0x46aa},
-                                                            {0x46ff, 0x4828, 0x4100, 0x3e80},
-                                                            {0x3948, 0x3600, 0x3400, 0x2800},
-                                                            {0x4e00, 0x4c80, 0x4480, 0x3d80},
-                                                            {0x4900, 0x4380, 0x3f00, 0x3a00},
-                                                            {0x4300, 0x3fa8, 0x3a00, 0x3400},
-                                                            {0x4480, 0x4100, 0x3e00, 0x3880}},
-                                                           {{0x5fff, 0x5b00, 0x5a60, 0x5690},
-                                                            {0x5000, 0x4d00, 0x4a00, 0x4000},
-                                                            {0x4d00, 0x4700, 0x4000, 0x3800},
-                                                            {0x4600, 0x4400, 0x4200, 0x4000},
-                                                            {0x4700, 0x4450, 0x4000, 0x3d00},
-                                                            {0x4650, 0x4400, 0x4300, 0x3700},
-                                                            {0x5d00, 0x5c00, 0x5800, 0x5300},
-                                                            {0x5300, 0x4e00, 0x4900, 0x4300},
-                                                            {0x4900, 0x4750, 0x4200, 0x3800},
-                                                            {0x4a00, 0x4800, 0x4500, 0x4000}}};
+const int32_t SlipRacePlayer_propulsionTables[SLIP_RACE_PROPULSION_MODE_COUNT][SLIP_RACE_TRACK_COUNT]
+                                             [SLIP_RACE_PROPULSION_PROFILE_COUNT] = {
+                                                 {{0x3e00, 0x3600, 0x3500, 0x2100},
+                                                  {0x4500, 0x4200, 0x3d00, 0x3800},
+                                                  {0x5400, 0x4700, 0x4000, 0x3800},
+                                                  {0x4400, 0x4000, 0x3a00, 0x3800},
+                                                  {0x3800, 0x3500, 0x3000, 0x2d00},
+                                                  {0x3000, 0x2a00, 0x2800, 0x2000},
+                                                  {0x3c00, 0x3900, 0x3400, 0x2b00},
+                                                  {0x4000, 0x3a00, 0x3600, 0x3200},
+                                                  {0x3d00, 0x3800, 0x3200, 0x3000},
+                                                  {0x3f00, 0x3a00, 0x3700, 0x3100}},
+                                                 {{0x49aa, 0x3f80, 0x3cb0, 0x3248},
+                                                  {0x4a80, 0x4780, 0x4380, 0x3c00},
+                                                  {0x5080, 0x4880, 0x4000, 0x3800},
+                                                  {0x4caa, 0x4aaa, 0x47aa, 0x46aa},
+                                                  {0x46ff, 0x4828, 0x4100, 0x3e80},
+                                                  {0x3948, 0x3600, 0x3400, 0x2800},
+                                                  {0x4e00, 0x4c80, 0x4480, 0x3d80},
+                                                  {0x4900, 0x4380, 0x3f00, 0x3a00},
+                                                  {0x4300, 0x3fa8, 0x3a00, 0x3400},
+                                                  {0x4480, 0x4100, 0x3e00, 0x3880}},
+                                                 {{0x5fff, 0x5b00, 0x5a60, 0x5690},
+                                                  {0x5000, 0x4d00, 0x4a00, 0x4000},
+                                                  {0x4d00, 0x4700, 0x4000, 0x3800},
+                                                  {0x4600, 0x4400, 0x4200, 0x4000},
+                                                  {0x4700, 0x4450, 0x4000, 0x3d00},
+                                                  {0x4650, 0x4400, 0x4300, 0x3700},
+                                                  {0x5d00, 0x5c00, 0x5800, 0x5300},
+                                                  {0x5300, 0x4e00, 0x4900, 0x4300},
+                                                  {0x4900, 0x4750, 0x4200, 0x3800},
+                                                  {0x4a00, 0x4800, 0x4500, 0x4000}}};
 uint32_t SlipRacePlayer_trackBranch;
 SlipView3DVec32 SlipRacePlayer_trackPosition;
 SlipView3DVec32 SlipRacePlayer_roadPosition;
@@ -277,7 +387,7 @@ uint16_t SlipRacePlayer_farNeighbourCandidate;
 uint16_t SlipRacePlayer_middleNeighbourCandidate;
 int32_t SlipRacePlayer_maximumSpeed;
 int32_t SlipRacePlayer_lookAhead;
-int16_t SlipRacePlayer_avoidanceAxes[6];
+int16_t SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_COMPONENT_COUNT];
 uint16_t SlipRacePlayer_accelerate;
 SlipView3DMatrix SlipRacePlayer_steeringMatrix;
 uint16_t SlipRacePlayer_targetObject;
@@ -314,11 +424,15 @@ uint32_t SlipConfig_damageEnabled = 1;
 uint16_t SlipRacePlayer_damageSourceObject;
 uint32_t SlipRacePlayer_damageSourceFlags;
 uint16_t SlipRacePlayer_demoAiEnabled;
-int32_t SlipRacePlayer_gamePenalty[11] = {0x0003b920, 0, 0, 0, 0x00002000, 0x00002000, 0x00001000, 0x00001800, 0, 0, 0};
+int32_t SlipRacePlayer_gamePenalty[SLIP_RACE_TRACK_TABLE_COUNT] = {0x0003b920, 0,          0, 0, 0x00002000, 0x00002000,
+                                                                   0x00001000, 0x00001800, 0, 0, 0};
 uint16_t SlipRacePlayer_playerOneObject;
 uint16_t SlipRacePlayer_track;
 uint32_t SlipRacePlayer_positionBoostTimer;
-uint16_t SlipRacePlayer_lapCount = 6;
+
+enum { SLIP_RACE_DEFAULT_LAP_COUNT = 6 };
+
+uint16_t SlipRacePlayer_lapCount = SLIP_RACE_DEFAULT_LAP_COUNT;
 uint32_t SlipRacePlayer_demoMode;
 uint32_t SlipRacePlayer_flybyMode;
 SlipRacePlayerControl SlipRacePlayer_playerTwoControls;
@@ -329,18 +443,20 @@ uint16_t SlipRacePlayer_playerTwoObject;
 uint16_t SlipRacePlayer_thirdObject;
 uint16_t SlipRacePlayer_startCountdown;
 
-static const int32_t SlipRacePlayer_positionBoost[11] = {0x0000, 0x3000, 0x2c00, 0x2800, 0x2000, 0x1800,
-                                                         0x1000, 0x0800, 0x0400, 0x0200, 0x0100};
+static const int32_t SlipRacePlayer_positionBoost[SLIP_RACE_RACER_COUNT + 1] = {
+    0x0000, 0x3000, 0x2c00, 0x2800, 0x2000, 0x1800, 0x1000, 0x0800, 0x0400, 0x0200, 0x0100};
 
-const int32_t SlipRacePlayer_aiBaseSpeed[11] = {0x00000100, 0x000345e4, 0x00029e50, 0x00029e50, 0x000345e4, 0x00029e50,
-                                                0x000345e4, 0x00037dc0, 0x00029e50, 0x00029e50, 0x000345e4};
+const int32_t SlipRacePlayer_aiBaseSpeed[SLIP_RACE_TRACK_TABLE_COUNT] = {0x00000100, 0x000345e4, 0x00029e50, 0x00029e50,
+                                                                         0x000345e4, 0x00029e50, 0x000345e4, 0x00037dc0,
+                                                                         0x00029e50, 0x00029e50, 0x000345e4};
 
-const int32_t SlipRacePlayer_aiSpeedScale[11] = {0x000345e4, 0x0002ba3e, 0x000361d2, 0x000361d2, 0x0002ba3e, 0x000361d2,
-                                                 0x0002ba3e, 0x00028262, 0x000361d2, 0x000361d2, 0x0002ba3e};
+const int32_t SlipRacePlayer_aiSpeedScale[SLIP_RACE_TRACK_TABLE_COUNT] = {
+    0x000345e4, 0x0002ba3e, 0x000361d2, 0x000361d2, 0x0002ba3e, 0x000361d2,
+    0x0002ba3e, 0x00028262, 0x000361d2, 0x000361d2, 0x0002ba3e};
 
 typedef char SlipRacePlayerTuningRecordSize[sizeof(SlipRacePlayerTuningRecord) == 0x1cu ? 1 : -1];
 
-static const SlipRacePlayerTuningRecord SlipRacePlayer_tuningData[10] = {
+static const SlipRacePlayerTuningRecord SlipRacePlayer_tuningData[SLIP_RACE_RACER_COUNT] = {
     {0x1174c, 0x08ba6, 0x1f6bc, 0x46b27, 0x4ccc, 0x4000, 0x3b920},
     {0x0fb5e, 0x0999d, 0x204b3, 0x4791e, 0x4ccc, 0x4000, 0x3b920},
     {0x12ad9, 0x0999d, 0x1f6bc, 0x4579a, 0x4ccc, 0x4000, 0x3b920},
@@ -352,36 +468,40 @@ static const SlipRacePlayerTuningRecord SlipRacePlayer_tuningData[10] = {
     {0x14f28, 0x08ba6, 0x1e8c5, 0x44f39, 0x4ccc, 0x4000, 0x3b920},
     {0x16b16, 0x0a794, 0x1dace, 0x4685c, 0x4ccc, 0x4000, 0x3b920}};
 
-const SlipRacePlayerTuningRecord *const SlipRacePlayer_tuningRecords[11] = {NULL,
-                                                                            &SlipRacePlayer_tuningData[0],
-                                                                            &SlipRacePlayer_tuningData[1],
-                                                                            &SlipRacePlayer_tuningData[2],
-                                                                            &SlipRacePlayer_tuningData[3],
-                                                                            &SlipRacePlayer_tuningData[4],
-                                                                            &SlipRacePlayer_tuningData[5],
-                                                                            &SlipRacePlayer_tuningData[6],
-                                                                            &SlipRacePlayer_tuningData[7],
-                                                                            &SlipRacePlayer_tuningData[8],
-                                                                            &SlipRacePlayer_tuningData[9]};
+const SlipRacePlayerTuningRecord *const SlipRacePlayer_tuningRecords[SLIP_RACE_DRIVER_TABLE_COUNT] = {
+    NULL,
+    &SlipRacePlayer_tuningData[0],
+    &SlipRacePlayer_tuningData[1],
+    &SlipRacePlayer_tuningData[2],
+    &SlipRacePlayer_tuningData[3],
+    &SlipRacePlayer_tuningData[4],
+    &SlipRacePlayer_tuningData[5],
+    &SlipRacePlayer_tuningData[6],
+    &SlipRacePlayer_tuningData[7],
+    &SlipRacePlayer_tuningData[8],
+    &SlipRacePlayer_tuningData[9]};
+
+enum { SLIP_RACE_TURBO_NAME_BYTES = 24, SLIP_RACE_TURBO_RECORD_BYTES = 36 };
 
 typedef struct SlipRacePowerupRecord {
-	char powerupName[0x18];
+	char powerupName[SLIP_RACE_TURBO_NAME_BYTES];
 	int32_t price;
 	int32_t speedScaleQ14;
 	int32_t chargeDrainScaleQ14;
 } SlipRacePowerupRecord;
 
-static const SlipRacePowerupRecord SlipRacePowerup_records[5] = {{"Delphine Injection", 480, 0x4666, 0x1000},
-                                                                 {"Corolis Dynamic", 720, 0x4999, 0x0c00},
-                                                                 {"Dual Derwent", 960, 0x4ccc, 0x0a00},
-                                                                 {"Cleric Quinn", 1450, 0x5000, 0x0800},
-                                                                 {"Tech Tech 301", 2010, 0x5333, 0x0400}};
+static const SlipRacePowerupRecord SlipRacePowerup_records[SLIP_RACE_TURBO_UPGRADE_COUNT] = {
+    {"Delphine Injection", 480, 0x4666, 0x1000},
+    {"Corolis Dynamic", 720, 0x4999, 0x0c00},
+    {"Dual Derwent", 960, 0x4ccc, 0x0a00},
+    {"Cleric Quinn", 1450, 0x5000, 0x0800},
+    {"Tech Tech 301", 2010, 0x5333, 0x0400}};
 
-typedef char SlipRacePowerupRecordSize[(sizeof(SlipRacePowerupRecord) == 0x24) ? 1 : -1];
+typedef char SlipRacePowerupRecordSize[(sizeof(SlipRacePowerupRecord) == SLIP_RACE_TURBO_RECORD_BYTES) ? 1 : -1];
 
 static void SlipRacePlayer_QueueLaserLine(SlipView3DVec32 start, SlipView3DVec32 end, uint32_t material) {
 	SlipTrackWorld_beams.built = 0;
-	if (SlipTrackWorld_beams.queueCount == 0x30 || SlipRacePlayer_hostContext == NULL)
+	if (SlipTrackWorld_beams.queueCount == SLIP_TRACK_BEAM_QUEUE_CAPACITY || SlipRacePlayer_hostContext == NULL)
 		return;
 	SlipRacePlayerHostBindings *const context = SlipRacePlayer_hostContext;
 	SlipTrackWorld_beams.queue[SlipTrackWorld_beams.queueCount] = (SlipTrackBeamRequest){start, end, material};
@@ -399,15 +519,15 @@ SlipView3DVec32 SlipRacePlayer_WeaponPosition(uint16_t shooterObject, uint32_t w
 	uint32_t slotTag;
 	SlipRacePlayerHostBindings *const context = SlipRacePlayer_hostContext;
 
-	if (weaponSide == 0) {
-		slotTag = 0x77656170u; /* "weap" */
-	} else if (weaponSide == 1) {
-		slotTag = 0x6c617372u; /* "lasr" */
+	if (weaponSide == SLIP_RACE_WEAPON_MUZZLE_CENTER) {
+		slotTag = SLIP_ACTOR_POINT_WEAPON; /* "weap" */
+	} else if (weaponSide == SLIP_RACE_WEAPON_MUZZLE_RIGHT) {
+		slotTag = SLIP_ACTOR_POINT_RIGHT_LASER; /* "lasr" */
 	} else {
-		slotTag = 0x6c61736cu; /* "lasl" */
+		slotTag = SLIP_ACTOR_POINT_LEFT_LASER; /* "lasl" */
 	}
 	if (context == NULL ||
-	    !SlipArticSlot_WorldPosition(0x6d61696eu, slotTag, shooterObject, context->objectTable,
+	    !SlipArticSlot_WorldPosition(SLIP_ACTOR_PART_MAIN, slotTag, shooterObject, context->objectTable,
 	                                 context->objectTableBytes, context->articSlotPool, context->articSlotPoolBytes,
 	                                 context->articSlotPoolOffset, context->articData, context->articDataBytes,
 	                                 context->articDataOffset, context->maths, &position) ||
@@ -443,7 +563,7 @@ static void SlipRacePlayer_CreateBlasterProjectile(uint16_t shooterObject, uint3
 		return;
 	}
 	projectileObject = (uint16_t)fill.objectOffset;
-	if (!SlipObject_SetActorHandle(projectileObject, 2u, &setSlot)) {
+	if (!SlipObject_SetActorHandle(projectileObject, SLIP_OBJECT_FLAG_PROJECTILE, &setSlot)) {
 		SlipObject_Free(projectileObject, 0, 0, 0, 0, 0, 0);
 		return;
 	}
@@ -452,8 +572,8 @@ static void SlipRacePlayer_CreateBlasterProjectile(uint16_t shooterObject, uint3
 		SlipObject_Free(projectileObject, 0, 0, 0, 0, 0, 0);
 		return;
 	}
-	projectileState->weaponIndex = 0;
-	projectileState->remainingTime = 0x1388;
+	projectileState->weaponIndex = SLIP_RACE_WEAPON_BLASTER;
+	projectileState->remainingTime = SLIP_RACE_LASER_LIFETIME_MS;
 	projectileState->shooterObject = SlipRacePlayer_shooter;
 	projectileState->targetObject = SlipRacePlayer_target;
 	if (SlipRacePlayer_target != 0) {
@@ -478,27 +598,28 @@ void SlipRacePlayer_FireSmoker(uint16_t shooter, uint16_t target) {
 	const SlipRacePlayerHostBindings *const context = SlipRacePlayer_hostContext;
 	SlipArticSlotPosition smokePosition;
 	(void)target;
-	if (!SlipArticSlot_Position(0x6d61696eu, 0x736d6f6bu, shooter, context->objectTable, context->objectTableBytes,
-	                            context->articSlotPool, context->articSlotPoolBytes, context->articSlotPoolOffset,
-	                            context->articData, context->articDataBytes, context->articDataOffset, context->maths,
-	                            &smokePosition) ||
+	if (!SlipArticSlot_Position(SLIP_ACTOR_PART_MAIN, SLIP_ACTOR_POINT_SMOKE, shooter, context->objectTable,
+	                            context->objectTableBytes, context->articSlotPool, context->articSlotPoolBytes,
+	                            context->articSlotPoolOffset, context->articData, context->articDataBytes,
+	                            context->articDataOffset, context->maths, &smokePosition) ||
 	    smokePosition.lookupFailed)
 		SlipRuntime_Fatal("Weapon Smoker: Missing reference point.");
 	SlipRaceEffects_EmitSmoke(shooter,
 	                          (SlipView3DVec32){(int32_t)smokePosition.positionX, (int32_t)smokePosition.positionY,
 	                                            (int32_t)smokePosition.positionZ},
-	                          4000, &SlipRaceEffects_weaponSmoke);
+	                          SLIP_RACE_WEAPON_SMOKE_DURATION_MS, &SlipRaceEffects_weaponSmoke);
 	SlipSoundEffects_Queue(context->soundEffects, smokePosition.positionX, smokePosition.positionY,
-	                       smokePosition.positionZ, 5u, shooter, 1u);
+	                       smokePosition.positionZ, SLIP_SOUND_EFFECT_MISSILE, shooter, SLIP_SOUND_POSITION_OBJECT);
 }
 
 void SlipRacePlayer_FireBlaster(uint16_t shooterObject, uint16_t targetObject) {
 	SlipRacePlayer_shooter = shooterObject;
 	SlipRacePlayer_target = targetObject;
-	SlipRacePlayer_CreateBlasterProjectile(shooterObject, 1u);
-	SlipRacePlayer_CreateBlasterProjectile(shooterObject, 2u);
+	SlipRacePlayer_CreateBlasterProjectile(shooterObject, SLIP_RACE_WEAPON_MUZZLE_RIGHT);
+	SlipRacePlayer_CreateBlasterProjectile(shooterObject, SLIP_RACE_WEAPON_MUZZLE_LEFT);
 
-	SlipSoundEffects_Queue(SlipRacePlayer_hostContext->soundEffects, 0, 0, 0, 4u, SlipRacePlayer_shooter, 1u);
+	SlipSoundEffects_Queue(SlipRacePlayer_hostContext->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_BLASTER,
+	                       SlipRacePlayer_shooter, SLIP_SOUND_POSITION_OBJECT);
 }
 
 static uint32_t SlipRacePlayer_ProjectileEvent(uint32_t eventCode, uint32_t eventPayload, uint32_t eventValue,
@@ -544,7 +665,8 @@ static uint32_t SlipRacePlayer_ProjectileEvent(uint32_t eventCode, uint32_t even
 		}
 		firstPoint = (SlipView3DVec32){(int32_t)objectPosition.positionX, (int32_t)objectPosition.positionY,
 		                               (int32_t)objectPosition.positionZ};
-		movementDistance = (uint32_t)(((uint64_t)0x00077240u * SlipFrameTimer_Step()) >> 14);
+		movementDistance =
+		    (uint32_t)(((uint64_t)SLIP_RACE_LASER_SPEED * SlipFrameTimer_Step()) >> SLIP_Q14_FRACTION_BITS);
 		direction = SlipObject_Direction(context->objectTable, objectOffset);
 		movement = SlipView3D_ScaleVector((int16_t)direction.directionXQ14, (int16_t)direction.directionYQ14,
 		                                  (int16_t)direction.directionZQ14, (int32_t)movementDistance);
@@ -559,14 +681,14 @@ static uint32_t SlipRacePlayer_ProjectileEvent(uint32_t eventCode, uint32_t even
 		                                   context->componentBaseBytes, context->trackTable, context->trackTableBytes);
 		trackHit = collision.point.x != requestedPoint.x || collision.point.y != requestedPoint.y ||
 		           collision.point.z != requestedPoint.z;
-		laserMaterial = 0x00fd00feu;
+		laserMaterial = SLIP_RACE_LASER_PACKED_COLOURS;
 		if (collision.objectHandle != 0 || trackHit) {
-			laserMaterial |= 0x80000000u;
+			laserMaterial |= SLIP_RACE_BEAM_HIT_FLAG;
 		}
 		SlipRacePlayer_QueueLaserLine(firstPoint, collision.point, laserMaterial);
 		if (collision.objectHandle != 0) {
-			(void)SlipObject_DispatchEvent(collision.objectHandle, SLIP_OBJECT_EVENT_APPLY_DAMAGE, 0,
-			                               projectileState->shooterObject, 0, 0, 0);
+			(void)SlipObject_DispatchEvent(collision.objectHandle, SLIP_OBJECT_EVENT_APPLY_DAMAGE,
+			                               SLIP_RACE_WEAPON_BLASTER, projectileState->shooterObject, 0, 0, 0);
 			SlipObject_Free(objectOffset, 0, 0, 0, 0, 0, 0);
 		} else if (trackHit) {
 			SlipObject_Free(objectOffset, 0, 0, 0, 0, 0, 0);
@@ -601,7 +723,7 @@ static uint32_t SlipRacePlayer_ProjectileEvent(uint32_t eventCode, uint32_t even
 				SlipView3D_DotProductQ14((uint16_t)desiredDirection.unitXQ14, (uint16_t)desiredDirection.unitYQ14,
 				                         (uint16_t)desiredDirection.unitZQ14, currentDirection.directionXQ14,
 				                         currentDirection.directionYQ14, currentDirection.directionZQ14, &dot);
-				if ((int16_t)(uint16_t)dot.dotProductQ14 > 0x3400) {
+				if ((int16_t)(uint16_t)dot.dotProductQ14 > SLIP_RACE_LASER_TARGET_ALIGNMENT_Q14) {
 					SlipObject_SetDirectionQ14(context->objectTable, objectOffset, (uint16_t)desiredDirection.unitXQ14,
 					                           (uint16_t)desiredDirection.unitYQ14,
 					                           (uint16_t)desiredDirection.unitZQ14);
@@ -903,7 +1025,8 @@ uint32_t SlipRacePlayer_DisrupterEvent(uint32_t eventCode, uint32_t eventPayload
 		}
 		firstPoint = (SlipView3DVec32){(int32_t)objectPosition.positionX, (int32_t)objectPosition.positionY,
 		                               (int32_t)objectPosition.positionZ};
-		movementDistance = (uint32_t)(((uint64_t)0x00077240u * SlipFrameTimer_Step()) >> 14);
+		movementDistance =
+		    (uint32_t)(((uint64_t)SLIP_RACE_LASER_SPEED * SlipFrameTimer_Step()) >> SLIP_Q14_FRACTION_BITS);
 		direction = SlipObject_Direction(context->objectTable, objectOffset);
 		movement = SlipView3D_ScaleVector((int16_t)direction.directionXQ14, (int16_t)direction.directionYQ14,
 		                                  (int16_t)direction.directionZQ14, (int32_t)movementDistance);
@@ -918,14 +1041,14 @@ uint32_t SlipRacePlayer_DisrupterEvent(uint32_t eventCode, uint32_t eventPayload
 		                                   context->componentBaseBytes, context->trackTable, context->trackTableBytes);
 		trackHit = collision.point.x != requestedPoint.x || collision.point.y != requestedPoint.y ||
 		           collision.point.z != requestedPoint.z;
-		laserMaterial = 0x0040004fu;
+		laserMaterial = SLIP_RACE_BLASTER_PACKED_COLOURS;
 		if (collision.objectHandle != 0 || trackHit) {
-			laserMaterial |= 0x80000000u;
+			laserMaterial |= SLIP_RACE_BEAM_HIT_FLAG;
 		}
 		SlipRacePlayer_QueueLaserLine(firstPoint, collision.point, laserMaterial);
 		if (collision.objectHandle != 0) {
-			(void)SlipObject_DispatchEvent(collision.objectHandle, SLIP_OBJECT_EVENT_APPLY_DAMAGE, 1,
-			                               projectileState->shooterObject, 0, 0, 0);
+			(void)SlipObject_DispatchEvent(collision.objectHandle, SLIP_OBJECT_EVENT_APPLY_DAMAGE,
+			                               SLIP_RACE_WEAPON_DISRUPTER, projectileState->shooterObject, 0, 0, 0);
 			SlipObject_Free(objectOffset, 0, 0, 0, 0, 0, 0);
 		} else if (trackHit) {
 			SlipObject_Free(objectOffset, 0, 0, 0, 0, 0, 0);
@@ -960,7 +1083,7 @@ uint32_t SlipRacePlayer_DisrupterEvent(uint32_t eventCode, uint32_t eventPayload
 				SlipView3D_DotProductQ14((uint16_t)desiredDirection.unitXQ14, (uint16_t)desiredDirection.unitYQ14,
 				                         (uint16_t)desiredDirection.unitZQ14, currentDirection.directionXQ14,
 				                         currentDirection.directionYQ14, currentDirection.directionZQ14, &dot);
-				if ((int16_t)(uint16_t)dot.dotProductQ14 > 0x3400) {
+				if ((int16_t)(uint16_t)dot.dotProductQ14 > SLIP_RACE_LASER_TARGET_ALIGNMENT_Q14) {
 					SlipObject_SetDirectionQ14(context->objectTable, objectOffset, (uint16_t)desiredDirection.unitXQ14,
 					                           (uint16_t)desiredDirection.unitYQ14,
 					                           (uint16_t)desiredDirection.unitZQ14);
@@ -975,12 +1098,10 @@ uint32_t SlipRacePlayer_DisrupterEvent(uint32_t eventCode, uint32_t eventPayload
 }
 
 static SlipRacePlayerPrivateRecord *SlipRacePlayer_PrivateState(uint16_t objectOffset) {
-	enum { objectStride = 0xaeu };
-
-	const size_t objectIndex = (size_t)objectOffset / objectStride;
+	const size_t objectIndex = (size_t)objectOffset / SLIP_OBJECT_DOS_STRIDE;
 	const SlipRacePlayerHostBindings *const context = SlipRacePlayer_hostContext;
 
-	if (context == NULL || context->playerStates == NULL || objectOffset % objectStride != 0 ||
+	if (context == NULL || context->playerStates == NULL || objectOffset % SLIP_OBJECT_DOS_STRIDE != 0 ||
 	    objectIndex >= context->playerStateCount) {
 		return NULL;
 	}
@@ -1045,7 +1166,7 @@ static const SlipRaceRacerState *SlipRacePlayer_RacerFromAddress(const SlipRaceP
 
 static int32_t SlipRacePlayer_MultiplySignedQ14(int32_t lhs, int32_t rhs) {
 	const int64_t product = (int64_t)lhs * (int64_t)rhs;
-	return (int32_t)((uint64_t)product >> 14);
+	return (int32_t)((uint64_t)product >> SLIP_Q14_FRACTION_BITS);
 }
 
 static int32_t SlipRacePlayer_MultiplySignedShifted(int32_t lhs, int32_t rhs, unsigned shift) {
@@ -1072,8 +1193,9 @@ SlipRacePlayerTrackPoint SlipRacePlayer_TrackPoint(SlipRacePlayerHostBindings *c
 	    road.notFound) {
 		return (SlipRacePlayerTrackPoint){0, 0, 0, true};
 	}
-	return (SlipRacePlayerTrackPoint){SlipBytes_ReadLE32(road.record + 0x0cu), SlipBytes_ReadLE32(road.record + 0x10u),
-	                                  SlipBytes_ReadLE32(road.record + 0x14u), false};
+	return (SlipRacePlayerTrackPoint){SlipBytes_ReadLE32(road.record + SLIP_TRD_POSITION_X_OFFSET),
+	                                  SlipBytes_ReadLE32(road.record + SLIP_TRD_POSITION_Y_OFFSET),
+	                                  SlipBytes_ReadLE32(road.record + SLIP_TRD_POSITION_Z_OFFSET), false};
 }
 
 SlipRacePlayerNeighbours SlipRacePlayer_FindNeighbours(SlipRacePlayerHostBindings *context, uint32_t mode,
@@ -1157,13 +1279,13 @@ SlipRacePlayerNeighbours SlipRacePlayer_FindNeighbours(SlipRacePlayerHostBinding
 		const uint32_t candidateObjectOffset = candidateSlot->ownerObjectOffset;
 		const uint16_t candidateObjectId = (uint16_t)candidateObjectOffset;
 		const uint32_t candidateSlotFlags = candidateSlot->flags;
-		bool candidateEligible = mode != 0 ? (candidateSlotFlags & 0x40u) != 0 : false;
+		bool candidateEligible = mode != 0 ? (candidateSlotFlags & SLIP_TRACK_SLOT_DRONE) != 0 : false;
 
 		if (!candidateEligible)
-			candidateEligible = (candidateSlotFlags & 0x04u) != 0;
+			candidateEligible = (candidateSlotFlags & SLIP_TRACK_SLOT_ARTICULATED_BOUNDS) != 0;
 		if (candidateSlotAddress != currentSlotAddress && candidateEligible &&
-		    ((bodyPropertyFallback = SlipRaceCollision_BodyProperty(candidateObjectId, bodyPropertyFallback)) & 2u) !=
-		        0) {
+		    ((bodyPropertyFallback = SlipRaceCollision_BodyProperty(candidateObjectId, bodyPropertyFallback)) &
+		     SLIP_COLLISION_BODY_CONTACTS_ENABLED) != 0) {
 			uint32_t relativeX;
 			uint32_t relativeY;
 			uint32_t relativeZ;
@@ -1252,13 +1374,13 @@ void SlipRacePlayer_ResetMinimumPosition(void) { SlipRacePlayer_minimumPosition 
 
 void SlipRacePlayer_UpdateMinimumPosition(const SlipRaceRacerState *racerStates, size_t racerStateCount) {
 	size_t racerIndex = 0;
-	int16_t minimumPosition = 10;
+	int16_t minimumPosition = SLIP_RACE_RACER_COUNT;
 
 	SlipRacePlayer_previousMinimumPosition = SlipRacePlayer_minimumPosition;
 	while (racerIndex < racerStateCount) {
 		const SlipRaceRacerState *const racerState = &racerStates[racerIndex];
 
-		if (racerState->racerType != 2u && (int16_t)racerState->racePosition < minimumPosition) {
+		if (racerState->racerType != SLIP_RACER_COMPUTER && (int16_t)racerState->racePosition < minimumPosition) {
 			minimumPosition = (int16_t)racerState->racePosition;
 		}
 		++racerIndex;
@@ -1303,10 +1425,10 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 		privateState->impactPenaltyTimer = 0;
 		privateState->actionPressed = 0;
 		privateState->previousActionPressed = 0;
-		privateState->weaponSelection = 0;
-		privateState->weaponCharge[0] = 0x4000u;
-		privateState->weaponCharge[1] = 0x4000u;
-		privateState->weaponCharge[2] = 0x4000u;
+		privateState->weaponSelection = SLIP_RACE_WEAPON_SLOT_BLASTER;
+		privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_BLASTER] = SLIP_Q14_ONE;
+		privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_PRIMARY] = SLIP_Q14_ONE;
+		privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_SECONDARY] = SLIP_Q14_ONE;
 		privateState->targetObject = 0;
 		privateState->recoveryPreviousCallback = NULL;
 		return 0;
@@ -1351,12 +1473,12 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			privateState = SlipRacePlayer_PrivateState(objectOffset);
 			privateState->roadCoordinateX = (uint32_t)road.roadX;
 			privateState->roadCoordinateY = (uint32_t)road.roadY;
-			privateState->roadCoordinateTimer = 0x0bb8u;
+			privateState->roadCoordinateTimer = SLIP_RACE_ROAD_COORDINATE_INTERVAL_MS;
 		}
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
-		privateState->weaponSelectionTimer = 0x3a98u;
+		privateState->weaponSelectionTimer = SLIP_RACE_WEAPON_SELECTION_INTERVAL_MS;
 		foundPartCount = 0;
-		partTag = 0x66616e31u;
+		partTag = SLIP_ACTOR_FIRST_FAN;
 		do {
 			SlipArticSlot_FindTag(partTag, objectOffset, context->objectTable, context->objectTableBytes,
 			                      context->articSlotPool, context->articSlotPoolBytes, context->articSlotPoolOffset,
@@ -1364,12 +1486,12 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			if (!partMissing)
 				++foundPartCount;
 			++partTag;
-		} while (partTag != 0x66616e35u);
+		} while (partTag != (SLIP_ACTOR_FIRST_FAN + SLIP_ACTOR_FAN_COUNT));
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		privateState->fanPartCount = foundPartCount;
 		privateState->fanAngle = 0;
 		foundPartCount = 0;
-		partTag = 0x6a657431u;
+		partTag = SLIP_ACTOR_FIRST_JET;
 		do {
 			SlipArticSlot_FindTag(partTag, objectOffset, context->objectTable, context->objectTableBytes,
 			                      context->articSlotPool, context->articSlotPoolBytes, context->articSlotPoolOffset,
@@ -1377,14 +1499,14 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			if (!partMissing)
 				++foundPartCount;
 			++partTag;
-		} while (partTag != 0x6a657435u);
+		} while (partTag != (SLIP_ACTOR_FIRST_JET + SLIP_ACTOR_JET_COUNT));
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		privateState->jetPartCount = foundPartCount;
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		privateState->powerupActive = 0;
 		racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
 		if ((int32_t)racerRecord->powerupRecord >= 0) {
-			privateState->powerupCharge = 0x4000u;
+			privateState->powerupCharge = SLIP_Q14_ONE;
 		}
 	}
 		return 0;
@@ -1408,9 +1530,9 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-		if (racerRecord->racerType == 2u) {
+		if (racerRecord->racerType == SLIP_RACER_COMPUTER) {
 			privateState->positionBoostTimer = 0;
-			privateState->impactPenaltyTimer = 0x00fau;
+			privateState->impactPenaltyTimer = SLIP_RACE_IMPACT_PENALTY_MS;
 			if ((uint16_t)eventValue == SlipRacePlayer_playerOneObject) {
 
 				static const uint32_t hitByPlayerVoices[] = {14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
@@ -1419,16 +1541,17 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 				SlipRaceVoice_Play(sound->digitalCard, hitByPlayerVoices[racerRecord->tuningIndex - 1], &voiceCalls);
 			}
 		}
-		if ((int32_t)SlipRandom_Next() <= 0x7000) {
+		if ((int32_t)SlipRandom_Next() <= SLIP_RACE_DAMAGE_DEBRIS_RANDOM_LIMIT) {
 
-			SlipRaceEffects_Debris(3, objectOffset, dispatchFrame);
+			SlipRaceEffects_Debris(SLIP_RACE_DAMAGE_HIT_DEBRIS_COUNT, objectOffset, dispatchFrame);
 		}
-		if (eventPayload != 1u) {
+		if (eventPayload != SLIP_RACE_WEAPON_DISRUPTER) {
 			scaledDamageValues = SlipRacePlayer_WeaponImpactDamageValues(context->weaponRecords, eventPayload);
 			(void)SlipRacePlayer_ApplyDamage(context, scaledDamageValues.movementDamageQ16,
 			                                 scaledDamageValues.handlingDamageQ16, objectOffset);
 
-			SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0xau, objectOffset, 1u);
+			SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_LASER_HIT, objectOffset,
+			                       SLIP_SOUND_POSITION_OBJECT);
 			if (objectOffset == SlipRacePlayer_playerOneObject) {
 
 				enum { SLIP_RACE_VOICE_PLAYER_HIT = 0x3f };
@@ -1439,17 +1562,17 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			}
 		} else {
 			privateState = SlipRacePlayer_PrivateState(objectOffset);
-			privateState->invertedControlsTimer = 0x1388u;
+			privateState->invertedControlsTimer = SLIP_RACE_INVERTED_CONTROLS_MS;
 			SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 			                           context->transitionFrames, context->transitionDuration);
 
-			SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0xbu, objectOffset, 1u);
+			SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_DISRUPTOR, objectOffset,
+			                       SLIP_SOUND_POSITION_OBJECT);
 		}
 	}
 		return 0;
 
 	case SLIP_OBJECT_EVENT_COLLISION_STOP: {
-		enum { OBJECT_FLAG_BONUS = 1u };
 
 		const uint32_t otherObjectFlags = SlipObject_GetActorHandle((uint16_t)eventPayload);
 		const SlipRaceCollisionStopEvent *const collisionEvent = &SlipRaceCollision_stopEvent;
@@ -1458,7 +1581,7 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 		SlipRacePlayerRecordValues impactDamageValues;
 		int32_t impactScale;
 
-		if ((otherObjectFlags & OBJECT_FLAG_BONUS) != 0) {
+		if ((otherObjectFlags & SLIP_OBJECT_FLAG_BONUS) != 0) {
 			uint32_t bonusType;
 
 			privateState = SlipRacePlayer_PrivateState(objectOffset);
@@ -1470,7 +1593,8 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 				SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 				                           context->transitionFrames, context->transitionDuration);
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 6u, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_BONUS_COLLECT, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
 			case SLIP_RACE_BONUS_CONTROL_REPAIR:
 				racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
@@ -1478,34 +1602,39 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 				SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 				                           context->transitionFrames, context->transitionDuration);
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 6u, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_BONUS_COLLECT, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
 			case SLIP_RACE_BONUS_POWERUP_RECHARGE:
-				privateState->powerupCharge = 0x4000u;
+				privateState->powerupCharge = SLIP_Q14_ONE;
 				SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 				                           context->transitionFrames, context->transitionDuration);
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 6u, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_BONUS_COLLECT, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
 			case SLIP_RACE_BONUS_REVERSE_CONTROLS:
-				privateState->invertedControlsTimer = 0x1388u;
+				privateState->invertedControlsTimer = SLIP_RACE_INVERTED_CONTROLS_MS;
 				SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 				                           context->transitionFrames, context->transitionDuration);
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0xbu, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_DISRUPTOR, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
 			case SLIP_RACE_BONUS_CREDITS:
 				racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-				racerRecord->bonusScore += 0x32u;
+				racerRecord->bonusScore += SLIP_RACE_BONUS_CREDIT_AMOUNT;
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 6u, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_BONUS_COLLECT, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
 			case SLIP_RACE_BONUS_SPEED_BOOST:
-				privateState->powerupSpeedTimer = 0x1388u;
+				privateState->powerupSpeedTimer = SLIP_RACE_POWERUP_SPEED_MS;
 				SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 				                           context->transitionFrames, context->transitionDuration);
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0xcu, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_ENGINE_START, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
 			default:
 				SlipRuntime_Fatal("RaceSlotControl: Unknown bonus type.");
@@ -1519,7 +1648,7 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			SlipRacePlayer_NotifyTimer(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 			                           context->primaryViewShake, context->secondaryViewShake);
 
-			SlipRaceEffects_Debris(5, objectOffset, dispatchFrame);
+			SlipRaceEffects_Debris(SLIP_RACE_PROJECTILE_HIT_DEBRIS_COUNT, objectOffset, dispatchFrame);
 
 			if (SlipRacePlayer_ProjectileShooter((uint16_t)eventPayload) == SlipRacePlayer_playerOneObject) {
 				static const uint32_t hitByPlayerVoices[] = {14, 15, 16, 17, 18, 19, 20, 21, 22, 23};
@@ -1532,40 +1661,46 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 
 			projectileWeaponIndex = SlipRacePlayer_ProjectileWeaponIndex((uint16_t)eventPayload);
 			switch (projectileWeaponIndex) {
-			case 6:
+			case SLIP_RACE_WEAPON_AMBLER:
 				privateState = SlipRacePlayer_PrivateState(objectOffset);
-				privateState->speedLimitTimer = 0x2710u;
+				privateState->speedLimitTimer = SLIP_RACE_SPEED_LIMIT_MS;
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0x10u, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_AMBLER, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
-			case 10:
+			case SLIP_RACE_WEAPON_MINI_MINES:
 				privateState = SlipRacePlayer_PrivateState(objectOffset);
-				privateState->forcedAccelerateTimer = 0x0fa0u;
+				privateState->forcedAccelerateTimer = SLIP_RACE_FORCED_ACCELERATE_MS;
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0xdu, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_BOMBER, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
-			case 8:
+			case SLIP_RACE_WEAPON_HYPER_NEURO:
 				privateState = SlipRacePlayer_PrivateState(objectOffset);
-				privateState->amplifiedControlsTimer = 0x2710u;
+				privateState->amplifiedControlsTimer = SLIP_RACE_AMPLIFIED_CONTROLS_MS;
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0xfu, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_HYPERNEU, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
-			case 11:
+			case SLIP_RACE_WEAPON_BOMBER:
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 9u, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_EXPLOSION, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				if (objectOffset == SlipRacePlayer_playerOneObject) {
 					SlipGameSoundState *const sound = context->soundEffects->gameSound;
 					SlipRaceVoiceCalls voiceCalls = SlipRaceVoiceHost_Calls(sound);
-					SlipRaceVoice_Play(sound->digitalCard, 0x40, &voiceCalls);
+					SlipRaceVoice_Play(sound->digitalCard, SLIP_RACE_VOICE_EXPLOSION, &voiceCalls);
 				}
 				break;
-			case 7:
+			case SLIP_RACE_WEAPON_SCRAMBLER:
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0xeu, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_SCRAMBLE, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
 			default:
 
-				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 9u, objectOffset, 1u);
+				SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_EXPLOSION, objectOffset,
+				                       SLIP_SOUND_POSITION_OBJECT);
 				break;
 			}
 		}
@@ -1574,17 +1709,18 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			uint64_t product;
 
 			privateState = SlipRacePlayer_PrivateState(objectOffset);
-			product = (uint64_t)0xa0000000u * privateState->speed;
-			privateState->speed = (uint32_t)(product >> 32);
+			product = (uint64_t)SLIP_RACE_IMPACT_SPEED_SCALE_Q32 * privateState->speed;
+			privateState->speed = (uint32_t)(product >> SLIP_RACE_COLLISION_SCALE_FRACTION_BITS);
 
 			SlipSoundEffects_Queue(context->soundEffects, collisionEvent->contactPosition.x,
-			                       collisionEvent->contactPosition.y, collisionEvent->contactPosition.z, 1u,
-			                       objectOffset, 2u);
+			                       collisionEvent->contactPosition.y, collisionEvent->contactPosition.z,
+			                       SLIP_SOUND_EFFECT_CRASH, objectOffset, SLIP_SOUND_POSITION_COORDINATES);
 		}
 
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-		if ((uint16_t)((uint32_t)privateState->collisionImpulseX >> 16) == 2u) {
+		if ((uint16_t)((uint32_t)privateState->collisionImpulseX >> 16) ==
+		    SLIP_RACE_IMPACT_VOICE_TRIGGER_IMPULSE_X_HIGH_WORD) {
 
 			static const uint32_t impactVoices[] = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
 			SlipGameSoundState *const sound = context->soundEffects->gameSound;
@@ -1592,9 +1728,9 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			SlipRaceVoice_Play(sound->digitalCard, impactVoices[racerRecord->tuningIndex - 1], &voiceCalls);
 		}
 		impactScale = collisionEvent->impactMagnitude;
-		impactScale = (int32_t)((uint32_t)(impactScale >> 1) + (uint32_t)impactScale);
-		if (impactScale < 0x37dc) {
-			impactScale = 0x37dc;
+		impactScale = (int32_t)((uint32_t)(impactScale >> SLIP_RACE_IMPACT_HALF_GAIN_SHIFT) + (uint32_t)impactScale);
+		if (impactScale < SLIP_RACE_IMPACT_MINIMUM_IMPULSE_SCALE) {
+			impactScale = SLIP_RACE_IMPACT_MINIMUM_IMPULSE_SCALE;
 		}
 		impulse = SlipView3D_ScaleVector(collisionEvent->normalX, collisionEvent->normalY, collisionEvent->normalZ,
 		                                 impactScale);
@@ -1603,14 +1739,14 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 		privateState->collisionImpulseZ = privateState->collisionImpulseZ + (uint32_t)impulse.z;
 		SlipRacePlayer_IntegrateDirection(context);
 
-		impactDamageValues = (SlipRacePlayerRecordValues){0, 0x00040000u};
+		impactDamageValues = (SlipRacePlayerRecordValues){0, SLIP_RACE_IMPACT_HANDLING_DAMAGE_Q16};
 		if ((SlipRacePlayer_damageSourceFlags & SLIP_OBJECT_FLAG_PROJECTILE) != 0) {
 			impactDamageValues =
 			    SlipRacePlayer_ProjectileDamageValues(context->weaponRecords, SlipRacePlayer_damageSourceObject);
 		}
 		if (collisionEvent->impactFlag != 0) {
-			impactDamageValues.movementDamageQ16 += 0x00020000u;
-			impactDamageValues.handlingDamageQ16 += 0x00020000u;
+			impactDamageValues.movementDamageQ16 += SLIP_RACE_IMPACT_ADDITIONAL_DAMAGE_Q16;
+			impactDamageValues.handlingDamageQ16 += SLIP_RACE_IMPACT_ADDITIONAL_DAMAGE_Q16;
 		}
 		(void)SlipRacePlayer_ApplyDamage(context, impactDamageValues.movementDamageQ16,
 		                                 impactDamageValues.handlingDamageQ16, objectOffset);
@@ -1620,16 +1756,16 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 	case SLIP_OBJECT_EVENT_COLLISION_BOUNCE: {
 		const SlipRaceCollisionBounceEvent *const collisionEvent = &SlipRaceCollision_bounceEvent;
 
-		SlipRaceEffects_SparkSplash(context, 6, objectOffset, collisionEvent);
-		SlipRaceEffects_ContactFragments(context, 6, objectOffset, collisionEvent);
+		SlipRaceEffects_SparkSplash(context, SLIP_RACE_BOUNCE_EFFECT_PARTICLE_COUNT, objectOffset, collisionEvent);
+		SlipRaceEffects_ContactFragments(context, SLIP_RACE_BOUNCE_EFFECT_PARTICLE_COUNT, objectOffset, collisionEvent);
 
-		SlipRaceEffects_Debris(6, objectOffset, dispatchFrame);
+		SlipRaceEffects_Debris(SLIP_RACE_BOUNCE_EFFECT_PARTICLE_COUNT, objectOffset, dispatchFrame);
 		const int32_t impactSpeed = SlipObject_Speed(context->objectTable, objectOffset);
 		uint32_t dampedSpeed;
-		uint32_t soundEffect = 3u;
+		uint32_t soundEffect = SLIP_SOUND_EFFECT_SCRAPE_1;
 
-		if (impactSpeed > 0x00022e98) {
-			soundEffect = 2u;
+		if (impactSpeed > SLIP_RACE_BOUNCE_SHAKE_MINIMUM_SPEED) {
+			soundEffect = SLIP_SOUND_EFFECT_SCRAPE_2;
 			SlipRacePlayer_NotifyTimer(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 			                           context->primaryViewShake, context->secondaryViewShake);
 		}
@@ -1638,11 +1774,12 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			const uint8_t *const name = SlipDraw3D_GetMaterialName(context->materialTable, context->materialTableBytes,
 			                                                       (uint16_t)collisionEvent->material);
 			if (name != NULL && memcmp(name, "WATE", 4u) == 0)
-				soundEffect = 8u;
+				soundEffect = SLIP_SOUND_EFFECT_WATER_HIT;
 		}
-		SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, soundEffect, objectOffset, 1u);
+		SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, soundEffect, objectOffset, SLIP_SOUND_POSITION_OBJECT);
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
-		dampedSpeed = (uint32_t)(((uint64_t)0xc0000000u * privateState->speed) >> 32);
+		dampedSpeed = (uint32_t)(((uint64_t)SLIP_RACE_BOUNCE_SPEED_SCALE_Q32 * privateState->speed) >>
+		                         SLIP_RACE_COLLISION_SCALE_FRACTION_BITS);
 		privateState->speed = dampedSpeed;
 		if (privateState->collisionCooldown != 0) {
 			SlipObjectEventCallbackWriteResult setCallback;
@@ -1655,18 +1792,19 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			privateState->collisionImpulseX = 0;
 			privateState->collisionImpulseY = 0;
 			privateState->collisionImpulseZ = 0;
-			SlipRacePlayer_InitializeImpactRecovery(context, (uint32_t)((int32_t)privateState->speed >> 1), 0x03e8u,
-			                                        0x0000e000u, objectOffset);
+			SlipRacePlayer_InitializeImpactRecovery(
+			    context, (uint32_t)((int32_t)privateState->speed >> SLIP_RACE_BOUNCE_RECOVERY_SPEED_SHIFT),
+			    SLIP_RACE_BOUNCE_RECOVERY_DURATION_MS, SLIP_RACE_BOUNCE_RECOVERY_TURN_RATE, objectOffset);
 			(void)SlipObject_SetEventCallback(context->objectTable, context->objectTableBytes, objectOffset,
 			                                  SlipRacePlayer_RivalUpdate, &setCallback);
 		} else {
 			SlipView3DVec32 collisionVector;
 			SlipView3DVec32 impulse;
 
-			privateState->collisionCooldown = 0x0190u;
-			collisionVector = SlipRacePlayer_CollisionVector(context, (uint16_t)collisionEvent->normalX,
-			                                                 (uint16_t)collisionEvent->normalY,
-			                                                 (uint16_t)collisionEvent->normalZ, 0x3000u);
+			privateState->collisionCooldown = SLIP_RACE_COLLISION_COOLDOWN_MS;
+			collisionVector = SlipRacePlayer_CollisionVector(
+			    context, (uint16_t)collisionEvent->normalX, (uint16_t)collisionEvent->normalY,
+			    (uint16_t)collisionEvent->normalZ, SLIP_RACE_BOUNCE_DEFLECTION_Q14);
 			privateState = SlipRacePlayer_PrivateState(objectOffset);
 			impulse = SlipView3D_ScaleVector((int16_t)collisionVector.x, (int16_t)collisionVector.y,
 			                                 (int16_t)collisionVector.z, (int32_t)privateState->speed);
@@ -1674,7 +1812,8 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			privateState->collisionImpulseY = privateState->collisionImpulseY + (uint32_t)impulse.y;
 			privateState->collisionImpulseZ = privateState->collisionImpulseZ + (uint32_t)impulse.z;
 			SlipRacePlayer_IntegrateDirection(context);
-			(void)SlipRacePlayer_ApplyDamage(context, 0x00020000u, 0x00010000u, objectOffset);
+			(void)SlipRacePlayer_ApplyDamage(context, SLIP_RACE_BOUNCE_MOVEMENT_DAMAGE_Q16,
+			                                 SLIP_RACE_BOUNCE_HANDLING_DAMAGE_Q16, objectOffset);
 		}
 	}
 		return 0;
@@ -1714,41 +1853,44 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			uint16_t *energyField;
 			uint32_t *ammoField;
 
-			if (weaponSelection == 0) {
+			if (weaponSelection == SLIP_RACE_WEAPON_SLOT_BLASTER) {
 				if (privateState->weaponCooldown != 0)
 					return 0;
-				chargeCost = (uint16_t)SlipRacePlayer_WeaponChargeCost(context->weaponRecords, 0);
-				if ((int16_t)privateState->weaponCharge[0] < (int16_t)chargeCost) {
+				chargeCost =
+				    (uint16_t)SlipRacePlayer_WeaponChargeCost(context->weaponRecords, SLIP_RACE_WEAPON_BLASTER);
+				if ((int16_t)privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_BLASTER] < (int16_t)chargeCost) {
 					return 0;
 				}
-				privateState->weaponCharge[0] = (uint16_t)(privateState->weaponCharge[0] - chargeCost);
-				privateState->weaponCooldown = 0x01f4u;
+				privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_BLASTER] =
+				    (uint16_t)(privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_BLASTER] - chargeCost);
+				privateState->weaponCooldown = SLIP_RACE_WEAPON_COOLDOWN_MS;
 				racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-				if ((racerRecord->powerupFlags & 1u) != 0) {
-					privateState->weaponCooldown = 0x012cu;
+				if ((racerRecord->powerupFlags & SLIP_RACE_POWERUP_RAPID_WEAPONS) != 0) {
+					privateState->weaponCooldown = SLIP_RACE_POWERUP_WEAPON_COOLDOWN_MS;
 				}
-				fireWeaponIndex = 0;
-			} else if (weaponSelection == 3u) {
+				fireWeaponIndex = SLIP_RACE_WEAPON_BLASTER;
+			} else if (weaponSelection == SLIP_RACE_WEAPON_SLOT_POWERUP) {
 				if (privateState->previousActionPressed != 0 || privateState->powerupCharge == 0) {
 					return 0;
 				}
 				privateState->powerupActive ^= 1u;
 				if (privateState->powerupActive != 0) {
 
-					SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, 0xcu, objectOffset, 1u);
+					SlipSoundEffects_Queue(context->soundEffects, 0, 0, 0, SLIP_SOUND_EFFECT_ENGINE_START, objectOffset,
+					                       SLIP_SOUND_POSITION_OBJECT);
 				}
 				SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 				                           context->transitionFrames, context->transitionDuration);
 				return 0;
 			} else {
 				racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-				if (weaponSelection == 1u) {
+				if (weaponSelection == SLIP_RACE_WEAPON_SLOT_PRIMARY) {
 					fireWeaponIndex = racerRecord->primaryWeaponIndex;
-					energyField = &privateState->weaponCharge[1];
+					energyField = &privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_PRIMARY];
 					ammoField = &racerRecord->primaryWeaponAmmo;
 				} else {
 					fireWeaponIndex = racerRecord->secondaryWeaponIndex;
-					energyField = &privateState->weaponCharge[2];
+					energyField = &privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_SECONDARY];
 					ammoField = &racerRecord->secondaryWeaponAmmo;
 				}
 				chargeCost = (uint16_t)SlipRacePlayer_WeaponChargeCost(context->weaponRecords, fireWeaponIndex);
@@ -1763,7 +1905,7 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 					--ammo;
 					*ammoField = ammo;
 					if (ammo == 0) {
-						if (weaponSelection == 1u) {
+						if (weaponSelection == SLIP_RACE_WEAPON_SLOT_PRIMARY) {
 							racerRecord->primaryWeaponIndex = UINT32_MAX;
 						} else {
 							racerRecord->secondaryWeaponIndex = UINT32_MAX;
@@ -1780,7 +1922,8 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 				*energyField = (uint16_t)(*energyField - chargeCost);
 			}
 
-			if (fireWeaponIndex < 12u && context->weaponRecords[fireWeaponIndex].fireCallback != NULL) {
+			if (fireWeaponIndex < SLIP_RACE_WEAPON_COUNT &&
+			    context->weaponRecords[fireWeaponIndex].fireCallback != NULL) {
 				context->weaponRecords[fireWeaponIndex].fireCallback(objectOffset, privateState->targetObject);
 			}
 			SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
@@ -1850,24 +1993,24 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 		if (slot.carryOut) {
 			privateState = SlipRacePlayer_PrivateState(objectOffset);
 			frameStep = SlipFrameTimer_Step();
-			increment = (uint32_t)(((uint64_t)0x00190000u * frameStep) >> 14);
+			increment = (uint32_t)(((uint64_t)SLIP_RACE_REPAIR_RATE_Q16 * frameStep) >> SLIP_Q14_FRACTION_BITS);
 			racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
 			increment = racerRecord->movementDamageQ16 - increment;
 			racerRecord->movementDamageQ16 = increment;
 			if ((int32_t)increment < 0) {
 				racerRecord->movementDamageQ16 = 0;
 			}
-			increment = (uint32_t)(((uint64_t)0x00190000u * frameStep) >> 14);
+			increment = (uint32_t)(((uint64_t)SLIP_RACE_REPAIR_RATE_Q16 * frameStep) >> SLIP_Q14_FRACTION_BITS);
 			increment = racerRecord->handlingDamageQ16 - increment;
 			racerRecord->handlingDamageQ16 = increment;
 			if ((int32_t)increment < 0) {
 				racerRecord->handlingDamageQ16 = 0;
 			}
-			increment = (uint16_t)(((uint32_t)0x4000u * (uint16_t)SlipFrameTimer_Step()) >> 14);
+			increment = (uint16_t)((SLIP_Q14_ONE * (uint16_t)SlipFrameTimer_Step()) >> SLIP_Q14_FRACTION_BITS);
 
 			increment = (uint16_t)(increment + privateState->powerupCharge);
-			if (increment >= 0x4001u)
-				increment = 0x4000u;
+			if (increment >= SLIP_Q14_ONE + 1u)
+				increment = SLIP_Q14_ONE;
 			privateState->powerupCharge = (uint16_t)increment;
 			SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 			                           context->transitionFrames, context->transitionDuration);
@@ -1875,59 +2018,63 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-		if (privateState->weaponCharge[0] != 0x4000u) {
-			increment = SlipRacePlayer_WeaponRechargeRate(0);
-			if ((racerRecord->powerupFlags & 1u) != 0)
+		if (privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_BLASTER] != SLIP_Q14_ONE) {
+			increment = SlipRacePlayer_WeaponRechargeRate(SLIP_RACE_WEAPON_BLASTER);
+			if ((racerRecord->powerupFlags & SLIP_RACE_POWERUP_RAPID_WEAPONS) != 0)
 				increment <<= 1;
-			increment = (uint16_t)(((uint32_t)(uint16_t)increment * (uint16_t)SlipFrameTimer_Step()) >> 14);
-			increment = (uint16_t)(increment + privateState->weaponCharge[0]);
-			if ((int16_t)increment > 0x4000)
-				increment = 0x4000u;
-			privateState->weaponCharge[0] = (uint16_t)increment;
+			increment =
+			    (uint16_t)(((uint32_t)(uint16_t)increment * (uint16_t)SlipFrameTimer_Step()) >> SLIP_Q14_FRACTION_BITS);
+			increment = (uint16_t)(increment + privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_BLASTER]);
+			if ((int16_t)increment > SLIP_Q14_ONE)
+				increment = SLIP_Q14_ONE;
+			privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_BLASTER] = (uint16_t)increment;
 			SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 			                           context->transitionFrames, context->transitionDuration);
 		}
-		if (privateState->weaponCharge[1] != 0x4000u) {
+		if (privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_PRIMARY] != SLIP_Q14_ONE) {
 			recordIndex = racerRecord->primaryWeaponIndex;
 			increment = SlipRacePlayer_WeaponRechargeRate(recordIndex);
-			if ((racerRecord->powerupFlags & 1u) != 0)
+			if ((racerRecord->powerupFlags & SLIP_RACE_POWERUP_RAPID_WEAPONS) != 0)
 				increment <<= 1;
-			increment = (uint16_t)(((uint32_t)(uint16_t)increment * (uint16_t)SlipFrameTimer_Step()) >> 14);
-			increment = (uint16_t)(increment + privateState->weaponCharge[1]);
-			if ((int16_t)increment > 0x4000)
-				increment = 0x4000u;
-			privateState->weaponCharge[1] = (uint16_t)increment;
+			increment =
+			    (uint16_t)(((uint32_t)(uint16_t)increment * (uint16_t)SlipFrameTimer_Step()) >> SLIP_Q14_FRACTION_BITS);
+			increment = (uint16_t)(increment + privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_PRIMARY]);
+			if ((int16_t)increment > SLIP_Q14_ONE)
+				increment = SLIP_Q14_ONE;
+			privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_PRIMARY] = (uint16_t)increment;
 			SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 			                           context->transitionFrames, context->transitionDuration);
 		}
-		if (privateState->weaponCharge[2] != 0x4000u) {
+		if (privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_SECONDARY] != SLIP_Q14_ONE) {
 			recordIndex = racerRecord->secondaryWeaponIndex;
 			increment = SlipRacePlayer_WeaponRechargeRate(recordIndex);
-			if ((racerRecord->powerupFlags & 1u) != 0)
+			if ((racerRecord->powerupFlags & SLIP_RACE_POWERUP_RAPID_WEAPONS) != 0)
 				increment <<= 1;
-			increment = (uint16_t)(((uint32_t)(uint16_t)increment * (uint16_t)SlipFrameTimer_Step()) >> 14);
-			increment = (uint16_t)(increment + privateState->weaponCharge[2]);
-			if ((int16_t)increment > 0x4000)
-				increment = 0x4000u;
-			privateState->weaponCharge[2] = (uint16_t)increment;
+			increment =
+			    (uint16_t)(((uint32_t)(uint16_t)increment * (uint16_t)SlipFrameTimer_Step()) >> SLIP_Q14_FRACTION_BITS);
+			increment = (uint16_t)(increment + privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_SECONDARY]);
+			if ((int16_t)increment > SLIP_Q14_ONE)
+				increment = SLIP_Q14_ONE;
+			privateState->weaponCharge[SLIP_RACE_WEAPON_SLOT_SECONDARY] = (uint16_t)increment;
 			SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 			                           context->transitionFrames, context->transitionDuration);
 		}
 
 		targetObject = 0;
-		recordIndex = 0;
+		recordIndex = SLIP_RACE_WEAPON_BLASTER;
 		{
 			bool shouldSearchForTarget = true;
 
-			if (racerRecord->racerType == 2u &&
-			    (privateState->weaponSelection == 0 || privateState->weaponSelectionTimer == 0)) {
+			if (racerRecord->racerType == SLIP_RACER_COMPUTER &&
+			    (privateState->weaponSelection == SLIP_RACE_WEAPON_SLOT_BLASTER ||
+			     privateState->weaponSelectionTimer == 0)) {
 				uint16_t candidateObject = SlipRacePlayer_farNeighbourCandidate;
 				bool useGeneralSelection = false;
 
 				if (candidateObject != 0) {
 					const SlipRaceRacerState *const candidateRecord = SlipRacePlayer_RacerState(candidateObject);
 
-					if (candidateRecord == NULL || candidateRecord->racerType != 2u) {
+					if (candidateRecord == NULL || candidateRecord->racerType != SLIP_RACER_COMPUTER) {
 						useGeneralSelection = true;
 					}
 				}
@@ -1936,27 +2083,28 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 					if (candidateObject != 0) {
 						const SlipRaceRacerState *const candidateRecord = SlipRacePlayer_RacerState(candidateObject);
 
-						if (candidateRecord == NULL || candidateRecord->racerType != 2u) {
+						if (candidateRecord == NULL || candidateRecord->racerType != SLIP_RACER_COMPUTER) {
 							useGeneralSelection = true;
 						}
 					}
 				}
 				if (!useGeneralSelection)
 					shouldSearchForTarget = false;
-			} else if (racerRecord->racerType == 2u && privateState->weaponSelection != 0 &&
+			} else if (racerRecord->racerType == SLIP_RACER_COMPUTER &&
+			           privateState->weaponSelection != SLIP_RACE_WEAPON_SLOT_BLASTER &&
 			           privateState->weaponSelectionTimer != 0) {
 				shouldSearchForTarget = false;
 			}
 
 			if (shouldSearchForTarget) {
 				switch (privateState->weaponSelection) {
-				case 0:
-					recordIndex = 0;
+				case SLIP_RACE_WEAPON_SLOT_BLASTER:
+					recordIndex = SLIP_RACE_WEAPON_BLASTER;
 					break;
-				case 1:
+				case SLIP_RACE_WEAPON_SLOT_PRIMARY:
 					recordIndex = racerRecord->primaryWeaponIndex;
 					break;
-				case 2:
+				case SLIP_RACE_WEAPON_SLOT_SECONDARY:
 					recordIndex = racerRecord->secondaryWeaponIndex;
 					break;
 				default:
@@ -1971,11 +2119,11 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 
 				if (targetRange == 0)
 					shouldSearchForTarget = false;
-				if ((privateState->roadCoordinateY & 2u) != 0)
+				if ((privateState->roadCoordinateY & SLIP_RACE_TARGET_RANGE_DOUBLING_BIT) != 0)
 					targetRange <<= 1;
 				if (shouldSearchForTarget) {
-					if (!SlipArticSlot_Position(0x6d61696eu, 0x68656164u, objectOffset, context->objectTable,
-					                            context->objectTableBytes, context->articSlotPool,
+					if (!SlipArticSlot_Position(SLIP_ACTOR_PART_MAIN, SLIP_ACTOR_POINT_HEAD, objectOffset,
+					                            context->objectTable, context->objectTableBytes, context->articSlotPool,
 					                            context->articSlotPoolBytes, context->articSlotPoolOffset,
 					                            context->articData, context->articDataBytes, context->articDataOffset,
 					                            context->maths, &part) ||
@@ -1983,7 +2131,8 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 						shouldSearchForTarget = false;
 					} else {
 						SlipRaceCollision_FindNearestBody(
-						    0x000ee480u, (uint16_t)targetRange, 0x988, (int16_t)part.positionX, (int16_t)part.positionY,
+						    SLIP_RACE_WEAPON_TARGET_MAXIMUM_DISTANCE, (uint16_t)targetRange,
+						    SLIP_RACE_WEAPON_TARGET_MINIMUM_Z, (int16_t)part.positionX, (int16_t)part.positionY,
 						    (int16_t)part.positionZ, objectOffset, context->maths, &nearest);
 						if (nearest.noBodyFound) {
 							shouldSearchForTarget = false;
@@ -1997,9 +2146,9 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 				privateState = SlipRacePlayer_PrivateState(objectOffset);
 				if (targetObject != 0) {
 					racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-					if (racerRecord->racerType == 2u) {
+					if (racerRecord->racerType == SLIP_RACER_COMPUTER) {
 						const uint32_t targetFlags = SlipObject_GetActorHandle((uint16_t)targetObject);
-						if ((targetFlags & 0x0cu) == 0)
+						if ((targetFlags & SLIP_RACE_AI_TARGET_ACTOR_HANDLE_MASK) == 0)
 							targetObject = 0;
 					}
 				}
@@ -2018,10 +2167,11 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
 			scales = SlipRacePowerup_GetScales(racerRecord->powerupRecord);
 			chargeDrain =
-			    (uint16_t)(((uint32_t)(uint16_t)scales.chargeDrainScaleQ14 * (uint16_t)SlipFrameTimer_Step()) >> 14);
+			    (uint16_t)(((uint32_t)(uint16_t)scales.chargeDrainScaleQ14 * (uint16_t)SlipFrameTimer_Step()) >>
+			               SLIP_Q14_FRACTION_BITS);
 			chargeDrain = (uint16_t)(privateState->powerupCharge - chargeDrain);
 			privateState->powerupCharge = chargeDrain;
-			if (chargeDrain >= 0x4001u) {
+			if (chargeDrain >= SLIP_Q14_ONE + 1u) {
 				privateState->powerupActive = 0;
 				privateState->powerupCharge = 0;
 			}
@@ -2029,11 +2179,11 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-		if (racerRecord->finished == 0 && privateState->controller != 2u) {
+		if (racerRecord->finished == 0 && privateState->controller != SLIP_RACER_COMPUTER) {
 			const uint16_t controller = privateState->controller;
-			if (controller == 0) {
+			if (controller == SLIP_RACER_PLAYER_ONE) {
 				controls = SlipRacePlayer_LoadControls(context, 1u);
-			} else if (controller == 1u) {
+			} else if (controller == SLIP_RACER_PLAYER_TWO) {
 				controls = SlipRacePlayer_LoadControls(context, 2u);
 			} else {
 				controls = SlipRacePlayer_LoadThirdControls();
@@ -2041,31 +2191,32 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 		} else {
 			SlipRacePlayer_AiControls(context, &controls);
 			if (SlipRacePlayer_aiControlsSuppressed != 0) {
-				controls.actions &= 0xfffeu;
+				controls.actions &= UINT16_MAX ^ SLIP_ACTION_ACCELERATE;
 				controls.steering = 0;
 				controls.pitch = 0;
 			}
 		}
 		if (SlipRacePlayer_startCountdown != 0) {
-			controls.actions &= 0xfffcu;
+			controls.actions &= UINT16_MAX ^ (SLIP_ACTION_ACCELERATE | SLIP_ACTION_FIRE);
 			controls.steering = 0;
 			controls.pitch = 0;
 		}
 
 		if (context->soundEffects != NULL &&
 		    (objectOffset == SlipRacePlayer_playerOneObject || objectOffset == SlipRacePlayer_playerTwoObject)) {
-			SlipSoundEffects_AddEngine(context->soundEffects, 0, SlipObject_Speed(context->objectTable, objectOffset),
-			                           (int32_t)controls.steering, objectOffset);
+			SlipSoundEffects_AddEngine(context->soundEffects, SLIP_SOUND_TRACK_CHANGE_PLAY,
+			                           SlipObject_Speed(context->objectTable, objectOffset), (int32_t)controls.steering,
+			                           objectOffset);
 		}
 		appliedActions = SlipRacePlayer_ApplyControls(context, controls);
-		SlipArticSlot_SetAngle(0x64727631u, (uint16_t)controls.steering, objectOffset, context->objectTable,
+		SlipArticSlot_SetAngle(SLIP_ACTOR_PART_DRIVER, (uint16_t)controls.steering, objectOffset, context->objectTable,
 		                       context->objectTableBytes, context->articSlotPool, context->articSlotPoolBytes,
 		                       context->articSlotPoolOffset, context->articData, context->articDataBytes,
 		                       context->articDataOffset, &angleUpdateCarry);
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		privateState->previousActionPressed = privateState->actionPressed;
-		privateState->actionPressed = (appliedActions & 2u) != 0 ? 1u : 0u;
-		if ((appliedActions & 4u) != 0) {
+		privateState->actionPressed = (appliedActions & SLIP_ACTION_FIRE) != 0 ? 1u : 0u;
+		if ((appliedActions & SLIP_ACTION_SELECT) != 0) {
 			racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
 			SlipRacePlayer_AdvanceState(privateState, racerRecord);
 			SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
@@ -2077,10 +2228,12 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			if (remainingPartCount != 0) {
 				int32_t jetSpeed = SlipObject_Speed(context->objectTable, objectOffset);
 				uint16_t partAngle;
-				uint32_t partTag = 0x6a657431u;
-				if (jetSpeed > 0x22e98)
-					jetSpeed = 0x22e98;
-				partAngle = (uint16_t)(0x4000u - (((uint32_t)0x1d54u * (uint32_t)jetSpeed) >> 16));
+				uint32_t partTag = SLIP_ACTOR_FIRST_JET;
+				if (jetSpeed > SLIP_RACE_JET_MAXIMUM_SPEED)
+					jetSpeed = SLIP_RACE_JET_MAXIMUM_SPEED;
+				partAngle = (uint16_t)(SLIP_ANGLE_QUARTER_TURN -
+				                       (((uint32_t)SLIP_RACE_JET_ANGLE_SPEED_MULTIPLIER * (uint32_t)jetSpeed) >>
+				                        SLIP_RACE_JET_ANGLE_PRODUCT_SHIFT));
 				do {
 					SlipArticSlot_SetAngle(
 					    partTag++, partAngle, objectOffset, context->objectTable, context->objectTableBytes,
@@ -2095,8 +2248,9 @@ uint32_t SlipRacePlayer_Update(uint32_t eventCode, uint32_t eventPayload, uint32
 			if (remainingPartCount != 0) {
 				const uint16_t partAngle =
 				    (uint16_t)(privateState->fanAngle +
-				               (uint16_t)(((uint32_t)0x7fffu * (uint16_t)SlipFrameTimer_Step()) >> 14));
-				uint32_t partTag = 0x66616e31u;
+				               (uint16_t)(((uint32_t)SLIP_RACE_FAN_ROTATION_RATE * (uint16_t)SlipFrameTimer_Step()) >>
+				                          SLIP_Q14_FRACTION_BITS));
+				uint32_t partTag = SLIP_ACTOR_FIRST_FAN;
 				privateState->fanAngle = partAngle;
 				do {
 					SlipArticSlot_SetAngle(
@@ -2129,7 +2283,7 @@ static SlipTrackSlotRecord *SlipRacePlayer_TrackSlot(SlipRacePlayerHostBindings 
 		return NULL;
 	}
 	offset = select.slotAddress - context->slotListBaseOffset;
-	if (offset + 0x118u > context->slotListBytes)
+	if (offset + SLIP_TRACK_SLOT_RECORD_BYTES > context->slotListBytes)
 		return NULL;
 	return (SlipTrackSlotRecord *)(context->slotListBase + offset);
 }
@@ -2145,10 +2299,10 @@ bool SlipRacePlayer_TrackLight(uint16_t objectOffset, uint16_t *light) {
 	                                     context->componentBaseOffset, context->trackTable, context->trackTableBytes))
 		return false;
 	const uint32_t offset = slot->currentTrackRecordAddress - context->trackDataOffset;
-	if (offset > context->trackDataSize || context->trackDataSize - offset < 0x22u)
+	if (offset > context->trackDataSize || context->trackDataSize - offset < SLIP_TRD_SECTION_BYTES)
 		return false;
 	/* TRD resource bytes; the live slot above is accessed through its typed fields. */
-	*light = SlipBytes_ReadLE16(context->trdBase + offset + 0x20u);
+	*light = SlipBytes_ReadLE16(context->trdBase + offset + SLIP_TRD_SECTION_SHADE_OFFSET);
 	return true;
 }
 
@@ -2167,12 +2321,13 @@ static bool SlipRacePlayer_PreviousTrackPoint(SlipRacePlayerHostBindings *contex
 	    road.notFound) {
 		return false;
 	}
-	offset = SlipBytes_ReadLE16(road.record + 0x02u);
-	if ((size_t)offset + 0x18u > context->trackDataSize)
+	offset = SlipBytes_ReadLE16(road.record + SLIP_TRD_WAYPOINT_PREVIOUS_LINK_OFFSET);
+	if ((size_t)offset + SLIP_TRD_POSITION_RECORD_BYTES > context->trackDataSize)
 		return false;
 	record = context->trdBase + offset;
-	*point = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(record + 0x0cu), (int32_t)SlipBytes_ReadLE32(record + 0x10u),
-	                           (int32_t)SlipBytes_ReadLE32(record + 0x14u)};
+	*point = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(record + SLIP_TRD_POSITION_X_OFFSET),
+	                           (int32_t)SlipBytes_ReadLE32(record + SLIP_TRD_POSITION_Y_OFFSET),
+	                           (int32_t)SlipBytes_ReadLE32(record + SLIP_TRD_POSITION_Z_OFFSET)};
 	return true;
 }
 
@@ -2184,8 +2339,9 @@ static uint8_t *SlipRacePlayer_TrdRecord(SlipRacePlayerHostBindings *context, ui
 }
 
 static SlipView3DVec32 SlipRacePlayer_RecordPoint(const uint8_t *record) {
-	return (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(record + 0x0cu), (int32_t)SlipBytes_ReadLE32(record + 0x10u),
-	                         (int32_t)SlipBytes_ReadLE32(record + 0x14u)};
+	return (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(record + SLIP_TRD_POSITION_X_OFFSET),
+	                         (int32_t)SlipBytes_ReadLE32(record + SLIP_TRD_POSITION_Y_OFFSET),
+	                         (int32_t)SlipBytes_ReadLE32(record + SLIP_TRD_POSITION_Z_OFFSET)};
 }
 
 static bool SlipRacePlayer_ForwardTrackPoint(SlipRacePlayerHostBindings *context, uint16_t objectOffset,
@@ -2223,40 +2379,47 @@ static bool SlipRacePlayer_ForwardTrackPoint(SlipRacePlayerHostBindings *context
 	if (recordAddress < context->trackDataOffset)
 		return false;
 	offset = recordAddress - context->trackDataOffset;
-	trackRecord = SlipRacePlayer_TrdRecord(context, offset, 0x20u);
+	trackRecord = SlipRacePlayer_TrdRecord(context, offset, SLIP_TRD_START_RECORD_BYTES);
 	if (trackRecord == NULL)
 		return false;
-	trackRecord = SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(trackRecord + 0x1eu), 0x18u);
+	trackRecord = SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(trackRecord + SLIP_TRD_START_FINISH_LINK_OFFSET),
+	                                       SLIP_TRD_POSITION_RECORD_BYTES);
 	if (trackRecord == NULL)
 		return false;
-	linkedRecord = SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(trackRecord + 0x02u), 0x06u);
+	linkedRecord = SlipRacePlayer_TrdRecord(
+	    context, SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET), SLIP_TRACK_LINKED_HEADER_BYTES);
 	if (linkedRecord == NULL)
 		return false;
-	firstRecord = SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(linkedRecord + 0x00u), 0x18u);
+	firstRecord = SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(linkedRecord + SLIP_TRD_ROUTE_FIRST_LINK_OFFSET),
+	                                       SLIP_TRD_POSITION_RECORD_BYTES);
 	if (firstRecord == NULL)
 		return false;
 	first = SlipRacePlayer_RecordPoint(firstRecord);
 	SlipDraw3D_ApproxAbsVectorLength((uint32_t)(first.x - position.x), (uint32_t)(first.y - position.y),
 	                                 (uint32_t)(first.z - position.z), &approximate);
-	if ((int32_t)approximate.approximateLength < 0x800) {
-		firstRecord = SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(firstRecord + 0x00u), 0x18u);
+	if ((int32_t)approximate.approximateLength < SLIP_RACE_TRACK_POINT_SKIP_DISTANCE) {
+		firstRecord =
+		    SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(firstRecord + SLIP_TRD_ROUTE_FIRST_LINK_OFFSET),
+		                             SLIP_TRD_POSITION_RECORD_BYTES);
 		if (firstRecord == NULL)
 			return false;
 		first = SlipRacePlayer_RecordPoint(firstRecord);
 	}
-	offset = SlipBytes_ReadLE16(linkedRecord + 0x04u);
+	offset = SlipBytes_ReadLE16(linkedRecord + SLIP_TRD_ROUTE_SECOND_LINK_OFFSET);
 	if (offset == 0) {
 		*point = first;
 		return true;
 	}
-	secondRecord = SlipRacePlayer_TrdRecord(context, offset, 0x18u);
+	secondRecord = SlipRacePlayer_TrdRecord(context, offset, SLIP_TRD_POSITION_RECORD_BYTES);
 	if (secondRecord == NULL)
 		return false;
 	second = SlipRacePlayer_RecordPoint(secondRecord);
 	SlipDraw3D_ApproxAbsVectorLength((uint32_t)(second.x - position.x), (uint32_t)(second.y - position.y),
 	                                 (uint32_t)(second.z - position.z), &approximate);
-	if ((int32_t)approximate.approximateLength < 0x800) {
-		secondRecord = SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(secondRecord + 0x00u), 0x18u);
+	if ((int32_t)approximate.approximateLength < SLIP_RACE_TRACK_POINT_SKIP_DISTANCE) {
+		secondRecord =
+		    SlipRacePlayer_TrdRecord(context, SlipBytes_ReadLE16(secondRecord + SLIP_TRD_ROUTE_FIRST_LINK_OFFSET),
+		                             SLIP_TRD_POSITION_RECORD_BYTES);
 		if (secondRecord == NULL)
 			return false;
 		second = SlipRacePlayer_RecordPoint(secondRecord);
@@ -2289,29 +2452,31 @@ static bool SlipRacePlayer_ProjectOutFromFace(SlipRacePlayerHostBindings *contex
 	}
 	faceOffset = faceAddress - context->componentBaseOffset;
 	recordOffset = recordAddress - context->trackDataOffset;
-	if ((size_t)faceOffset + 0x0eu > context->componentBaseBytes ||
-	    (size_t)recordOffset + 0x1eu > context->trackDataSize) {
+	if ((size_t)faceOffset + SLIP_TRC_PRIMITIVE_FIRST_INDEX_END > context->componentBaseBytes ||
+	    (size_t)recordOffset + SLIP_TRD_SECTION_ORIGIN_END > context->trackDataSize) {
 		return false;
 	}
 	faceRecord = context->componentBase + faceOffset;
 	trackRecord = context->trdBase + recordOffset;
-	componentOffset = SlipBytes_ReadLE16(trackRecord + 0x02u);
-	if ((size_t)componentOffset + 0x14u > context->componentBaseBytes) {
+	componentOffset = SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if ((size_t)componentOffset + SLIP_TRC_COMPONENT_BOUNDS_END > context->componentBaseBytes) {
 		return false;
 	}
 	componentRecord = context->componentBase + componentOffset;
 	if (!SlipTrackWorld_PointLookup(componentRecord, context->componentBase, context->componentBaseBytes,
-	                                SlipBytes_ReadLE16(faceRecord + 0x0cu), 0, 0, 0, &point) ||
+	                                SlipBytes_ReadLE16(faceRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET), 0, 0, 0,
+	                                &point) ||
 	    point.carry) {
 		return false;
 	}
-	planeOrigin =
-	    (SlipView3DVec32){(int32_t)(point.pointXOrInput + SlipBytes_ReadLE32(trackRecord + 0x12u)),
-	                      (int32_t)(point.pointYOrInput + SlipBytes_ReadLE32(trackRecord + 0x16u)),
-	                      (int32_t)(point.pointZOrCountMergedWithInput + SlipBytes_ReadLE32(trackRecord + 0x1au))};
-	*normal = (SlipView3DVec16){(int16_t)SlipBytes_ReadLE16(faceRecord + 0x02u),
-	                            (int16_t)SlipBytes_ReadLE16(faceRecord + 0x04u),
-	                            (int16_t)SlipBytes_ReadLE16(faceRecord + 0x06u)};
+	planeOrigin = (SlipView3DVec32){
+	    (int32_t)(point.pointXOrInput + SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+	    (int32_t)(point.pointYOrInput + SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+	    (int32_t)(point.pointZOrCountMergedWithInput +
+	              SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET))};
+	*normal = (SlipView3DVec16){(int16_t)SlipBytes_ReadLE16(faceRecord + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+	                            (int16_t)SlipBytes_ReadLE16(faceRecord + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+	                            (int16_t)SlipBytes_ReadLE16(faceRecord + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET)};
 	planeNormal = (SlipView3DVec32){normal->x, normal->y, normal->z};
 	projected = SlipView3D_ProjectPointToPlane(*projectedPosition, planeOrigin, planeNormal);
 	scaled = SlipView3D_ScaleVector(normal->x, normal->y, normal->z, (int32_t)radius);
@@ -2333,7 +2498,6 @@ static bool SlipRacePlayer_SeparateFromTrack(SlipRacePlayerHostBindings *context
 	SlipView3DVec16 normal = {0, 0, 0};
 	SlipTrackSlotRecord *trackSlot;
 	uint32_t radius;
-	uint32_t attempts = 8u;
 
 	if (context == NULL ||
 	    !SlipObject_Position(context->objectTable, context->objectTableBytes, objectOffset, &objectPosition)) {
@@ -2343,12 +2507,12 @@ static bool SlipRacePlayer_SeparateFromTrack(SlipRacePlayerHostBindings *context
 	                                    (int32_t)objectPosition.positionZ};
 	projectedPosition = initialPosition;
 	trackSlot = SlipRacePlayer_TrackSlot(context, objectOffset);
-	if (trackSlot == NULL || (trackSlot->flags & 1u) == 0) {
+	if (trackSlot == NULL || (trackSlot->flags & SLIP_TRACK_SLOT_BOX_COLLISION) == 0) {
 		return true;
 	}
-	radius = trackSlot->boundingRadius + 0x000001e8u;
+	radius = trackSlot->boundingRadius + SLIP_RACE_TRACK_SEPARATION_MARGIN;
 
-	do {
+	for (uint32_t attempts = SLIP_RACE_TRACK_SEPARATION_MAXIMUM_ATTEMPTS; attempts != 0; --attempts) {
 		if (!SlipTrackWorld_PositiveRecordSearch(context->trdBase, context->trackDataSize, context->trackDataOffset,
 		                                         context->componentBase, context->componentBaseBytes,
 		                                         context->componentBaseOffset, context->trackTable,
@@ -2364,13 +2528,14 @@ static bool SlipRacePlayer_SeparateFromTrack(SlipRacePlayerHostBindings *context
 			const uint32_t recordOffset = search.recordAddress - context->trackDataOffset;
 			const uint8_t *trackRecord;
 
-			if ((size_t)recordOffset + 0x1eu > context->trackDataSize) {
+			if ((size_t)recordOffset + SLIP_TRD_SECTION_ORIGIN_END > context->trackDataSize) {
 				return true;
 			}
 			trackRecord = context->trdBase + recordOffset;
-			recordOrigin = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(trackRecord + 0x12u),
-			                                 (int32_t)SlipBytes_ReadLE32(trackRecord + 0x16u),
-			                                 (int32_t)SlipBytes_ReadLE32(trackRecord + 0x1au)};
+			recordOrigin =
+			    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET),
+			                      (int32_t)SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET),
+			                      (int32_t)SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)};
 		}
 		if (!SlipRacePlayer_ProjectOutFromFace(context, search.faceAddress, search.recordAddress, radius,
 		                                       &projectedPosition, &normal) ||
@@ -2413,7 +2578,7 @@ static bool SlipRacePlayer_SeparateFromTrack(SlipRacePlayerHostBindings *context
 		} else if ((uint16_t)collision.trackHitMask == 0) {
 			return false;
 		}
-	} while (--attempts != 0);
+	}
 
 	(void)SlipObject_SetPosition(context->objectTable, context->objectTableBytes, objectOffset,
 	                             (uint32_t)initialPosition.x, (uint32_t)initialPosition.y, (uint32_t)initialPosition.z,
@@ -2448,8 +2613,8 @@ static bool SlipRacePlayer_SeparateFromTrack(SlipRacePlayerHostBindings *context
 }
 
 static void SlipRacePlayer_ClampRecoverySpeed(SlipTrackSlotRecord *trackSlot) {
-	if (trackSlot->recoverySpeed < 0x0001174c) {
-		trackSlot->recoverySpeed = 0x0001174c;
+	if (trackSlot->recoverySpeed < SLIP_RACE_RECOVERY_MINIMUM_SPEED) {
+		trackSlot->recoverySpeed = SLIP_RACE_RECOVERY_MINIMUM_SPEED;
 	}
 }
 
@@ -2473,13 +2638,15 @@ static uint32_t SlipRacePlayer_CommonEventInternal(SlipRacePlayerHostBindings *c
 		direction = SlipObject_Direction(context->objectTable, objectOffset);
 		SlipView3D_DotProductQ14(direction.directionXQ14, direction.directionYQ14, direction.directionZQ14,
 		                         collisionNormalX, collisionNormalY, collisionNormalZ, &dot);
-		if ((int16_t)(uint16_t)dot.dotProductQ14 > 0x0100) {
+		if ((int16_t)(uint16_t)dot.dotProductQ14 > SLIP_RACE_RECOVERY_NORMAL_ALIGNMENT_LIMIT_Q14) {
 			const uint32_t currentSpeed = (uint32_t)SlipObject_Speed(context->objectTable, objectOffset);
 
-			SlipObject_SetSpeed(context->objectTable, objectOffset, (uint32_t)((int32_t)currentSpeed >> 1));
+			SlipObject_SetSpeed(context->objectTable, objectOffset,
+			                    (uint32_t)((int32_t)currentSpeed >> SLIP_RACE_RECOVERY_COLLISION_SPEED_SHIFT));
 			collisionVector = SlipRacePlayer_CollisionVector(
 
-			    context, (uint16_t)dot.dotProductQ14, (uint16_t)dot.xySumHigh, (uint16_t)dot.inputZ, 0x1000u);
+			    context, (uint16_t)dot.dotProductQ14, (uint16_t)dot.xySumHigh, (uint16_t)dot.inputZ,
+			    SLIP_RACE_RECOVERY_COLLISION_DEFLECTION_Q14);
 			SlipObject_SetDirectionQ14(context->objectTable, objectOffset, (uint16_t)collisionVector.x,
 			                           (uint16_t)collisionVector.y, (uint16_t)collisionVector.z);
 			return 0;
@@ -2508,7 +2675,7 @@ static uint32_t SlipRacePlayer_CommonEventInternal(SlipRacePlayerHostBindings *c
 			}
 			SlipObject_SetDirectionQ14(context->objectTable, objectOffset, (uint16_t)normalized.unitXQ14,
 			                           (uint16_t)normalized.unitYQ14, (uint16_t)normalized.unitZQ14);
-			trackSlot->recoveryFlags &= 0xfffeu;
+			trackSlot->recoveryFlags &= SLIP_RACE_RECOVERY_CLEAR_FORWARD_STEERING_MASK;
 			SlipRacePlayer_ClampRecoverySpeed(trackSlot);
 		}
 		return 0;
@@ -2547,7 +2714,7 @@ static uint32_t SlipRacePlayer_CommonEventInternal(SlipRacePlayerHostBindings *c
 		privateState = SlipRacePlayer_PrivateState(objectOffset);
 		SlipRacePlayer_ClampRecoverySpeed(trackSlot);
 		flags = trackSlot->recoveryFlags;
-		if ((flags & 1u) != 0) {
+		if ((flags & SLIP_RACE_RECOVERY_STEER_TO_FORWARD_POINT) != 0) {
 			SlipView3DVec32 forward;
 			SlipObjectDirection direction;
 			SlipView3DRotateVectorTowards steeringRotation;
@@ -2564,7 +2731,7 @@ static uint32_t SlipRacePlayer_CommonEventInternal(SlipRacePlayerHostBindings *c
 			    context->maths, (int16_t)direction.directionXQ14, (int16_t)direction.directionYQ14,
 			    (int16_t)direction.directionZQ14, (int16_t)(uint16_t)normalized.unitXQ14,
 			    (int16_t)(uint16_t)normalized.unitYQ14, (int16_t)(uint16_t)normalized.unitZQ14,
-			    SlipFrameTimer_Step() << 1);
+			    SlipFrameTimer_Step() << SLIP_RACE_RECOVERY_DIRECTION_RATE_SHIFT);
 			SlipObject_SetDirectionQ14(context->objectTable, objectOffset, (uint16_t)steeringRotation.vector.x,
 			                           (uint16_t)steeringRotation.vector.y, (uint16_t)steeringRotation.vector.z);
 		} else {
@@ -2580,15 +2747,15 @@ static uint32_t SlipRacePlayer_CommonEventInternal(SlipRacePlayerHostBindings *c
 		}
 
 		flags = trackSlot->recoveryFlags;
-		if ((flags & 2u) == 0) {
+		if ((flags & SLIP_RACE_RECOVERY_LEVELING_TIMER_EXPIRED) == 0) {
 			const uint64_t product = (uint64_t)trackSlot->recoveryTurnRate * (uint64_t)SlipFrameTimer_Step();
-			uint32_t angle = (uint32_t)(product >> 14);
+			uint32_t angle = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS);
 			int32_t pitch;
 			int32_t roll;
 			SlipFrameTimerValues timer;
 
-			if ((int32_t)angle >= 0x00010000) {
-				angle = 0x0000ffffu;
+			if ((int32_t)angle >= SLIP_RACE_RECOVERY_ANGLE_LIMIT) {
+				angle = UINT16_MAX;
 			}
 			SlipRaceCollision_SaveObjectTransform(objectOffset);
 			if (SlipObject_MatrixCopy(context->objectTable, context->objectTableBytes, objectOffset,
@@ -2604,12 +2771,12 @@ static uint32_t SlipRacePlayer_CommonEventInternal(SlipRacePlayerHostBindings *c
 
 			SlipRaceCollision_SaveObjectTransform(objectOffset);
 			pitch = (int32_t)angle;
-			if ((trackSlot->recoveryPitchSeed & 0x8000u) != 0) {
+			if ((trackSlot->recoveryPitchSeed & SLIP_RACE_RECOVERY_SEED_NEGATIVE_FLAG) != 0) {
 				pitch = -pitch;
 			}
-			pitch = (int32_t)((uint32_t)pitch << 1);
+			pitch = (int32_t)((uint32_t)pitch << SLIP_RACE_RECOVERY_PITCH_GAIN_SHIFT);
 			roll = (int32_t)angle;
-			if ((trackSlot->recoveryRollSeed & 0x8000u) != 0) {
+			if ((trackSlot->recoveryRollSeed & SLIP_RACE_RECOVERY_SEED_NEGATIVE_FLAG) != 0) {
 				roll = -roll;
 			}
 			(void)SlipObject_Rotate(context->objectTable, context->objectTableBytes, objectOffset, (int16_t)pitch, 0, 0,
@@ -2639,7 +2806,7 @@ static uint32_t SlipRacePlayer_CommonEventInternal(SlipRacePlayerHostBindings *c
 
 				trackSlot->recoveryTimer = (uint16_t)(oldTimer - delta);
 				if (oldTimer < delta) {
-					trackSlot->recoveryFlags |= 2u;
+					trackSlot->recoveryFlags |= SLIP_RACE_RECOVERY_LEVELING_TIMER_EXPIRED;
 				}
 			}
 			return 0;
@@ -2685,26 +2852,26 @@ static uint32_t SlipRacePlayer_CommonEventInternal(SlipRacePlayerHostBindings *c
 
 			SlipRaceCollision_SaveObjectTransform(objectOffset);
 			if (rate == 0)
-				rate = 0x00010000u;
+				rate = SLIP_RACE_RECOVERY_DEFAULT_TURN_RATE;
 			product = (uint64_t)rate * (uint64_t)SlipFrameTimer_Step();
-			step = (uint32_t)(product >> 14);
+			step = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS);
 			if (!SlipView3D_BuildMatrixFromVector(&targetMatrix, trackSlot->recoveryDirectionX,
 			                                      trackSlot->recoveryDirectionY, trackSlot->recoveryDirectionZ)) {
 				return 0;
 			}
 			targetRoll = SlipView3D_RollFromMatrix(context->maths, &targetMatrix);
 			targetPitch = SlipView3D_PitchFromMatrix(context->maths, &targetMatrix);
-			if (targetPitch > 0x3000) {
-				targetPitch = 0x3000;
-			} else if (targetPitch < (int16_t)0xd000u) {
-				targetPitch = (int16_t)0xd000u;
+			if (targetPitch > SLIP_RACE_RECOVERY_PITCH_LIMIT) {
+				targetPitch = SLIP_RACE_RECOVERY_PITCH_LIMIT;
+			} else if (targetPitch < -SLIP_RACE_RECOVERY_PITCH_LIMIT) {
+				targetPitch = -SLIP_RACE_RECOVERY_PITCH_LIMIT;
 			}
 			rollStep = (int32_t)step;
 			pitchStep = (int32_t)step;
-			if ((trackSlot->recoveryRollSeed & 0x8000u) != 0) {
+			if ((trackSlot->recoveryRollSeed & SLIP_RACE_RECOVERY_SEED_NEGATIVE_FLAG) != 0) {
 				rollStep = -rollStep;
 			}
-			if ((trackSlot->recoveryPitchSeed & 0x8000u) != 0) {
+			if ((trackSlot->recoveryPitchSeed & SLIP_RACE_RECOVERY_SEED_NEGATIVE_FLAG) != 0) {
 				pitchStep = -pitchStep;
 			}
 			if (!SlipObject_MatrixCopy(context->objectTable, context->objectTableBytes, objectOffset,
@@ -2758,13 +2925,13 @@ static void SlipRacePlayer_InitializeImpactRecovery(SlipRacePlayerHostBindings *
 	if (trackSlot == NULL)
 		return;
 	clampedSpeed = initialSpeed;
-	if ((int32_t)clampedSpeed < 0x0001174c)
-		clampedSpeed = 0x0001174cu;
+	if ((int32_t)clampedSpeed < SLIP_RACE_RECOVERY_MINIMUM_SPEED)
+		clampedSpeed = SLIP_RACE_RECOVERY_MINIMUM_SPEED;
 	SlipObject_SetSpeed(context->objectTable, objectOffset, clampedSpeed);
 	trackSlot->recoverySpeed = (int32_t)initialSpeed;
 	trackSlot->recoveryTimer = baseDuration;
 	trackSlot->recoveryTurnRate = turnRate;
-	trackSlot->recoveryFlags = 1u;
+	trackSlot->recoveryFlags = SLIP_RACE_RECOVERY_STEER_TO_FORWARD_POINT;
 	if (!SlipTrackWorld_UpdateSlotRecord((uint8_t *)trackSlot, context->objectTable, context->objectTableBytes,
 	                                     context->trdBase, context->trackDataSize, context->trackDataOffset,
 	                                     context->componentBase, context->componentBaseBytes,
@@ -2798,9 +2965,9 @@ static void SlipRacePlayer_InitializeImpactRecovery(SlipRacePlayerHostBindings *
 	distance = SlipView3D_VectorLength((int32_t)((uint32_t)forward.x - objectPosition.positionX),
 	                                   (int32_t)((uint32_t)forward.y - objectPosition.positionY),
 	                                   (int32_t)((uint32_t)forward.z - objectPosition.positionZ));
-	duration = (uint16_t)((distance / 0x00077240u) * 0x000003e8u);
-	if ((int16_t)duration > 0x1388)
-		duration = 0x1388u;
+	duration = (uint16_t)((distance / SLIP_RACE_RECOVERY_TRAVEL_SPEED) * SLIP_RACE_MILLISECONDS_PER_SECOND);
+	if ((int16_t)duration > SLIP_RACE_RECOVERY_MAXIMUM_DURATION_MS)
+		duration = SLIP_RACE_RECOVERY_MAXIMUM_DURATION_MS;
 	trackSlot->recoveryTimer = (uint16_t)(trackSlot->recoveryTimer + duration);
 	(void)SlipRacePlayer_CommonEventInternal(context, SLIP_OBJECT_EVENT_UPDATE, objectOffset, 0, 0, 0, 0, 0);
 }
@@ -2827,7 +2994,7 @@ uint32_t SlipRacePlayer_RivalUpdate(uint32_t eventCode, uint32_t eventPayload, u
 	callbackContext.objectOffset = objectOffset;
 	if ((uint16_t)eventCode == SLIP_OBJECT_EVENT_UPDATE &&
 	    (objectOffset == SlipRacePlayer_playerOneObject || objectOffset == SlipRacePlayer_playerTwoObject)) {
-		SlipSoundEffects_AddEngine(callbackContext.soundEffects, 0,
+		SlipSoundEffects_AddEngine(callbackContext.soundEffects, SLIP_SOUND_TRACK_CHANGE_PLAY,
 		                           SlipObject_Speed(callbackContext.objectTable, objectOffset), (int32_t)eventValue,
 		                           objectOffset);
 	}
@@ -2863,9 +3030,9 @@ void SlipRacePlayer_StartWreck(uint16_t object, uint16_t duration, uint16_t debr
 	state->nextEvent = NULL;
 	state->debrisCount = debrisCount;
 	state->remainingLifetime = duration;
-	state->remainingBounces = (uint16_t)((SlipRandom_Next() & 1u) + 2u);
+	state->remainingBounces = (uint16_t)((SlipRandom_Next() & 1u) + SLIP_RACE_WRECK_MINIMUM_BOUNCES);
 	state->spinning = 0;
-	SlipRaceCollision_SetBodyFlags(object, 1);
+	SlipRaceCollision_SetBodyFlags(object, SLIP_COLLISION_BODY_TRACK_ENABLED);
 	SlipObjectEventCallbackWriteResult installed;
 	(void)SlipObject_SetEventCallback(SlipObject_table, (size_t)SlipObject_count * SLIP_OBJECT_DOS_STRIDE, object,
 	                                  SlipRacePlayer_FallingWreckEvent, &installed);
@@ -2884,9 +3051,10 @@ uint32_t SlipRacePlayer_FallingWreckEvent(uint32_t eventCode, uint32_t eventPayl
 	if ((uint16_t)eventCode == SLIP_OBJECT_EVENT_COLLISION_BOUNCE) {
 		const SlipRaceCollisionBounceEvent *const contact = &SlipRaceCollision_bounceEvent;
 		SlipView3DVec16 normal = {contact->normalX, contact->normalY, contact->normalZ};
-		if (normal.y < -256) {
-			SlipView3DVec32 direction = SlipRacePlayer_CollisionVector(&context, (uint16_t)normal.x, (uint16_t)normal.y,
-			                                                           (uint16_t)normal.z, 0x100);
+		if (normal.y < SLIP_RACE_WRECK_CONTACT_NORMAL_Y_LIMIT_Q14) {
+			SlipView3DVec32 direction =
+			    SlipRacePlayer_CollisionVector(&context, (uint16_t)normal.x, (uint16_t)normal.y, (uint16_t)normal.z,
+			                                   SLIP_RACE_WRECK_CONTACT_DEFLECTION_Q14);
 			SlipObject_SetDirectionQ14(context.objectTable, object, (uint16_t)direction.x, (uint16_t)direction.y,
 			                           (uint16_t)direction.z);
 			return 0;
@@ -2896,26 +3064,27 @@ uint32_t SlipRacePlayer_FallingWreckEvent(uint32_t eventCode, uint32_t eventPayl
 		if (state->remainingBounces != 0) {
 			SlipView3DVec16 reflected = SlipRaceCollision_ReflectDirection(object, normal);
 			SlipView3DNormalizeLength3D direction;
-			(void)SlipView3D_NormalizeLength3D((uint16_t)reflected.x, (uint16_t)(int16_t)(reflected.y >> 1),
-			                                   (uint16_t)reflected.z, &direction);
+			(void)SlipView3D_NormalizeLength3D(
+			    (uint16_t)reflected.x, (uint16_t)(int16_t)(reflected.y >> SLIP_RACE_WRECK_VERTICAL_BOUNCE_SHIFT),
+			    (uint16_t)reflected.z, &direction);
 			SlipObject_SetDirectionQ14(context.objectTable, object, (uint16_t)direction.unitXQ14,
 			                           (uint16_t)direction.unitYQ14, (uint16_t)direction.unitZQ14);
 			uint32_t speed = (uint32_t)SlipObject_Speed(context.objectTable, object);
-			speed = (uint32_t)(((uint64_t)0x3000 * speed) >> 14);
+			speed = (uint32_t)(((uint64_t)SLIP_RACE_WRECK_BOUNCE_SPEED_SCALE_Q14 * speed) >> SLIP_Q14_FRACTION_BITS);
 			SlipObject_SetSpeed(context.objectTable, object, speed);
 			return 0;
 		}
 		SlipObjectDrawCallbackWriteResult draw;
 		(void)SlipObject_SetSlotDrawCallback(context.objectTable, context.objectTableBytes, object, NULL, &draw);
 		SlipObjectSetCallback alternateDraw;
-		const uint32_t drawData = (eventCode & 0xffff0000u) | (uint16_t)normal.x;
+		const uint32_t drawData = (eventCode & SLIP_OBJECT_EVENT_UPPER_WORD_MASK) | (uint16_t)normal.x;
 		(void)SlipObject_SetDrawCallback(object, NULL, drawData, &alternateDraw);
 		(void)SlipObject_Stop(object, eventCode, eventPayload, eventValue, eventFlags, dispatchData, dispatchFrame);
 
 		state->nextEvent = NULL;
-		state->remainingLifetime = 2000;
+		state->remainingLifetime = SLIP_RACE_WRECK_STOPPED_LIFETIME_MS;
 		state->maximumSpeed = 0;
-		state->explosionRange = 0xb70;
+		state->explosionRange = SLIP_RACE_WRECK_EXPLOSION_RANGE;
 		SlipObjectEventCallbackWriteResult installed;
 		(void)SlipObject_SetEventCallback(context.objectTable, context.objectTableBytes, object,
 		                                  SlipRaceEffects_WreckEvent, &installed);
@@ -2924,18 +3093,18 @@ uint32_t SlipRacePlayer_FallingWreckEvent(uint32_t eventCode, uint32_t eventPayl
 	}
 	if ((uint16_t)eventCode == SLIP_OBJECT_EVENT_UPDATE) {
 		const uint32_t step = SlipFrameTimer_Step();
-		const uint32_t gravity = (uint32_t)(((uint64_t)0x7aa0 * step) >> 14);
+		const uint32_t gravity = (uint32_t)(((uint64_t)SLIP_RACE_WRECK_GRAVITY * step) >> SLIP_Q14_FRACTION_BITS);
 		SlipView3DVec32 velocity = SlipObject_Velocity(context.objectTable, object);
 		velocity.y = (int32_t)((uint32_t)velocity.y - gravity);
-		if (velocity.y < -57200)
-			velocity.y = -57200;
+		if (velocity.y < SLIP_RACE_WRECK_MINIMUM_VERTICAL_SPEED)
+			velocity.y = SLIP_RACE_WRECK_MINIMUM_VERTICAL_SPEED;
 		SlipObjectSetDirection directed;
 		(void)SlipObject_SetDirection(context.objectTable, context.objectTableBytes, object, velocity.x, velocity.y,
 		                              velocity.z, &directed);
 		if (state->spinning == 0) {
-			uint32_t angle = SlipFrameTimer_Step() << 4;
-			if ((int32_t)angle > 65535)
-				angle = 65535;
+			uint32_t angle = SlipFrameTimer_Step() << SLIP_RACE_WRECK_ALIGNMENT_RATE_SHIFT;
+			if ((int32_t)angle > UINT16_MAX)
+				angle = UINT16_MAX;
 			SlipRaceCollision_SaveObjectTransform(object);
 			SlipView3DMatrix matrix;
 			SlipObjectMatrixCopy copied;
@@ -2950,9 +3119,9 @@ uint32_t SlipRacePlayer_FallingWreckEvent(uint32_t eventCode, uint32_t eventPayl
 				SlipRaceCollision_RestoreObjectTransform(object);
 		} else {
 			SlipRaceCollision_SaveObjectTransform(object);
-			uint32_t angle = SlipFrameTimer_Step() << 3;
-			if ((int32_t)angle > 65535)
-				angle = 65535;
+			uint32_t angle = SlipFrameTimer_Step() << SLIP_RACE_WRECK_ROTATION_RATE_SHIFT;
+			if ((int32_t)angle > UINT16_MAX)
+				angle = UINT16_MAX;
 			const int16_t rotation = (int16_t)(0u - angle);
 			SlipObjectRotate rotated;
 			(void)SlipObject_Rotate(context.objectTable, context.objectTableBytes, object, rotation, rotation, rotation,
@@ -2969,7 +3138,7 @@ uint32_t SlipRacePlayer_FallingWreckEvent(uint32_t eventCode, uint32_t eventPayl
 	}
 	if ((uint16_t)eventCode == SLIP_OBJECT_EVENT_HANDLE_ACTION)
 		return 0;
-	return eventCode | 0xffffu;
+	return eventCode | UINT16_MAX;
 }
 
 SlipRacePlayerDamage SlipRacePlayer_ApplyDamage(SlipRacePlayerHostBindings *context, uint32_t movementDamage,
@@ -2991,19 +3160,20 @@ SlipRacePlayerDamage SlipRacePlayer_ApplyDamage(SlipRacePlayerHostBindings *cont
 	}
 	privateState = SlipRacePlayer_PrivateState(objectOffset);
 	racerRecord = SlipRacePlayer_CurrentRacerFromState(context, privateState);
-	if ((racerRecord->racerType != 2u && SlipConfig_DamageEnabled() == 0) || privateState->damageCooldown != 0) {
+	if ((racerRecord->racerType != SLIP_RACER_COMPUTER && SlipConfig_DamageEnabled() == 0) ||
+	    privateState->damageCooldown != 0) {
 		totalMovementDamage = 0;
 		totalHandlingDamage = 0;
 	}
 	if ((totalMovementDamage | totalHandlingDamage) != 0) {
-		privateState->damageCooldown = 0x0bb8u;
+		privateState->damageCooldown = SLIP_RACE_DAMAGE_COOLDOWN_MS;
 		SlipRacePlayer_NotifyState(objectOffset, SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject,
 		                           context->transitionFrames, context->transitionDuration);
 	}
 
-	if ((int32_t)totalMovementDamage >= 0x90000) {
+	if ((int32_t)totalMovementDamage >= SLIP_RACE_DAMAGE_SMOKE_THRESHOLD_Q16) {
 		SlipArticSlotPosition smokePosition;
-		if (!SlipArticSlot_Position(0x6d61696eu, 0x736d6f6bu, objectOffset, context->objectTable,
+		if (!SlipArticSlot_Position(SLIP_ACTOR_PART_MAIN, SLIP_ACTOR_POINT_SMOKE, objectOffset, context->objectTable,
 		                            context->objectTableBytes, context->articSlotPool, context->articSlotPoolBytes,
 		                            context->articSlotPoolOffset, context->articData, context->articDataBytes,
 		                            context->articDataOffset, context->maths, &smokePosition) ||
@@ -3012,7 +3182,7 @@ SlipRacePlayerDamage SlipRacePlayer_ApplyDamage(SlipRacePlayerHostBindings *cont
 		SlipRaceEffects_EmitSmoke(objectOffset,
 		                          (SlipView3DVec32){(int32_t)smokePosition.positionX, (int32_t)smokePosition.positionY,
 		                                            (int32_t)smokePosition.positionZ},
-		                          4000, &SlipRaceEffects_damageSmoke);
+		                          SLIP_RACE_DAMAGE_SMOKE_DURATION_MS, &SlipRaceEffects_damageSmoke);
 	}
 
 	totalMovementDamage += racerRecord->movementDamageQ16;
@@ -3021,9 +3191,10 @@ SlipRacePlayerDamage SlipRacePlayer_ApplyDamage(SlipRacePlayerHostBindings *cont
 	totalHandlingDamage += racerRecord->handlingDamageQ16;
 	if ((int32_t)totalHandlingDamage < 0)
 		totalHandlingDamage = 0;
-	if ((int32_t)totalMovementDamage > 0x00640000) {
-		totalMovementDamage = 0x00640000u;
-		SlipRacePlayer_StartWreck(objectOffset, 5000, 15);
+	if ((int32_t)totalMovementDamage > SLIP_RACE_MAXIMUM_DAMAGE_Q16) {
+		totalMovementDamage = SLIP_RACE_MAXIMUM_DAMAGE_Q16;
+		SlipRacePlayer_StartWreck(objectOffset, SLIP_RACE_DAMAGE_WRECK_DURATION_MS,
+		                          SLIP_RACE_DAMAGE_WRECK_DEBRIS_COUNT);
 		SlipRaceCamera_DestroyRacer(context->cameraState, objectOffset, SlipRacePlayer_playerOneObject,
 		                            SlipRacePlayer_playerTwoObject, SlipRacePlayer_thirdObject);
 		const uint32_t randomChoice = SlipRandom_Next();
@@ -3038,9 +3209,10 @@ SlipRacePlayerDamage SlipRacePlayer_ApplyDamage(SlipRacePlayerHostBindings *cont
 		}
 		return (SlipRacePlayerDamage){0, 0};
 	}
-	if ((int32_t)totalHandlingDamage > 0x00640000) {
-		totalHandlingDamage = 0x00640000u;
-		SlipRacePlayer_StartWreck(objectOffset, 5000, 15);
+	if ((int32_t)totalHandlingDamage > SLIP_RACE_MAXIMUM_DAMAGE_Q16) {
+		totalHandlingDamage = SLIP_RACE_MAXIMUM_DAMAGE_Q16;
+		SlipRacePlayer_StartWreck(objectOffset, SLIP_RACE_DAMAGE_WRECK_DURATION_MS,
+		                          SLIP_RACE_DAMAGE_WRECK_DEBRIS_COUNT);
 		SlipRaceCamera_DestroyRacer(context->cameraState, objectOffset, SlipRacePlayer_playerOneObject,
 		                            SlipRacePlayer_playerTwoObject, SlipRacePlayer_thirdObject);
 		const uint32_t randomChoice = SlipRandom_Next();
@@ -3108,7 +3280,7 @@ SlipView3DVec32 SlipRacePlayer_CollisionVector(SlipRacePlayerHostBindings *conte
 }
 
 void SlipRacePlayer_BuildWeaponLabel(const SlipRacePlayerWeaponRecord *records, uint32_t weaponIndex,
-                                     uint32_t ammunition, char label[24]) {
+                                     uint32_t ammunition, char label[SLIP_RACE_WEAPON_LABEL_BYTES]) {
 	strcpy(label, records[weaponIndex].displayName);
 	if ((int32_t)ammunition >= 0) {
 		char suffix[] = "[?]";
@@ -3119,7 +3291,7 @@ void SlipRacePlayer_BuildWeaponLabel(const SlipRacePlayerWeaponRecord *records, 
 
 uint32_t SlipRacePlayer_WeaponRechargeRate(uint32_t weaponIndex) {
 
-	static const uint32_t rechargeByBiasedWeaponIndex[13] = {
+	static const uint32_t rechargeByBiasedWeaponIndex[SLIP_RACE_BIASED_WEAPON_COUNT] = {
 	    0xfffc9997u, 0x800u,  0x4000u, 0x4000u, 0x4000u, 0x4000u, 0x4000u,
 	    0x4000u,     0x4000u, 0x4000u, 0x4000u, 0x4000u, 0x4000u,
 	};
@@ -3147,8 +3319,8 @@ SlipRacePlayerRecordValues SlipRacePlayer_WeaponImpactDamageValues(const SlipRac
                                                                    uint32_t weaponIndex) {
 	uint32_t shift = 1u;
 
-	if (weaponIndex == 0) {
-		if (SlipConfig_CurrentMode() == 2) {
+	if (weaponIndex == SLIP_RACE_WEAPON_BLASTER) {
+		if (SlipConfig_CurrentMode() == SLIP_CONFIG_DIFFICULTY_MAXIMUM) {
 			++shift;
 		}
 	}
@@ -3168,9 +3340,9 @@ void SlipRacePlayer_NotifyState(uint16_t objectOffset, uint16_t playerOneObject,
 void SlipRacePlayer_NotifyTimer(uint16_t objectOffset, uint16_t playerOneObject, uint16_t playerTwoObject,
                                 uint16_t *primaryViewShake, uint16_t *secondaryViewShake) {
 	if (objectOffset == playerOneObject) {
-		*primaryViewShake = 0x012cu;
+		*primaryViewShake = SLIP_RACE_VIEW_SHAKE_DURATION_MS;
 	} else if (objectOffset == playerTwoObject) {
-		*secondaryViewShake = 0x012cu;
+		*secondaryViewShake = SLIP_RACE_VIEW_SHAKE_DURATION_MS;
 	}
 }
 
@@ -3196,7 +3368,7 @@ uint32_t SlipRacePlayer_Speed(uint16_t objectOffset) {
 
 void SlipConfig_CycleMode(void) {
 	SlipConfig_fallbackMode = (int32_t)((uint32_t)SlipConfig_fallbackMode + 1u);
-	if (SlipConfig_fallbackMode > 2)
+	if (SlipConfig_fallbackMode > SLIP_CONFIG_DIFFICULTY_MAXIMUM)
 		SlipConfig_fallbackMode = 0;
 }
 
@@ -3218,7 +3390,7 @@ SlipRacePowerupScales SlipRacePowerup_GetScales(uint32_t powerupIndex) {
 	const SlipRacePowerupRecord *powerupRecord;
 
 	if (powerupIndex == UINT32_MAX) {
-		return (SlipRacePowerupScales){0x4000, 0x4000};
+		return (SlipRacePowerupScales){SLIP_Q14_ONE, SLIP_Q14_ONE};
 	}
 	powerupRecord = &SlipRacePowerup_records[powerupIndex];
 	return (SlipRacePowerupScales){powerupRecord->speedScaleQ14, powerupRecord->chargeDrainScaleQ14};
@@ -3231,24 +3403,27 @@ void SlipRacePlayer_SetController(uint16_t objectOffset, uint16_t controller) {
 void SlipRacePlayer_AdvanceState(SlipRacePlayerPrivateRecord *privateState, const SlipRaceRacerState *racerState) {
 	uint32_t selection = privateState->weaponSelection;
 
-	if (selection == 0) {
+	if (selection == SLIP_RACE_WEAPON_SLOT_BLASTER) {
 		if ((int32_t)racerState->primaryWeaponIndex >= 0) {
-			selection = 1u;
+			selection = SLIP_RACE_WEAPON_SLOT_PRIMARY;
 		} else if ((int32_t)racerState->secondaryWeaponIndex >= 0) {
-			selection = 2u;
+			selection = SLIP_RACE_WEAPON_SLOT_SECONDARY;
 		} else {
-			selection = racerState->powerupRecord == UINT32_MAX ? 0u : 3u;
+			selection =
+			    racerState->powerupRecord == UINT32_MAX ? SLIP_RACE_WEAPON_SLOT_BLASTER : SLIP_RACE_WEAPON_SLOT_POWERUP;
 		}
-	} else if (selection == 1u) {
+	} else if (selection == SLIP_RACE_WEAPON_SLOT_PRIMARY) {
 		if ((int32_t)racerState->secondaryWeaponIndex < 0) {
-			selection = racerState->powerupRecord == UINT32_MAX ? 0u : 3u;
+			selection =
+			    racerState->powerupRecord == UINT32_MAX ? SLIP_RACE_WEAPON_SLOT_BLASTER : SLIP_RACE_WEAPON_SLOT_POWERUP;
 		} else {
-			selection = 2u;
+			selection = SLIP_RACE_WEAPON_SLOT_SECONDARY;
 		}
-	} else if (selection == 2u) {
-		selection = racerState->powerupRecord == UINT32_MAX ? 0u : 3u;
+	} else if (selection == SLIP_RACE_WEAPON_SLOT_SECONDARY) {
+		selection =
+		    racerState->powerupRecord == UINT32_MAX ? SLIP_RACE_WEAPON_SLOT_BLASTER : SLIP_RACE_WEAPON_SLOT_POWERUP;
 	} else {
-		selection = 0;
+		selection = SLIP_RACE_WEAPON_SLOT_BLASTER;
 	}
 	privateState->weaponSelection = (uint16_t)selection;
 }
@@ -3287,8 +3462,8 @@ void SlipRacePlayer_InitializeTrackRecord(SlipTrackDoorRecord *trackStateRecord,
 uint8_t *SlipRacePlayer_SelectLinkedTrackRecord(uint8_t *trackBase, uint8_t *trackRecord, uint32_t trackBranch) {
 	uint32_t linkedOffset;
 
-	if (trackBranch != 0 && SlipBytes_ReadLE16(trackRecord + 0x04u) != 0) {
-		linkedOffset = SlipBytes_ReadLE16(trackRecord + 0x04u);
+	if (trackBranch != 0 && SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET) != 0) {
+		linkedOffset = SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
 	} else {
 		linkedOffset = SlipBytes_ReadLE16(trackRecord);
 	}
@@ -3355,38 +3530,38 @@ bool SlipRacePlayer_FindRoadRecord(uint16_t objectOffset, const SlipObject *obje
 		return false;
 	}
 	recordOffset = recordAddress - trackDataBaseAddress;
-	if ((size_t)recordOffset + 0x20u > trackDataSize) {
+	if ((size_t)recordOffset + SLIP_TRD_START_RECORD_BYTES > trackDataSize) {
 		return false;
 	}
 	roadRecord = (uint8_t *)trdBase + recordOffset;
-	linkedOffset = SlipBytes_ReadLE16(roadRecord + 0x1eu);
-	if ((size_t)linkedOffset + 0x18u > trackDataSize) {
+	linkedOffset = SlipBytes_ReadLE16(roadRecord + SLIP_TRD_START_FINISH_LINK_OFFSET);
+	if ((size_t)linkedOffset + SLIP_TRD_POSITION_RECORD_BYTES > trackDataSize) {
 		return false;
 	}
 	roadRecord = (uint8_t *)trdBase + linkedOffset;
 	recordAddress = trackDataBaseAddress + linkedOffset;
 	if (SlipRacePlayer_trackBranch != 0) {
-		const uint32_t childOffset = SlipBytes_ReadLE16(roadRecord + 0x02u);
+		const uint32_t childOffset = SlipBytes_ReadLE16(roadRecord + SLIP_TRD_WAYPOINT_BRANCH_LINK_OFFSET);
 
-		if ((size_t)childOffset + 0x06u > trackDataSize) {
+		if ((size_t)childOffset + SLIP_TRACK_LINKED_HEADER_BYTES > trackDataSize) {
 			return false;
 		}
-		linkedOffset = SlipBytes_ReadLE16(trdBase + childOffset + 0x04u);
+		linkedOffset = SlipBytes_ReadLE16(trdBase + childOffset + SLIP_TRD_ROUTE_SECOND_LINK_OFFSET);
 		if (linkedOffset != 0) {
-			if ((size_t)linkedOffset + 0x18u > trackDataSize) {
+			if ((size_t)linkedOffset + SLIP_TRD_POSITION_RECORD_BYTES > trackDataSize) {
 				return false;
 			}
 			roadRecord = (uint8_t *)trdBase + linkedOffset;
 			recordAddress = trackDataBaseAddress + linkedOffset;
 		}
 	}
-	roadDeltaX = SlipBytes_ReadLE32(roadRecord + 0x0cu) - objectPosition.positionX;
-	roadDeltaY = SlipBytes_ReadLE32(roadRecord + 0x10u) - objectPosition.positionY;
-	roadDeltaZ = SlipBytes_ReadLE32(roadRecord + 0x14u) - objectPosition.positionZ;
+	roadDeltaX = SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_X_OFFSET) - objectPosition.positionX;
+	roadDeltaY = SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Y_OFFSET) - objectPosition.positionY;
+	roadDeltaZ = SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Z_OFFSET) - objectPosition.positionZ;
 	SlipDraw3D_ApproxAbsVectorLength(roadDeltaX, roadDeltaY, roadDeltaZ, &approximate);
-	if ((int32_t)approximate.approximateLength < 0x800) {
+	if ((int32_t)approximate.approximateLength < SLIP_RACE_TRACK_POINT_SKIP_DISTANCE) {
 		linkedOffset = SlipBytes_ReadLE16(roadRecord);
-		if ((size_t)linkedOffset + 0x18u > trackDataSize) {
+		if ((size_t)linkedOffset + SLIP_TRD_POSITION_RECORD_BYTES > trackDataSize) {
 			return false;
 		}
 		roadRecord = (uint8_t *)trdBase + linkedOffset;
@@ -3423,17 +3598,21 @@ bool SlipRacePlayer_RoadCoordinates(uint16_t objectOffset, const SlipObject *obj
 	    road.notFound) {
 		return false;
 	}
-	SlipRacePlayer_roadPosition = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(road.record + 0x0cu),
-	                                                (int32_t)SlipBytes_ReadLE32(road.record + 0x10u),
-	                                                (int32_t)SlipBytes_ReadLE32(road.record + 0x14u)};
-	linkedOffset = SlipBytes_ReadLE16(road.record + 0x02u);
-	if ((size_t)linkedOffset + 0x18u > trackDataSize) {
+	SlipRacePlayer_roadPosition =
+	    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(road.record + SLIP_TRD_POSITION_X_OFFSET),
+	                      (int32_t)SlipBytes_ReadLE32(road.record + SLIP_TRD_POSITION_Y_OFFSET),
+	                      (int32_t)SlipBytes_ReadLE32(road.record + SLIP_TRD_POSITION_Z_OFFSET)};
+	linkedOffset = SlipBytes_ReadLE16(road.record + SLIP_TRD_WAYPOINT_PREVIOUS_LINK_OFFSET);
+	if ((size_t)linkedOffset + SLIP_TRD_POSITION_RECORD_BYTES > trackDataSize) {
 		return false;
 	}
 	linkedRecord = trdBase + linkedOffset;
-	segmentDeltaX = (uint32_t)SlipRacePlayer_roadPosition.x - SlipBytes_ReadLE32(linkedRecord + 0x0cu);
-	segmentDeltaY = (uint32_t)SlipRacePlayer_roadPosition.y - SlipBytes_ReadLE32(linkedRecord + 0x10u);
-	segmentDeltaZ = (uint32_t)SlipRacePlayer_roadPosition.z - SlipBytes_ReadLE32(linkedRecord + 0x14u);
+	segmentDeltaX =
+	    (uint32_t)SlipRacePlayer_roadPosition.x - SlipBytes_ReadLE32(linkedRecord + SLIP_TRD_POSITION_X_OFFSET);
+	segmentDeltaY =
+	    (uint32_t)SlipRacePlayer_roadPosition.y - SlipBytes_ReadLE32(linkedRecord + SLIP_TRD_POSITION_Y_OFFSET);
+	segmentDeltaZ =
+	    (uint32_t)SlipRacePlayer_roadPosition.z - SlipBytes_ReadLE32(linkedRecord + SLIP_TRD_POSITION_Z_OFFSET);
 	SlipView3D_NormalizeVector3D(segmentDeltaX, segmentDeltaY, segmentDeltaZ, &normalized);
 	normalizedX = (int16_t)(uint16_t)normalized.unitXQ14;
 	normalizedY = (int16_t)(uint16_t)normalized.unitYQ14;
@@ -3446,9 +3625,9 @@ bool SlipRacePlayer_RoadCoordinates(uint16_t objectOffset, const SlipObject *obj
 	SlipRacePlayer_roadMatrix.m[2] = (int16_t)(uint16_t)(0u - (uint16_t)normalizedX);
 	SlipView3D_CrossProduct((uint16_t)normalizedX, (uint16_t)normalizedY, (uint16_t)normalizedZ, (uint16_t)normalizedZ,
 	                        0, (uint16_t)SlipRacePlayer_roadMatrix.m[2], &cross);
-	SlipRacePlayer_roadMatrix.m[3] = (int16_t)((int32_t)cross.crossX >> 14);
-	SlipRacePlayer_roadMatrix.m[4] = (int16_t)((int32_t)cross.crossY >> 14);
-	SlipRacePlayer_roadMatrix.m[5] = (int16_t)((int32_t)cross.crossZ >> 14);
+	SlipRacePlayer_roadMatrix.m[3] = (int16_t)((int32_t)cross.crossX >> SLIP_Q14_FRACTION_BITS);
+	SlipRacePlayer_roadMatrix.m[4] = (int16_t)((int32_t)cross.crossY >> SLIP_Q14_FRACTION_BITS);
+	SlipRacePlayer_roadMatrix.m[5] = (int16_t)((int32_t)cross.crossZ >> SLIP_Q14_FRACTION_BITS);
 	if (!SlipObject_Position(objectTable, objectTableBytes, objectOffset, &objectPosition)) {
 		return false;
 	}
@@ -3496,7 +3675,7 @@ bool SlipRacePlayer_BuildAvoidanceVector(uint16_t currentObject, uint16_t otherO
 	                             articSlotPoolAddress, &targetExtent)) {
 		return false;
 	}
-	extentMargin = (uint32_t)targetExtent + 0x1310u;
+	extentMargin = (uint32_t)targetExtent + SLIP_RACE_AI_AVOIDANCE_EXTENT_MARGIN;
 	avoidanceScale = extentMargin;
 	extentMargin -= roadOffsetLength;
 	remainingClearance = (uint32_t)roadDistance - extentMargin;
@@ -3508,16 +3687,18 @@ bool SlipRacePlayer_BuildAvoidanceVector(uint16_t currentObject, uint16_t otherO
 	                             articSlotPoolAddress, &currentExtent)) {
 		return false;
 	}
-	extentMargin = (uint32_t)currentExtent + 0x1310u;
+	extentMargin = (uint32_t)currentExtent + SLIP_RACE_AI_AVOIDANCE_EXTENT_MARGIN;
 	if ((int32_t)extentMargin > (int32_t)remainingClearance) {
 		*result = (SlipRacePlayerAvoidanceVector){0, 0, true};
 		return true;
 	}
-	remainingClearance = (uint32_t)((int32_t)remainingClearance >> 1);
+	remainingClearance = (uint32_t)((int32_t)remainingClearance >> SLIP_RACE_AVOIDANCE_CLEARANCE_SHIFT);
 	avoidanceScale -= roadOffsetLength;
 	avoidanceScale += remainingClearance;
-	negatedRoadX = ((uint32_t)SlipRacePlayer_roadX & 0xffff0000u) | (uint16_t)(0u - (uint16_t)SlipRacePlayer_roadX);
-	negatedRoadY = ((uint32_t)SlipRacePlayer_roadY & 0xffff0000u) | (uint16_t)(0u - (uint16_t)SlipRacePlayer_roadY);
+	negatedRoadX = ((uint32_t)SlipRacePlayer_roadX & SLIP_RACE_AVOIDANCE_UPPER_WORD_MASK) |
+	               (uint16_t)(0u - (uint16_t)SlipRacePlayer_roadX);
+	negatedRoadY = ((uint32_t)SlipRacePlayer_roadY & SLIP_RACE_AVOIDANCE_UPPER_WORD_MASK) |
+	               (uint16_t)(0u - (uint16_t)SlipRacePlayer_roadY);
 	scaled = SlipView3D_ScaleNormalizedVector2D(negatedRoadX, negatedRoadY, (int32_t)avoidanceScale);
 	*result = (SlipRacePlayerAvoidanceVector){scaled.scaledNormalizedX, scaled.scaledNormalizedY, false};
 	return true;
@@ -3559,26 +3740,57 @@ bool SlipRacePlayer_TrackDistance(uint32_t distanceLimit, uint16_t objectOffset,
 		uint32_t segmentDeltaY;
 		uint32_t segmentDeltaZ;
 
-		segmentDeltaX = SlipBytes_ReadLE32(roadRecord + 0x0cu) - (uint32_t)SlipRacePlayer_distancePosition.x;
-		segmentDeltaY = SlipBytes_ReadLE32(roadRecord + 0x10u) - (uint32_t)SlipRacePlayer_distancePosition.y;
-		segmentDeltaZ = SlipBytes_ReadLE32(roadRecord + 0x14u) - (uint32_t)SlipRacePlayer_distancePosition.z;
+		segmentDeltaX =
+		    SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_X_OFFSET) - (uint32_t)SlipRacePlayer_distancePosition.x;
+		segmentDeltaY =
+		    SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Y_OFFSET) - (uint32_t)SlipRacePlayer_distancePosition.y;
+		segmentDeltaZ =
+		    SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Z_OFFSET) - (uint32_t)SlipRacePlayer_distancePosition.z;
 		SlipDraw3D_ApproxAbsVectorLength(segmentDeltaX, segmentDeltaY, segmentDeltaZ, &approximate);
 		SlipRacePlayer_distanceAccum += approximate.approximateLength;
-		SlipRacePlayer_distancePosition = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(roadRecord + 0x0cu),
-		                                                    (int32_t)SlipBytes_ReadLE32(roadRecord + 0x10u),
-		                                                    (int32_t)SlipBytes_ReadLE32(roadRecord + 0x14u)};
-		SlipRacePlayer_curveAccum += 0x8000u - SlipBytes_ReadLE16(roadRecord + 0x08u);
+		SlipRacePlayer_distancePosition =
+		    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_X_OFFSET),
+		                      (int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Y_OFFSET),
+		                      (int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Z_OFFSET)};
+		SlipRacePlayer_curveAccum +=
+		    SLIP_ANGLE_HALF_TURN - SlipBytes_ReadLE16(roadRecord + SLIP_TRD_WAYPOINT_CURVATURE_OFFSET);
 		if ((int32_t)SlipRacePlayer_distanceAccum >= (int32_t)SlipRacePlayer_distanceLimit) {
 			result->accumulatedCurve = SlipRacePlayer_curveAccum;
 			result->notFound = false;
 			return true;
 		}
 		roadRecord = SlipRacePlayer_SelectLinkedTrackRecord(trdBase, roadRecord, SlipRacePlayer_trackBranch);
-		if (roadRecord < trdBase || (size_t)(roadRecord - trdBase) + 0x18u > trackDataSize) {
+		if (roadRecord < trdBase || (size_t)(roadRecord - trdBase) + SLIP_TRD_POSITION_RECORD_BYTES > trackDataSize) {
 			return false;
 		}
 	}
 }
+
+enum {
+	SLIP_RACE_AI_ROAD_CLEARANCE_MARGIN = 2440,
+	SLIP_RACE_AI_AVOIDANCE_SCALE_FRACTION_BITS = 16,
+	SLIP_RACE_AI_SPEED_LOOK_AHEAD_NUMERATOR = 488,
+	SLIP_RACE_AI_SPEED_LOOK_AHEAD_DENOMINATOR = 715,
+	SLIP_RACE_AI_SPEED_LOOK_AHEAD_SHIFT = 2,
+	/* Road distance contributes 2 + 1/2, retaining signed rounding of the half. */
+	SLIP_RACE_AI_ROAD_LOOK_AHEAD_DOUBLE_SHIFT = 1,
+	SLIP_RACE_AI_ROAD_LOOK_AHEAD_HALF_SHIFT = 1,
+	SLIP_RACE_AI_BASE_LOOK_AHEAD_DISTANCE = 24400,
+	SLIP_RACE_AI_WAYPOINT_OFFSET_SHIFT = 4,
+	SLIP_RACE_AI_WAYPOINT_PRODUCT_SHIFT = SLIP_Q14_FRACTION_BITS - SLIP_RACE_AI_WAYPOINT_OFFSET_SHIFT,
+	SLIP_RACE_AI_INITIAL_MAXIMUM_SPEED = 715000,
+	SLIP_RACE_AI_CURVE_LOOK_AHEAD_DISTANCE = 390400,
+	SLIP_RACE_AI_UNCHANGED_CURVE_SCALE_Q14 = 3 * SLIP_Q14_ONE / 4,
+	SLIP_RACE_AI_FOLLOW_MAXIMUM_DISTANCE = 48800,
+	SLIP_RACE_AI_FOLLOW_CLOSE_DISTANCE = 24400,
+	SLIP_RACE_AI_FOLLOW_FAR_DISTANCE = 39040,
+	SLIP_RACE_AI_FOLLOW_CLOSE_SPEED_REDUCTION = 7150,
+	SLIP_RACE_AI_FOLLOW_FAR_SPEED_INCREASE = 5005,
+	SLIP_RACE_AI_POSITION_LIMIT_MINIMUM_RACE_DISTANCE = 976000,
+	SLIP_RACE_AI_POSITION_LIMIT_SPEED = 214500,
+	SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14 = 2048,
+	SLIP_RACE_AI_CONTROL_SCALE_SHIFT = 3
+};
 
 bool SlipRacePlayer_BuildAiControls(SlipRacePlayerHostBindings *context, uint16_t targetObject, uint32_t targetDistance,
                                     SlipRacePlayerControl *result) {
@@ -3625,24 +3837,31 @@ bool SlipRacePlayer_BuildAiControls(SlipRacePlayerHostBindings *context, uint16_
 		                             &objectExtent)) {
 			return false;
 		}
-		threshold = (uint32_t)SlipRacePlayer_roadDistance - (uint32_t)objectExtent - 0x988u;
+		threshold = (uint32_t)SlipRacePlayer_roadDistance - (uint32_t)objectExtent - SLIP_RACE_AI_ROAD_CLEARANCE_MARGIN;
 		squareSum = (uint64_t)((int64_t)(int32_t)avoidanceX * (int32_t)avoidanceX) +
 		            (uint64_t)((int64_t)(int32_t)avoidanceY * (int32_t)avoidanceY);
 		root = (uint16_t)SlipDraw3D_Root64((uint32_t)squareSum, (uint32_t)(squareSum >> 32));
 		if ((int32_t)root > (int32_t)threshold) {
-			scale = (uint32_t)(threshold << 16) / root;
-			avoidanceX = (uint32_t)SlipRacePlayer_MultiplySignedShifted((int32_t)avoidanceX, (int32_t)scale, 16);
-			avoidanceY = (uint32_t)SlipRacePlayer_MultiplySignedShifted((int32_t)avoidanceY, (int32_t)scale, 16);
+			scale = (uint32_t)(threshold << SLIP_RACE_AI_AVOIDANCE_SCALE_FRACTION_BITS) / root;
+			avoidanceX = (uint32_t)SlipRacePlayer_MultiplySignedShifted((int32_t)avoidanceX, (int32_t)scale,
+			                                                            SLIP_RACE_AI_AVOIDANCE_SCALE_FRACTION_BITS);
+			avoidanceY = (uint32_t)SlipRacePlayer_MultiplySignedShifted((int32_t)avoidanceY, (int32_t)scale,
+			                                                            SLIP_RACE_AI_AVOIDANCE_SCALE_FRACTION_BITS);
 			privateState->roadCoordinateX = (int32_t)avoidanceX;
 			privateState->roadCoordinateY = (int32_t)avoidanceY;
 		}
 	}
 	currentSpeed = (uint32_t)SlipObject_Speed(context->objectTable, context->objectOffset);
-	lookAheadOrSegmentXOrSpeedAdjustment = (uint32_t)(((uint64_t)0x1e8u * currentSpeed) / 0x2cbu);
-	lookAheadOrSegmentXOrSpeedAdjustment = (uint32_t)((int32_t)lookAheadOrSegmentXOrSpeedAdjustment >> 2);
-	lookAheadOrSegmentXOrSpeedAdjustment += (uint32_t)SlipRacePlayer_roadDistance << 1;
-	lookAheadOrSegmentXOrSpeedAdjustment += (uint32_t)((int32_t)SlipRacePlayer_roadDistance >> 1);
-	lookAheadOrSegmentXOrSpeedAdjustment += 0x5f50u;
+	lookAheadOrSegmentXOrSpeedAdjustment =
+	    (uint32_t)(((uint64_t)SLIP_RACE_AI_SPEED_LOOK_AHEAD_NUMERATOR * currentSpeed) /
+	               SLIP_RACE_AI_SPEED_LOOK_AHEAD_DENOMINATOR);
+	lookAheadOrSegmentXOrSpeedAdjustment =
+	    (uint32_t)((int32_t)lookAheadOrSegmentXOrSpeedAdjustment >> SLIP_RACE_AI_SPEED_LOOK_AHEAD_SHIFT);
+	lookAheadOrSegmentXOrSpeedAdjustment += (uint32_t)SlipRacePlayer_roadDistance
+	                                        << SLIP_RACE_AI_ROAD_LOOK_AHEAD_DOUBLE_SHIFT;
+	lookAheadOrSegmentXOrSpeedAdjustment +=
+	    (uint32_t)((int32_t)SlipRacePlayer_roadDistance >> SLIP_RACE_AI_ROAD_LOOK_AHEAD_HALF_SHIFT);
+	lookAheadOrSegmentXOrSpeedAdjustment += SLIP_RACE_AI_BASE_LOOK_AHEAD_DISTANCE;
 	SlipRacePlayer_lookAhead = (int32_t)lookAheadOrSegmentXOrSpeedAdjustment;
 	if (SlipRacePlayer_waypointDistance <= SlipRacePlayer_lookAhead) {
 		SlipRacePlayer_waypointPrevious = SlipRacePlayer_waypointCurrent;
@@ -3665,40 +3884,51 @@ bool SlipRacePlayer_BuildAiControls(SlipRacePlayerHostBindings *context, uint16_
 		    (uint32_t)SlipRacePlayer_waypointPrevious.z - (uint32_t)SlipRacePlayer_waypointCurrent.z, &approximate);
 		waypointOffset = (int32_t)((uint32_t)waypointOffset + approximate.approximateLength);
 	}
-	waypointOffset >>= 4;
-	SlipRacePlayer_waypointCurrent.x =
-	    (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.x +
-	              (uint32_t)SlipRacePlayer_MultiplySignedShifted(normalizedX, waypointOffset, 10));
-	SlipRacePlayer_waypointCurrent.y =
-	    (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.y +
-	              (uint32_t)SlipRacePlayer_MultiplySignedShifted(normalizedY, waypointOffset, 10));
-	SlipRacePlayer_waypointCurrent.z =
-	    (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.z +
-	              (uint32_t)SlipRacePlayer_MultiplySignedShifted(normalizedZ, waypointOffset, 10));
+	waypointOffset >>= SLIP_RACE_AI_WAYPOINT_OFFSET_SHIFT;
+	SlipRacePlayer_waypointCurrent.x = (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.x +
+	                                             (uint32_t)SlipRacePlayer_MultiplySignedShifted(
+	                                                 normalizedX, waypointOffset, SLIP_RACE_AI_WAYPOINT_PRODUCT_SHIFT));
+	SlipRacePlayer_waypointCurrent.y = (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.y +
+	                                             (uint32_t)SlipRacePlayer_MultiplySignedShifted(
+	                                                 normalizedY, waypointOffset, SLIP_RACE_AI_WAYPOINT_PRODUCT_SHIFT));
+	SlipRacePlayer_waypointCurrent.z = (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.z +
+	                                             (uint32_t)SlipRacePlayer_MultiplySignedShifted(
+	                                                 normalizedZ, waypointOffset, SLIP_RACE_AI_WAYPOINT_PRODUCT_SHIFT));
 
-	SlipRacePlayer_avoidanceAxes[0] = (int16_t)(uint16_t)(0u - (uint16_t)normalizedZ);
-	SlipRacePlayer_avoidanceAxes[1] = 0;
-	SlipRacePlayer_avoidanceAxes[2] = normalizedX;
+	SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET + 0] =
+	    (int16_t)(uint16_t)(0u - (uint16_t)normalizedZ);
+	SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET + 1] = 0;
+	SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET + 2] = normalizedX;
 	SlipView3D_CrossProduct((uint16_t)(0u - (uint16_t)normalizedX), (uint16_t)(0u - (uint16_t)normalizedY),
-	                        (uint16_t)(0u - (uint16_t)normalizedZ), (uint16_t)SlipRacePlayer_avoidanceAxes[0], 0,
-	                        (uint16_t)SlipRacePlayer_avoidanceAxes[2], &cross);
-	SlipRacePlayer_avoidanceAxes[3] = (int16_t)((int32_t)cross.crossX >> 14);
-	SlipRacePlayer_avoidanceAxes[4] = (int16_t)((int32_t)cross.crossY >> 14);
-	SlipRacePlayer_avoidanceAxes[5] = (int16_t)((int32_t)cross.crossZ >> 14);
+	                        (uint16_t)(0u - (uint16_t)normalizedZ),
+	                        (uint16_t)SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET + 0], 0,
+	                        (uint16_t)SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET + 2], &cross);
+	SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_Y_AXIS_OFFSET + 0] =
+	    (int16_t)((int32_t)cross.crossX >> SLIP_Q14_FRACTION_BITS);
+	SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_Y_AXIS_OFFSET + 1] =
+	    (int16_t)((int32_t)cross.crossY >> SLIP_Q14_FRACTION_BITS);
+	SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_Y_AXIS_OFFSET + 2] =
+	    (int16_t)((int32_t)cross.crossZ >> SLIP_Q14_FRACTION_BITS);
 	avoidanceX = (uint32_t)privateState->roadCoordinateX;
 	avoidanceY = (uint32_t)privateState->roadCoordinateY;
 	SlipRacePlayer_waypointCurrent.x =
 	    (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.x +
-	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(SlipRacePlayer_avoidanceAxes[0], (int32_t)avoidanceX) +
-	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(SlipRacePlayer_avoidanceAxes[3], (int32_t)avoidanceY));
+	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(
+	                  SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET + 0], (int32_t)avoidanceX) +
+	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(
+	                  SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_Y_AXIS_OFFSET + 0], (int32_t)avoidanceY));
 	SlipRacePlayer_waypointCurrent.y =
 	    (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.y +
-	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(SlipRacePlayer_avoidanceAxes[1], (int32_t)avoidanceX) +
-	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(SlipRacePlayer_avoidanceAxes[4], (int32_t)avoidanceY));
+	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(
+	                  SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET + 1], (int32_t)avoidanceX) +
+	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(
+	                  SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_Y_AXIS_OFFSET + 1], (int32_t)avoidanceY));
 	SlipRacePlayer_waypointCurrent.z =
 	    (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.z +
-	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(SlipRacePlayer_avoidanceAxes[2], (int32_t)avoidanceX) +
-	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(SlipRacePlayer_avoidanceAxes[5], (int32_t)avoidanceY));
+	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(
+	                  SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET + 2], (int32_t)avoidanceX) +
+	              (uint32_t)SlipRacePlayer_MultiplySignedQ14(
+	                  SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_Y_AXIS_OFFSET + 2], (int32_t)avoidanceY));
 	if (!SlipObject_Position(context->objectTable, context->objectTableBytes, context->objectOffset, &objectPosition)) {
 		return false;
 	}
@@ -3706,48 +3936,52 @@ bool SlipRacePlayer_BuildAiControls(SlipRacePlayerHostBindings *context, uint16_
 	    (SlipView3DVec32){(int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.x - objectPosition.positionX),
 	                      (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.y - objectPosition.positionY),
 	                      (int32_t)((uint32_t)SlipRacePlayer_waypointCurrent.z - objectPosition.positionZ)};
-	SlipRacePlayer_maximumSpeed = 0xae8f8;
+	SlipRacePlayer_maximumSpeed = SLIP_RACE_AI_INITIAL_MAXIMUM_SPEED;
 	if (SlipRacePlayer_waypointDistance <= (int32_t)SlipRacePlayer_aiProfile->waypointDistanceThreshold) {
-		if (!SlipRacePlayer_TrackDistance(
-		        0x5f500, context->objectOffset, context->objectTable, context->objectTableBytes, context->slotListBase,
-		        context->slotListBytes, context->slotListBaseOffset, context->trdBase, context->trackDataSize,
-		        context->trackDataOffset, context->componentBase, context->componentBaseBytes,
-		        context->componentBaseOffset, context->trackTable, context->trackTableBytes, &trackDistance)) {
+		if (!SlipRacePlayer_TrackDistance(SLIP_RACE_AI_CURVE_LOOK_AHEAD_DISTANCE, context->objectOffset,
+		                                  context->objectTable, context->objectTableBytes, context->slotListBase,
+		                                  context->slotListBytes, context->slotListBaseOffset, context->trdBase,
+		                                  context->trackDataSize, context->trackDataOffset, context->componentBase,
+		                                  context->componentBaseBytes, context->componentBaseOffset,
+		                                  context->trackTable, context->trackTableBytes, &trackDistance)) {
 			return false;
 		}
-		segmentYOrCurveScale = 0x4000u - trackDistance.accumulatedCurve;
+		segmentYOrCurveScale = SLIP_Q14_ONE - trackDistance.accumulatedCurve;
 		if ((int32_t)segmentYOrCurveScale < 0)
 			segmentYOrCurveScale = 0;
-		if (segmentYOrCurveScale != 0x3000u) {
+		if (segmentYOrCurveScale != SLIP_RACE_AI_UNCHANGED_CURVE_SCALE_Q14) {
 			trackIndex = SlipRacePlayer_track;
 			if (context->aiSpeedScale == NULL || context->aiBaseSpeed == NULL ||
 			    trackIndex >= context->aiSpeedTableCount) {
 				return false;
 			}
 			lookAheadOrSegmentXOrSpeedAdjustment =
-			    (uint32_t)(((uint64_t)(uint32_t)context->aiSpeedScale[trackIndex] * segmentYOrCurveScale) >> 14);
+			    (uint32_t)(((uint64_t)(uint32_t)context->aiSpeedScale[trackIndex] * segmentYOrCurveScale) >>
+			               SLIP_Q14_FRACTION_BITS);
 			SlipRacePlayer_maximumSpeed =
 			    (int32_t)(lookAheadOrSegmentXOrSpeedAdjustment + (uint32_t)context->aiBaseSpeed[trackIndex]);
 		}
 	}
-	if (SlipRacePlayer_targetObject != 0 && (int32_t)SlipRacePlayer_targetDistance < 0xbea0) {
+	if (SlipRacePlayer_targetObject != 0 &&
+	    (int32_t)SlipRacePlayer_targetDistance < SLIP_RACE_AI_FOLLOW_MAXIMUM_DISTANCE) {
 		int32_t targetSpeed = SlipObject_Speed(context->objectTable, SlipRacePlayer_targetObject);
 
-		if ((int32_t)SlipRacePlayer_targetDistance < 0x5f50) {
-			targetSpeed = (int32_t)((uint32_t)targetSpeed - 0x1beeu);
-		} else if ((int32_t)SlipRacePlayer_targetDistance >= 0x9880) {
-			targetSpeed = (int32_t)((uint32_t)targetSpeed + 0x138du);
+		if ((int32_t)SlipRacePlayer_targetDistance < SLIP_RACE_AI_FOLLOW_CLOSE_DISTANCE) {
+			targetSpeed = (int32_t)((uint32_t)targetSpeed - SLIP_RACE_AI_FOLLOW_CLOSE_SPEED_REDUCTION);
+		} else if ((int32_t)SlipRacePlayer_targetDistance >= SLIP_RACE_AI_FOLLOW_FAR_DISTANCE) {
+			targetSpeed = (int32_t)((uint32_t)targetSpeed + SLIP_RACE_AI_FOLLOW_FAR_SPEED_INCREASE);
 		}
 		if (targetSpeed < SlipRacePlayer_maximumSpeed) {
 			SlipRacePlayer_maximumSpeed = targetSpeed;
 		}
 	}
 	if ((int16_t)racerState->racePosition < (int16_t)SlipRacePlayer_minimumPosition &&
-	    SlipRacePlayer_raceDistance >= 0xee480 && SlipRacePlayer_maximumSpeed > 0x345e4) {
-		SlipRacePlayer_maximumSpeed = 0x345e4;
+	    SlipRacePlayer_raceDistance >= SLIP_RACE_AI_POSITION_LIMIT_MINIMUM_RACE_DISTANCE &&
+	    SlipRacePlayer_maximumSpeed > SLIP_RACE_AI_POSITION_LIMIT_SPEED) {
+		SlipRacePlayer_maximumSpeed = SLIP_RACE_AI_POSITION_LIMIT_SPEED;
 	}
-	if (racerState->finished != 0 && SlipRacePlayer_maximumSpeed > 0x345e4) {
-		SlipRacePlayer_maximumSpeed = 0x345e4;
+	if (racerState->finished != 0 && SlipRacePlayer_maximumSpeed > SLIP_RACE_AI_POSITION_LIMIT_SPEED) {
+		SlipRacePlayer_maximumSpeed = SLIP_RACE_AI_POSITION_LIMIT_SPEED;
 	}
 	currentSpeed = (uint32_t)SlipObject_Speed(context->objectTable, context->objectOffset);
 	SlipRacePlayer_accelerate = SlipRacePlayer_maximumSpeed >= (int32_t)currentSpeed ? 1u : 0u;
@@ -3766,17 +4000,17 @@ bool SlipRacePlayer_BuildAiControls(SlipRacePlayerHostBindings *context, uint16_
 	                                                           (int16_t)(uint16_t)normalized.unitZQ14});
 	steering = (int16_t)(uint16_t)transformed.x;
 	pitch = (int16_t)(uint16_t)transformed.y;
-	if (steering > 0x800)
-		steering = 0x800;
-	if (steering < -0x800)
-		steering = -0x800;
-	steering = (int16_t)(uint16_t)((uint16_t)steering << 3);
-	if (pitch > 0x800)
-		pitch = 0x800;
-	if (pitch < -0x800)
-		pitch = -0x800;
-	pitch = (int16_t)(uint16_t)((uint16_t)pitch << 3);
-	*result = (SlipRacePlayerControl){steering, pitch, SlipRacePlayer_accelerate != 0 ? 1u : 0u};
+	if (steering > SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14)
+		steering = SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14;
+	if (steering < -SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14)
+		steering = -SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14;
+	steering = (int16_t)(uint16_t)((uint16_t)steering << SLIP_RACE_AI_CONTROL_SCALE_SHIFT);
+	if (pitch > SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14)
+		pitch = SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14;
+	if (pitch < -SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14)
+		pitch = -SLIP_RACE_AI_CONTROL_COMPONENT_LIMIT_Q14;
+	pitch = (int16_t)(uint16_t)((uint16_t)pitch << SLIP_RACE_AI_CONTROL_SCALE_SHIFT);
+	*result = (SlipRacePlayerControl){steering, pitch, SlipRacePlayer_accelerate != 0 ? SLIP_ACTION_ACCELERATE : 0u};
 	return true;
 }
 
@@ -3796,24 +4030,25 @@ bool SlipRacePlayer_LoadWaypoints(SlipRacePlayerHostBindings *context, SlipView3
 		return false;
 	}
 	roadRecord = road.record;
-	waypoints[1] = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(roadRecord + 0x0cu),
-	                                 (int32_t)SlipBytes_ReadLE32(roadRecord + 0x10u),
-	                                 (int32_t)SlipBytes_ReadLE32(roadRecord + 0x14u)};
-	linkedOffset = SlipBytes_ReadLE16(roadRecord + 0x02u);
-	if ((size_t)linkedOffset + 0x18u > context->trackDataSize) {
+	waypoints[1] = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_X_OFFSET),
+	                                 (int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Y_OFFSET),
+	                                 (int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Z_OFFSET)};
+	linkedOffset = SlipBytes_ReadLE16(roadRecord + SLIP_TRD_WAYPOINT_PREVIOUS_LINK_OFFSET);
+	if ((size_t)linkedOffset + SLIP_TRD_POSITION_RECORD_BYTES > context->trackDataSize) {
 		return false;
 	}
 	linkedRecord = context->trdBase + linkedOffset;
-	waypoints[0] = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(linkedRecord + 0x0cu),
-	                                 (int32_t)SlipBytes_ReadLE32(linkedRecord + 0x10u),
-	                                 (int32_t)SlipBytes_ReadLE32(linkedRecord + 0x14u)};
+	waypoints[0] = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(linkedRecord + SLIP_TRD_POSITION_X_OFFSET),
+	                                 (int32_t)SlipBytes_ReadLE32(linkedRecord + SLIP_TRD_POSITION_Y_OFFSET),
+	                                 (int32_t)SlipBytes_ReadLE32(linkedRecord + SLIP_TRD_POSITION_Z_OFFSET)};
 	roadRecord = SlipRacePlayer_SelectLinkedTrackRecord(context->trdBase, roadRecord, SlipRacePlayer_trackBranch);
-	if (roadRecord < context->trdBase || (size_t)(roadRecord - context->trdBase) + 0x18u > context->trackDataSize) {
+	if (roadRecord < context->trdBase ||
+	    (size_t)(roadRecord - context->trdBase) + SLIP_TRD_POSITION_RECORD_BYTES > context->trackDataSize) {
 		return false;
 	}
-	waypoints[2] = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(roadRecord + 0x0cu),
-	                                 (int32_t)SlipBytes_ReadLE32(roadRecord + 0x10u),
-	                                 (int32_t)SlipBytes_ReadLE32(roadRecord + 0x14u)};
+	waypoints[2] = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_X_OFFSET),
+	                                 (int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Y_OFFSET),
+	                                 (int32_t)SlipBytes_ReadLE32(roadRecord + SLIP_TRD_POSITION_Z_OFFSET)};
 	return true;
 }
 
@@ -3833,9 +4068,9 @@ bool SlipRacePlayer_RoadValue(SlipRacePlayerHostBindings *context, SlipRacePlaye
 		result->notFound = true;
 		return true;
 	}
-	roadValue = SlipBytes_ReadLE32(road.record + 0x18u);
-	if (roadValue < 0x3190u)
-		roadValue = 0x3190u;
+	roadValue = SlipBytes_ReadLE32(road.record + SLIP_TRD_WAYPOINT_ROAD_VALUE_OFFSET);
+	if (roadValue < SLIP_RACE_AI_ROAD_VALUE_MINIMUM)
+		roadValue = SLIP_RACE_AI_ROAD_VALUE_MINIMUM;
 	*result = (SlipRacePlayerRoadValue){roadValue, false};
 	return true;
 }
@@ -3858,7 +4093,8 @@ bool SlipRacePlayer_GetBranchState(SlipRacePlayerHostBindings *context, uint32_t
 		SlipRuntime_Fatal("TrackSlotCheckBranch - not a track slot");
 	}
 	slotOffset = select.slotAddress - context->slotListBaseOffset;
-	if (context->slotListBase == NULL || (size_t)slotOffset + 0xd4u > context->slotListBytes) {
+	if (context->slotListBase == NULL ||
+	    (size_t)slotOffset + SLIP_TRACK_SLOT_CURRENT_RECORD_END > context->slotListBytes) {
 		return false;
 	}
 	trackSlot = (SlipTrackSlotRecord *)(void *)(context->slotListBase + slotOffset);
@@ -3873,35 +4109,36 @@ bool SlipRacePlayer_GetBranchState(SlipRacePlayerHostBindings *context, uint32_t
 	if (recordAddress < context->trackDataOffset)
 		return false;
 	recordOffset = recordAddress - context->trackDataOffset;
-	if ((size_t)recordOffset + 0x20u > context->trackDataSize)
+	if ((size_t)recordOffset + SLIP_TRD_START_RECORD_BYTES > context->trackDataSize)
 		return false;
 	trackRecord = context->trdBase + recordOffset;
-	linkedOffset = SlipBytes_ReadLE16(trackRecord + 0x1eu);
-	if ((size_t)linkedOffset + 0x18u > context->trackDataSize)
+	linkedOffset = SlipBytes_ReadLE16(trackRecord + SLIP_TRD_START_FINISH_LINK_OFFSET);
+	if ((size_t)linkedOffset + SLIP_TRD_POSITION_RECORD_BYTES > context->trackDataSize)
 		return false;
 	trackRecord = context->trdBase + linkedOffset;
-	linkedOffset = SlipBytes_ReadLE16(trackRecord + 0x02u);
+	linkedOffset = SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 	if (linkedOffset != 0) {
-		if ((size_t)linkedOffset + 0x06u > context->trackDataSize)
+		if ((size_t)linkedOffset + SLIP_TRACK_LINKED_HEADER_BYTES > context->trackDataSize)
 			return false;
 		trackRecord = context->trdBase + linkedOffset;
-		if (SlipBytes_ReadLE16(trackRecord + 0x04u) != 0) {
-			*branchState = 1;
+		if (SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET) != 0) {
+			*branchState = SLIP_RACE_BRANCH_LINKED_EXIT;
 			return true;
 		}
 	} else {
 		trackRecord = context->trdBase;
 	}
 	trackRecord = SlipRacePlayer_SelectLinkedTrackRecord(context->trdBase, trackRecord, SlipRacePlayer_trackBranch);
-	if (trackRecord < context->trdBase || (size_t)(trackRecord - context->trdBase) + 0x2au > context->trackDataSize) {
+	if (trackRecord < context->trdBase ||
+	    (size_t)(trackRecord - context->trdBase) + SLIP_TRD_ROUTE_REFUEL_REACHABLE_END > context->trackDataSize) {
 		return false;
 	}
-	if (SlipBytes_ReadLE16(trackRecord + 0x04u) == 0) {
-		*branchState = 0;
-	} else if (SlipBytes_ReadLE16(trackRecord + 0x28u) == 0) {
-		*branchState = 2;
+	if (SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET) == 0) {
+		*branchState = SLIP_RACE_BRANCH_NO_EXIT;
+	} else if (SlipBytes_ReadLE16(trackRecord + SLIP_TRD_ROUTE_REFUEL_REACHABLE_OFFSET) == 0) {
+		*branchState = SLIP_RACE_BRANCH_ROUTE_CHOICE;
 	} else {
-		*branchState = 3;
+		*branchState = SLIP_RACE_BRANCH_REFUEL_CHOICE;
 	}
 	return true;
 }
@@ -3928,7 +4165,8 @@ bool SlipRacePlayer_FindTrackState(SlipRacePlayerHostBindings *context, SlipRace
 		SlipRuntime_Fatal("TrackSlotFindDoor - not a track slot");
 	}
 	slotOffset = select.slotAddress - context->slotListBaseOffset;
-	if (context->slotListBase == NULL || (size_t)slotOffset + 0xd4u > context->slotListBytes) {
+	if (context->slotListBase == NULL ||
+	    (size_t)slotOffset + SLIP_TRACK_SLOT_CURRENT_RECORD_END > context->slotListBytes) {
 		return false;
 	}
 	trackSlot = (SlipTrackSlotRecord *)(void *)(context->slotListBase + slotOffset);
@@ -3974,7 +4212,8 @@ bool SlipRacePlayer_AiControls(SlipRacePlayerHostBindings *context, SlipRacePlay
 		return false;
 	}
 	if (!trackState.notFound) {
-		SlipRacePlayer_InitializeTrackRecord(trackState.record, 0x3e8u, 0x53cau);
+		SlipRacePlayer_InitializeTrackRecord(trackState.record, SLIP_RACE_AI_DOOR_INITIAL_DELAY_MS,
+		                                     SLIP_RACE_AI_DOOR_SPEED);
 	}
 	privateState = SlipRacePlayer_PrivateState(context->objectOffset);
 	racerState = SlipRacePlayer_CurrentRacerFromState(context, privateState);
@@ -3983,24 +4222,26 @@ bool SlipRacePlayer_AiControls(SlipRacePlayerHostBindings *context, SlipRacePlay
 	if (!SlipRacePlayer_GetBranchState(context, &branchState)) {
 		return false;
 	}
-	if (branchState == 3u) {
+	if (branchState == SLIP_RACE_BRANCH_REFUEL_CHOICE) {
 		selectedBranch = 1u;
-		if ((int32_t)racerState->movementDamageQ16 <= 0x320000 && (int32_t)racerState->handlingDamageQ16 <= 0x320000) {
+		if ((int32_t)racerState->movementDamageQ16 <= SLIP_RACE_AI_REFUEL_DAMAGE_THRESHOLD_Q16 &&
+		    (int32_t)racerState->handlingDamageQ16 <= SLIP_RACE_AI_REFUEL_DAMAGE_THRESHOLD_Q16) {
 			selectedBranch = 0;
 		}
 		SlipRacePlayer_SetTrackBranch(selectedBranch, context->objectOffset, context->objectTable,
 		                              context->objectTableBytes, context->slotListBase, context->slotListBaseOffset);
-	} else if (branchState == 2u) {
+	} else if (branchState == SLIP_RACE_BRANCH_ROUTE_CHOICE) {
 		selectedBranch = 0;
 		if (context->objectOffset != SlipRacePlayer_playerOneObject &&
 		    context->objectOffset != SlipRacePlayer_playerTwoObject &&
 		    context->objectOffset != SlipRacePlayer_thirdObject && SlipRacePlayer_middleNeighbourCandidate == 0 &&
 		    racerState->racePosition != 1u &&
 		    (int16_t)racerState->racePosition < (int16_t)SlipRacePlayer_minimumPosition) {
-			uint16_t branchProbabilityThreshold = 0x0a00u;
+			uint16_t branchProbabilityThreshold = SLIP_RACE_AI_DEFAULT_BRANCH_RANDOM_LIMIT;
 
-			if (SlipRacePlayer_farNeighbourCandidate != 0 && SlipRacePlayer_raceDistance >= 0x77240) {
-				branchProbabilityThreshold = 0x6000u;
+			if (SlipRacePlayer_farNeighbourCandidate != 0 &&
+			    SlipRacePlayer_raceDistance >= SLIP_RACE_AI_BRANCH_MINIMUM_RACE_DISTANCE) {
+				branchProbabilityThreshold = SLIP_RACE_AI_NEIGHBOUR_BRANCH_RANDOM_LIMIT;
 			}
 			randomChoice = SlipRandom_Next();
 			if ((uint16_t)randomChoice < branchProbabilityThreshold)
@@ -4045,7 +4286,7 @@ bool SlipRacePlayer_AiControls(SlipRacePlayerHostBindings *context, SlipRacePlay
 
 	targetObject = SlipRacePlayer_rivalObject;
 	targetDistance = (uint32_t)SlipRacePlayer_rivalDistance;
-	if (!controlsBuilt && targetObject != 0 && (int32_t)targetDistance <= 0x17d40 &&
+	if (!controlsBuilt && targetObject != 0 && (int32_t)targetDistance <= SLIP_RACE_AI_AVOIDANCE_MAXIMUM_DISTANCE &&
 	    !SlipRacePlayer_CompareSpeeds(context->objectTable, context->objectOffset, targetObject)) {
 		if (!SlipRacePlayer_BuildAvoidanceVector(
 		        context->objectOffset, targetObject, SlipRacePlayer_roadDistance, context->objectTable,
@@ -4080,14 +4321,15 @@ bool SlipRacePlayer_AiControls(SlipRacePlayerHostBindings *context, SlipRacePlay
 
 		if (SlipRacePlayer_demoMode == 0) {
 			randomChoice = SlipRandom_Next();
-			if ((int16_t)(uint16_t)randomChoice <= 0x2000) {
-				controls.actions |= 4u;
+			if ((int16_t)(uint16_t)randomChoice <= SLIP_RACE_AI_TURBO_RANDOM_LIMIT) {
+				controls.actions |= SLIP_ACTION_SELECT;
 				turboSelected = true;
 			}
 		}
-		if (!turboSelected && privateState->weaponSelection != 3u && privateState->targetObject != 0) {
-			controls.actions |= 2u;
-			privateState->weaponSelectionTimer = 0x1770u;
+		if (!turboSelected && privateState->weaponSelection != SLIP_RACE_WEAPON_SLOT_POWERUP &&
+		    privateState->targetObject != 0) {
+			controls.actions |= SLIP_ACTION_FIRE;
+			privateState->weaponSelectionTimer = SLIP_RACE_WEAPON_SELECTION_AFTER_FIRE_MS;
 		}
 	}
 
@@ -4105,7 +4347,7 @@ bool SlipRacePlayer_AiControls(SlipRacePlayerHostBindings *context, SlipRacePlay
 SlipRacePlayerControl SlipRacePlayer_LoadThirdControls(void) { return SlipRacePlayer_thirdControls; }
 
 SlipRacePlayerControl SlipRacePlayer_LoadControls(SlipRacePlayerHostBindings *context, uint16_t playerIndex) {
-	if (SlipRace_gameMode == 0 && SlipRacePlayer_demoAiEnabled != 0) {
+	if (SlipRace_gameMode == SLIP_RACE_GAME_SINGLE_PLAYER && SlipRacePlayer_demoAiEnabled != 0) {
 		SlipRacePlayerControl controls = {0, 0, 0};
 
 		SlipRacePlayer_AiControls(context, &controls);
@@ -4183,6 +4425,32 @@ void SlipRacePlayer_UpdateDigitalAxes(SlipRacePlayerControl *controls, uint32_t 
 	controls->pitch = pitch;
 }
 
+enum {
+	SLIP_RACE_DIRECTION_VERTICAL_LIMIT_Q14 = SLIP_Q14_ONE / 4,
+	SLIP_RACE_DIRECTION_VERTICAL_FACTOR_SHIFT = 3,
+	SLIP_RACE_DIRECTION_LATERAL_FACTOR_SHIFT = 5,
+	SLIP_RACE_DIRECTION_LATERAL_BASE_Q14 = 512,
+	SLIP_RACE_DIRECTION_DAMAGE_MULTIPLIER = 40,
+	SLIP_RACE_DIRECTION_DAMAGE_BASE_Q14 = SLIP_Q14_ONE / 4,
+	SLIP_RACE_DIRECTION_BASE_FACTOR_Q14 = 11264,
+	SLIP_RACE_DAMAGE_FRACTION_BITS = 16,
+	SLIP_RACE_CONTROL_AMPLIFICATION = 16,
+	SLIP_RACE_SPEED_FRACTION_BITS = 16,
+	SLIP_RACE_SPEED_FRACTION_ONE = 1 << SLIP_RACE_SPEED_FRACTION_BITS,
+	SLIP_RACE_POSITION_BOOST_DISTANCE = 366000,
+	SLIP_RACE_POSITION_BOOST_TARGET_CONTROLLER_THRESHOLD = 122000,
+	SLIP_RACE_POSITION_BOOST_DURATION_MS = 6000,
+	SLIP_RACE_PROPULSION_BOOST_Q14 = SLIP_Q14_HALF,
+	SLIP_RACE_PROPULSION_IMPACT_PENALTY_Q14 = SLIP_Q14_ONE / 4,
+	SLIP_RACE_ACCELERATION_LOW_SHIFT = 6,
+	SLIP_RACE_ACCELERATION_HIGH_SHIFT = 8,
+	SLIP_RACE_ACCELERATION_HIGH_WORD_SHIFT = 24,
+	SLIP_RACE_STEERING_ANGLE_LIMIT = 32512,
+	SLIP_RACE_YAW_PRODUCT_SHIFT = 12,
+	SLIP_RACE_HANDLING_DAMAGE_MULTIPLIER = 81,
+	SLIP_RACE_ROTATION_VERTICAL_LIMIT_Q14 = 13312
+};
+
 void SlipRacePlayer_IntegrateDirection(SlipRacePlayerHostBindings *context) {
 	SlipRacePlayerPrivateRecord *privateState;
 	const SlipRaceRacerState *racerState;
@@ -4200,19 +4468,19 @@ void SlipRacePlayer_IntegrateDirection(SlipRacePlayerHostBindings *context) {
 	speed = privateState->speed;
 	SlipObject_MatrixCopy(context->objectTable, context->objectTableBytes, context->objectOffset, &matrix, &matrixCopy);
 	term = matrix.m[7];
-	if (term > 0x1000)
-		term = 0x1000;
-	if (term < -0x1000)
-		term = -0x1000;
-	factor = (-term) >> 3;
+	if (term > SLIP_RACE_DIRECTION_VERTICAL_LIMIT_Q14)
+		term = SLIP_RACE_DIRECTION_VERTICAL_LIMIT_Q14;
+	if (term < -SLIP_RACE_DIRECTION_VERTICAL_LIMIT_Q14)
+		term = -SLIP_RACE_DIRECTION_VERTICAL_LIMIT_Q14;
+	factor = (-term) >> SLIP_RACE_DIRECTION_VERTICAL_FACTOR_SHIFT;
 	term = matrix.m[1];
 	if (term < 0)
 		term = -term;
-	factor += 0x200 - (term >> 5);
-	product = 0x28u * racerState->movementDamageQ16;
-	factor += 0x1000 - (int32_t)(product >> 16);
-	factor += 0x2c00;
-	speed = (int32_t)((uint32_t)(((uint64_t)(uint32_t)speed * (uint32_t)factor) >> 14));
+	factor += SLIP_RACE_DIRECTION_LATERAL_BASE_Q14 - (term >> SLIP_RACE_DIRECTION_LATERAL_FACTOR_SHIFT);
+	product = SLIP_RACE_DIRECTION_DAMAGE_MULTIPLIER * racerState->movementDamageQ16;
+	factor += SLIP_RACE_DIRECTION_DAMAGE_BASE_Q14 - (int32_t)(product >> SLIP_RACE_DAMAGE_FRACTION_BITS);
+	factor += SLIP_RACE_DIRECTION_BASE_FACTOR_Q14;
+	speed = (int32_t)((uint32_t)(((uint64_t)(uint32_t)speed * (uint32_t)factor) >> SLIP_Q14_FRACTION_BITS));
 	scaled = SlipView3D_ScaleAxesQ14(matrix.m[6], matrix.m[7], matrix.m[8], speed);
 	scaled.x = (int32_t)((uint32_t)scaled.x + (uint32_t)privateState->collisionImpulseX);
 	scaled.y = (int32_t)((uint32_t)scaled.y + (uint32_t)privateState->collisionImpulseY);
@@ -4263,20 +4531,20 @@ uint32_t SlipRacePlayer_ApplyControls(SlipRacePlayerHostBindings *context, SlipR
 		pitch = (int16_t)(uint16_t)(0u - (uint16_t)pitch);
 	}
 	if (privateState->forcedAccelerateTimer != 0) {
-		actions |= 1u;
+		actions |= SLIP_ACTION_ACCELERATE;
 	}
 	if (privateState->amplifiedControlsTimer != 0 || privateState->impactPenaltyTimer != 0) {
 
-		int32_t expandedSteering = (int32_t)steering * 16;
-		int32_t expandedPitch = (int32_t)pitch * 16;
-		if (expandedSteering > 0x4000)
-			expandedSteering = 0x4000;
-		if (expandedSteering < -0x4000)
-			expandedSteering = -0x4000;
-		if (expandedPitch > 0x4000)
-			expandedPitch = 0x4000;
-		if (expandedPitch < -0x4000)
-			expandedPitch = -0x4000;
+		int32_t expandedSteering = (int32_t)steering * SLIP_RACE_CONTROL_AMPLIFICATION;
+		int32_t expandedPitch = (int32_t)pitch * SLIP_RACE_CONTROL_AMPLIFICATION;
+		if (expandedSteering > SLIP_Q14_ONE)
+			expandedSteering = SLIP_Q14_ONE;
+		if (expandedSteering < -SLIP_Q14_ONE)
+			expandedSteering = -SLIP_Q14_ONE;
+		if (expandedPitch > SLIP_Q14_ONE)
+			expandedPitch = SLIP_Q14_ONE;
+		if (expandedPitch < -SLIP_Q14_ONE)
+			expandedPitch = -SLIP_Q14_ONE;
 		steering = (int16_t)expandedSteering;
 		pitch = (int16_t)expandedPitch;
 	}
@@ -4286,20 +4554,20 @@ uint32_t SlipRacePlayer_ApplyControls(SlipRacePlayerHostBindings *context, SlipR
 	tuning = SlipRacePlayer_tuningRecords[racerType];
 	speed = (int32_t)privateState->speed;
 	speedFraction = privateState->speedFraction;
-	if ((actions & 1u) != 0) {
+	if ((actions & SLIP_ACTION_ACCELERATE) != 0) {
 		const int32_t divisor = (int32_t)tuning->maximumSpeed;
-		const int64_t speed48 = (int64_t)speed * 0x10000 + speedFraction;
+		const int64_t speed48 = (int64_t)speed * SLIP_RACE_SPEED_FRACTION_ONE + speedFraction;
 		int32_t quotient;
 		quotient = (int32_t)(speed48 / divisor);
 		target =
 		    (int32_t)tuning->acceleration -
 		    (int32_t)(((int64_t)quotient * ((int32_t)tuning->acceleration - (int32_t)tuning->minimumAcceleration)) >>
-		              16);
+		              SLIP_RACE_SPEED_FRACTION_BITS);
 	} else {
 		target = -(int32_t)tuning->deceleration;
 	}
-	multiplier = 0x4000;
-	if ((int16_t)privateState->controller == 2) {
+	multiplier = SLIP_Q14_ONE;
+	if ((int16_t)privateState->controller == SLIP_RACER_COMPUTER) {
 		if (SlipRacePlayer_flybyMode == 0) {
 			const int32_t mode = SlipConfig_CurrentMode();
 			multiplier =
@@ -4307,27 +4575,28 @@ uint32_t SlipRacePlayer_ApplyControls(SlipRacePlayerHostBindings *context, SlipR
 		}
 		if (SlipRacePlayer_demoMode != 0 && context->objectOffset == SlipRacePlayer_playerOneObject &&
 		    SlipRacePlayer_demoAiEnabled != 0) {
-			multiplier += 0x2000;
+			multiplier += SLIP_RACE_PROPULSION_BOOST_Q14;
 		}
 		if (SlipRacePlayer_flybyMode != 0) {
 			multiplier -= SlipRacePlayer_gamePenalty[SlipRacePlayer_track];
 		}
-		if ((int16_t)racerState->racerType == 2 &&
+		if ((int16_t)racerState->racerType == SLIP_RACER_COMPUTER &&
 		    (uint16_t)(SlipRacePlayer_minimumPosition + 1u) == racerState->racePosition &&
-		    SlipRacePlayer_rivalDistance > 0x595b0) {
+		    SlipRacePlayer_rivalDistance > SLIP_RACE_POSITION_BOOST_DISTANCE) {
 			const uint16_t lapNumber = racerState->lapNumber;
 
 			const uint32_t targetController =
 			    (uint32_t)privateState->targetObject | ((uint32_t)privateState->controller << 16);
 
-			if (lapNumber != SlipRacePlayer_lapCount || (int32_t)targetController >= 0x1dc90) {
-				privateState->positionBoostTimer = 0x1770u;
+			if (lapNumber != SlipRacePlayer_lapCount ||
+			    (int32_t)targetController >= SLIP_RACE_POSITION_BOOST_TARGET_CONTROLLER_THRESHOLD) {
+				privateState->positionBoostTimer = SLIP_RACE_POSITION_BOOST_DURATION_MS;
 			}
 		}
 		if (privateState->impactPenaltyTimer != 0) {
-			multiplier -= 0x1000;
+			multiplier -= SLIP_RACE_PROPULSION_IMPACT_PENALTY_Q14;
 		} else if (privateState->positionBoostTimer != 0) {
-			multiplier += 0x2000;
+			multiplier += SLIP_RACE_PROPULSION_BOOST_Q14;
 		}
 		if (SlipRacePlayer_positionBoostTimer != 0) {
 			multiplier += SlipRacePlayer_positionBoost[racerState->racePosition];
@@ -4336,26 +4605,27 @@ uint32_t SlipRacePlayer_ApplyControls(SlipRacePlayerHostBindings *context, SlipR
 	if (privateState->powerupSpeedTimer != 0 || privateState->powerupActive != 0) {
 		SlipRacePowerupScales scales = SlipRacePowerup_GetScales(racerState->powerupRecord);
 
-		multiplier += scales.speedScaleQ14 - 0x4000;
+		multiplier += scales.speedScaleQ14 - SLIP_Q14_ONE;
 	}
-	if (multiplier != 0x4000) {
+	if (multiplier != SLIP_Q14_ONE) {
 		target = SlipRacePlayer_MultiplySignedQ14(target, multiplier);
 	}
 	accelerationFrameStep = SlipFrameTimer_Step();
 	accelerationProduct = (int64_t)target * (int32_t)accelerationFrameStep;
-	accelerationLow = (uint32_t)(((uint64_t)accelerationProduct >> 6));
-	accelerationHigh = (accelerationLow >> 8) | ((uint32_t)((uint64_t)accelerationProduct >> 32) << 24);
+	accelerationLow = (uint32_t)(((uint64_t)accelerationProduct >> SLIP_RACE_ACCELERATION_LOW_SHIFT));
+	accelerationHigh = (accelerationLow >> SLIP_RACE_ACCELERATION_HIGH_SHIFT) |
+	                   ((uint32_t)((uint64_t)accelerationProduct >> 32) << SLIP_RACE_ACCELERATION_HIGH_WORD_SHIFT);
 	fractionSum = (uint32_t)speedFraction + (uint16_t)accelerationLow;
 	speedFraction = (uint16_t)fractionSum;
-	integratedSpeed = (uint32_t)speed + accelerationHigh + (fractionSum >> 16);
+	integratedSpeed = (uint32_t)speed + accelerationHigh + (fractionSum >> SLIP_RACE_SPEED_FRACTION_BITS);
 	speed = (int32_t)integratedSpeed;
 	if (speed < 0) {
 		speedFraction = 0;
 		speed = 0;
 	}
 	maximumSpeed = (int32_t)tuning->maximumSpeed;
-	if (multiplier != 0x4000) {
-		maximumSpeed = (int32_t)(((uint64_t)(uint32_t)maximumSpeed * (uint32_t)multiplier) >> 14);
+	if (multiplier != SLIP_Q14_ONE) {
+		maximumSpeed = (int32_t)(((uint64_t)(uint32_t)maximumSpeed * (uint32_t)multiplier) >> SLIP_Q14_FRACTION_BITS);
 	}
 	if (privateState->speedLimitTimer != 0) {
 		maximumSpeed >>= 1;
@@ -4368,28 +4638,29 @@ uint32_t SlipRacePlayer_ApplyControls(SlipRacePlayerHostBindings *context, SlipR
 	privateState->speedFraction = speedFraction;
 	SlipObject_MatrixCopy(context->objectTable, context->objectTableBytes, context->objectOffset, &matrix, &matrixCopy);
 	effectiveSteering = steering;
-	steering = (int16_t)(steering >> 1);
-	if (steering < (int16_t)0x8100)
-		steering = (int16_t)0x8100;
-	if (steering > 0x7f00)
-		steering = 0x7f00;
+	steering = (int16_t)(steering >> SLIP_RACE_STEERING_RESPONSE_SHIFT);
+	if (steering < -SLIP_RACE_STEERING_ANGLE_LIMIT)
+		steering = -SLIP_RACE_STEERING_ANGLE_LIMIT;
+	if (steering > SLIP_RACE_STEERING_ANGLE_LIMIT)
+		steering = SLIP_RACE_STEERING_ANGLE_LIMIT;
 	heading = SlipView3D_HeadingFromMatrix(context->maths, &matrix);
-	yawAngle = SlipRacePlayer_MultiplySignedWordsShifted((int16_t)steeringFrameStep,
-	                                                     (int16_t)(uint16_t)(steering - heading), 12u);
+	yawAngle = SlipRacePlayer_MultiplySignedWordsShifted(
+	    (int16_t)steeringFrameStep, (int16_t)(uint16_t)(steering - heading), SLIP_RACE_YAW_PRODUCT_SHIFT);
 	pitchAngle = SlipRacePlayer_MultiplySignedWordsHigh((int16_t)steeringFrameStep, effectiveSteering);
 
 	pitchAngle = (int16_t)(uint16_t)(pitchAngle +
 	                                 SlipRacePlayer_MultiplySignedWordsHigh(
 	                                     (int16_t)(uint16_t)(0u - (uint16_t)matrix.m[1]), (int16_t)steeringFrameStep));
 	rollAngle = SlipRacePlayer_MultiplySignedWordsHigh((int16_t)steeringFrameStep, pitch);
-	modifier = -(int32_t)((uint32_t)(0x51u * racerState->handlingDamageQ16) >> 16);
-	rollAngle =
-	    SlipRacePlayer_MultiplySignedWordsShifted(rollAngle, (int16_t)((int32_t)tuning->rollScale + modifier), 14u);
-	pitchAngle =
-	    SlipRacePlayer_MultiplySignedWordsShifted(pitchAngle, (int16_t)((int32_t)tuning->pitchScale + modifier), 14u);
-	if (matrix.m[7] > 0x3400 && rollAngle >= 0)
+	modifier = -(int32_t)((uint32_t)(SLIP_RACE_HANDLING_DAMAGE_MULTIPLIER * racerState->handlingDamageQ16) >>
+	                      SLIP_RACE_DAMAGE_FRACTION_BITS);
+	rollAngle = SlipRacePlayer_MultiplySignedWordsShifted(rollAngle, (int16_t)((int32_t)tuning->rollScale + modifier),
+	                                                      SLIP_Q14_FRACTION_BITS);
+	pitchAngle = SlipRacePlayer_MultiplySignedWordsShifted(
+	    pitchAngle, (int16_t)((int32_t)tuning->pitchScale + modifier), SLIP_Q14_FRACTION_BITS);
+	if (matrix.m[7] > SLIP_RACE_ROTATION_VERTICAL_LIMIT_Q14 && rollAngle >= 0)
 		rollAngle = 0;
-	if (matrix.m[7] < (int16_t)0xcc00 && rollAngle < 0)
+	if (matrix.m[7] < -SLIP_RACE_ROTATION_VERTICAL_LIMIT_Q14 && rollAngle < 0)
 		rollAngle = 0;
 	SlipObject_Rotate(context->objectTable, context->objectTableBytes, context->objectOffset, rollAngle, yawAngle, 0,
 	                  pitchAngle, context->maths, &rotateResult);
@@ -4398,9 +4669,9 @@ uint32_t SlipRacePlayer_ApplyControls(SlipRacePlayerHostBindings *context, SlipR
 		const int32_t collisionImpulseX = (int32_t)privateState->collisionImpulseX;
 		const int32_t collisionImpulseY = (int32_t)privateState->collisionImpulseY;
 		const int32_t collisionImpulseZ = (int32_t)privateState->collisionImpulseZ;
-		const int32_t scaledImpulseX = (int32_t)((uint32_t)collisionImpulseX << 2);
-		const int32_t scaledImpulseY = (int32_t)((uint32_t)collisionImpulseY << 2);
-		const int32_t scaledImpulseZ = (int32_t)((uint32_t)collisionImpulseZ << 2);
+		const int32_t scaledImpulseX = (int32_t)((uint32_t)collisionImpulseX << SLIP_RACE_COLLISION_IMPULSE_DRAG_SHIFT);
+		const int32_t scaledImpulseY = (int32_t)((uint32_t)collisionImpulseY << SLIP_RACE_COLLISION_IMPULSE_DRAG_SHIFT);
+		const int32_t scaledImpulseZ = (int32_t)((uint32_t)collisionImpulseZ << SLIP_RACE_COLLISION_IMPULSE_DRAG_SHIFT);
 
 		if (scaledImpulseX != 0) {
 			const int32_t collisionDragX = SlipRacePlayer_MultiplySignedQ14(scaledImpulseX, (int32_t)impulseFrameStep);

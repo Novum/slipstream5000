@@ -1,5 +1,12 @@
 #include "screen_present.h"
+#include "raster/raster.h"
 #include <string.h>
+
+enum {
+	SLIP_SCREEN_PAGE_BYTES = SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT,
+	SLIP_SCREEN_COMPARE_GROUP_BYTES = sizeof(uint32_t),
+	SLIP_SCREEN_COMPARE_GROUP_COUNT = SLIP_SCREEN_PAGE_BYTES / SLIP_SCREEN_COMPARE_GROUP_BYTES
+};
 
 void SlipScreen_PresentSingle(uint8_t *drawPage, uint8_t *display, SlipSoftwareCursor *cursor, SlipCursorPixels *pixels,
                               const SlipScreenPresentCalls *calls) {
@@ -10,7 +17,7 @@ void SlipScreen_PresentSingle(uint8_t *drawPage, uint8_t *display, SlipSoftwareC
 		SlipCursor_SaveBackground(pixels, cursor, drawPage);
 		SlipCursor_Draw(pixels, cursor, drawPage);
 	}
-	memcpy(display, drawPage, 64000);
+	memcpy(display, drawPage, SLIP_SCREEN_PAGE_BYTES);
 	if (cursor->visible != 0) {
 		SlipCursor_RestoreBackground(pixels, drawPage);
 		SlipCursor_RestoreWidth(pixels);
@@ -19,15 +26,15 @@ void SlipScreen_PresentSingle(uint8_t *drawPage, uint8_t *display, SlipSoftwareC
 }
 
 void SlipScreen_CopyChanged(const uint8_t *current, const uint8_t *previous, uint8_t *display) {
-	uint32_t remaining = 16000;
+	uint32_t remaining = SLIP_SCREEN_COMPARE_GROUP_COUNT;
 	const uint8_t *source = current;
 	const uint8_t *comparison = previous;
 	for (;;) {
 		int equal;
 		do {
-			equal = memcmp(source, comparison, 4) == 0;
-			source += 4;
-			comparison += 4;
+			equal = memcmp(source, comparison, SLIP_SCREEN_COMPARE_GROUP_BYTES) == 0;
+			source += SLIP_SCREEN_COMPARE_GROUP_BYTES;
+			comparison += SLIP_SCREEN_COMPARE_GROUP_BYTES;
 			--remaining;
 		} while (remaining != 0 && equal);
 		if (equal)
@@ -35,18 +42,18 @@ void SlipScreen_CopyChanged(const uint8_t *current, const uint8_t *previous, uin
 		const uint8_t *const changedStart = source;
 		const uint32_t before = remaining;
 		while (remaining != 0) {
-			equal = memcmp(source, comparison, 4) == 0;
-			source += 4;
-			comparison += 4;
+			equal = memcmp(source, comparison, SLIP_SCREEN_COMPARE_GROUP_BYTES) == 0;
+			source += SLIP_SCREEN_COMPARE_GROUP_BYTES;
+			comparison += SLIP_SCREEN_COMPARE_GROUP_BYTES;
 			--remaining;
 			if (equal)
 				break;
 		}
 		const uint32_t groups = before - remaining + 1;
-		source = changedStart - 4;
+		source = changedStart - SLIP_SCREEN_COMPARE_GROUP_BYTES;
 		uint8_t *const destination = display + (source - current);
-		memcpy(destination, source, groups * 4);
-		source += groups * 4;
+		memcpy(destination, source, groups * SLIP_SCREEN_COMPARE_GROUP_BYTES);
+		source += groups * SLIP_SCREEN_COMPARE_GROUP_BYTES;
 		if (remaining == 0)
 			return;
 		comparison = previous + (source - current);

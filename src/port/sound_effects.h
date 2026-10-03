@@ -11,9 +11,48 @@
 enum {
 	SLIP_SOUND_EFFECT_RESOURCE_COUNT = 24,
 	SLIP_SOUND_EFFECT_QUEUE_COUNT = 20,
+	SLIP_SOUND_ENGINE_COUNT = 2,
 	SLIP_SOUND_EFFECT_TRACK_LOW_INDEX = 12,
 	SLIP_SOUND_EFFECT_TRACK_HIGH_INDEX = 18
 };
+
+/* Queue IDs map to samples through resourceIndices in sound_effects.c. */
+typedef enum SlipSoundEffect {
+	SLIP_SOUND_EFFECT_NONE = 0,
+	SLIP_SOUND_EFFECT_CRASH = 1,
+	SLIP_SOUND_EFFECT_SCRAPE_2 = 2,
+	SLIP_SOUND_EFFECT_SCRAPE_1 = 3,
+	SLIP_SOUND_EFFECT_BLASTER = 4,
+	SLIP_SOUND_EFFECT_MISSILE = 5,
+	SLIP_SOUND_EFFECT_BONUS_COLLECT = 6,
+	SLIP_SOUND_EFFECT_MINE_DROP = 7,
+	SLIP_SOUND_EFFECT_WATER_HIT = 8,
+	SLIP_SOUND_EFFECT_EXPLOSION = 9,
+	SLIP_SOUND_EFFECT_LASER_HIT = 10,
+	SLIP_SOUND_EFFECT_DISRUPTOR = 11,
+	SLIP_SOUND_EFFECT_ENGINE_START = 12,
+	SLIP_SOUND_EFFECT_BOMBER = 13,
+	SLIP_SOUND_EFFECT_SCRAMBLE = 14,
+	SLIP_SOUND_EFFECT_HYPERNEU = 15,
+	SLIP_SOUND_EFFECT_AMBLER = 16,
+	SLIP_SOUND_EFFECT_COUNT = 16
+} SlipSoundEffect;
+
+typedef enum SlipSoundPositionMode {
+	SLIP_SOUND_POSITION_NONE = 0,
+	SLIP_SOUND_POSITION_OBJECT = 1,
+	SLIP_SOUND_POSITION_COORDINATES = 2
+} SlipSoundPositionMode;
+
+typedef enum SlipSoundTrackChangeMode {
+	SLIP_SOUND_TRACK_CHANGE_PLAY = 0,
+	SLIP_SOUND_TRACK_CHANGE_SUPPRESS = 2
+} SlipSoundTrackChangeMode;
+
+typedef enum SlipSoundListenerMode {
+	SLIP_SOUND_LISTENER_COORDINATES = 0,
+	SLIP_SOUND_LISTENER_OBJECT = 1
+} SlipSoundListenerMode;
 
 typedef struct SlipSoundEffectRequest {
 	uint32_t effect;
@@ -44,7 +83,7 @@ typedef struct SlipSoundEffectsState {
 		int32_t steeringInput;
 		uint16_t frameSubmissionCount;
 		uint32_t loopHandle;
-	} engines[2];
+	} engines[SLIP_SOUND_ENGINE_COUNT];
 
 	uint32_t ambientRequested;
 	uint32_t ambientCurrent;

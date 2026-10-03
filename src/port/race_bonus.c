@@ -1,5 +1,6 @@
 #include "race_bonus.h"
 
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "race.h"
 #include "race_collision.h"
@@ -7,6 +8,8 @@
 #include "track_view_render.h"
 
 #include <string.h>
+
+enum { SLIP_RACE_BONUS_DRAW_RADIUS = 7320, SLIP_RACE_BONUS_COLLISION_HALF_EXTENT = 9760 };
 
 typedef struct SlipRaceBonusPrivate {
 	int32_t bonusType;
@@ -22,7 +25,7 @@ uint32_t SlipRaceBonus_Type(uint16_t objectOffset) {
 static SlipRaceBonusHostBindings *SlipRaceBonus_hostBindings;
 
 static const SlipView3DMatrix SlipRaceBonus_identity = {
-    .m = {0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000},
+    .m = {SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE},
 };
 
 static const int32_t SlipRaceBonus_normalTypes[] = {
@@ -112,7 +115,7 @@ uint32_t SlipRaceBonus_Event(uint32_t eventCode, uint32_t eventPayload, uint32_t
 	(void)dispatchData;
 	(void)dispatchFrame;
 	state = (SlipRaceBonusPrivate *)(void *)SlipObject_PrivateState(objectOffset);
-	switch ((SlipObjectEvent)(eventCode & 0xffffu)) {
+	switch ((SlipObjectEvent)(eventCode & UINT16_MAX)) {
 	case SLIP_OBJECT_EVENT_COLLISION_STOP:
 		(void)SlipRaceCollision_RemoveBody(objectOffset);
 		SlipObject_Free(objectOffset, 0, 0, 0, 0, 0, 0);
@@ -160,7 +163,7 @@ void SlipRaceBonus_Create(SlipView3DVec32 position, int32_t remainingTime, int32
 			    (uint16_t)(sizeof(SlipRaceBonus_normalTypes) / sizeof(SlipRaceBonus_normalTypes[0]) - 1u))];
 		}
 	}
-	if (SlipRace_gameMode != 0 &&
+	if (SlipRace_gameMode != SLIP_RACE_GAME_SINGLE_PLAYER &&
 	    (bonusType == SLIP_RACE_BONUS_ENGINE_REPAIR || bonusType == SLIP_RACE_BONUS_CONTROL_REPAIR)) {
 		bonusType = SLIP_RACE_BONUS_POWERUP_RECHARGE;
 	}
@@ -168,13 +171,17 @@ void SlipRaceBonus_Create(SlipView3DVec32 position, int32_t remainingTime, int32
 	state->remainingMilliseconds = remainingTime;
 	(void)SlipObject_SetDrawData(player->objectTable, player->objectTableBytes, objectOffset,
 	                             bindings->resourceHandles[bonusType], &setActor);
-	(void)SlipObject_SetActorHandle(objectOffset, 1u, &actorHandleWrite);
-	(void)SlipObject_SetDrawExtent(player->objectTable, player->objectTableBytes, objectOffset, 0x1c98u, &setRadius);
-	if (SlipRaceCollision_CreateBody(objectOffset, 2u)) {
+	(void)SlipObject_SetActorHandle(objectOffset, SLIP_OBJECT_FLAG_BONUS, &actorHandleWrite);
+	(void)SlipObject_SetDrawExtent(player->objectTable, player->objectTableBytes, objectOffset,
+	                               SLIP_RACE_BONUS_DRAW_RADIUS, &setRadius);
+	if (SlipRaceCollision_CreateBody(objectOffset, SLIP_COLLISION_BODY_CONTACTS_ENABLED)) {
 		SlipObject_Free(objectOffset, 0, 0, 0, 0, 0, 0);
 		return;
 	}
-	SlipRaceCollision_SetBodyBounds(objectOffset, -0x2620, -0x2620, -0x2620, 0x2620, 0x2620, 0x2620);
+	SlipRaceCollision_SetBodyBounds(objectOffset, -SLIP_RACE_BONUS_COLLISION_HALF_EXTENT,
+	                                -SLIP_RACE_BONUS_COLLISION_HALF_EXTENT, -SLIP_RACE_BONUS_COLLISION_HALF_EXTENT,
+	                                SLIP_RACE_BONUS_COLLISION_HALF_EXTENT, SLIP_RACE_BONUS_COLLISION_HALF_EXTENT,
+	                                SLIP_RACE_BONUS_COLLISION_HALF_EXTENT);
 	(void)SlipTrackWorld_AddSlot(
 	    objectOffset, 2u, 1u, bindings->slotDrawBase, bindings->slotDrawBytes, bindings->slotDrawCallbacks,
 	    bindings->slotDrawCallbackCount, bindings->slotDrawBaseAddress, bindings->slotDrawFreeListAddress,

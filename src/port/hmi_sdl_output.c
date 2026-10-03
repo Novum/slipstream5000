@@ -53,7 +53,8 @@ bool HmiSdlOutput_Open(HmiSdlOutput *output, HmiMixer1000State *mixer, uint32_t 
 	SDL_AudioSpec spec;
 
 	memset(output, 0, sizeof(*output));
-	if (mixer->dmaChannel > 7 || mixer->dmaBufferSize == 0 || outputRate == 0 || mixerTimerRate == 0) {
+	if (mixer->dmaChannel > HMI_MIXER_BYTE_DMA_CHANNEL_MAXIMUM || mixer->dmaBufferSize == 0 || outputRate == 0 ||
+	    mixerTimerRate == 0) {
 		return false;
 	}
 	output->mixer = mixer;

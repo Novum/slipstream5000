@@ -2,9 +2,17 @@
 #define SLIPSTREAM5000_VEHICLE_SELECT_H
 
 #include "font.h"
+#include "race.h"
 #include "sprite.h"
 #include "string_table.h"
 #include <stdint.h>
+
+enum {
+	SLIP_VEHICLE_DOOR_FRAME_COUNT = 4,
+	SLIP_VEHICLE_SELECTION_REDRAW_PASSES = 2,
+	SLIP_VEHICLE_SELECTION_TITLE_COLOUR = 0x90,
+	SLIP_VEHICLE_SELECTION_TITLE_TOP = 10
+};
 
 typedef struct SlipVehicleDoor {
 	uint8_t frame, redrawPasses;
@@ -13,7 +21,7 @@ typedef struct SlipVehicleDoor {
 typedef struct SlipVehicleSelection {
 	uint32_t titleTag;
 	uint16_t titleDelay;
-	SlipVehicleDoor doors[10];
+	SlipVehicleDoor doors[SLIP_RACE_RACER_COUNT];
 	uint16_t doorElapsed;
 	uint16_t selectedVehicle;
 	uint16_t backgroundRedraws;

@@ -1,8 +1,18 @@
 #include "resource_platform.h"
 
-uint32_t SlipResource_extendedHandles[16];
+enum {
+	SLIP_RESOURCE_EXTENDED_ALLOCATION_RETRY_COUNT = 32,
+	SLIP_RESOURCE_EXTENDED_PAGE_BYTES = 4096,
+	SLIP_RESOURCE_CONVENTIONAL_MIN_PARAGRAPHS = 16,
+	SLIP_DOS_MEMORY_DAMAGED = 7
+};
+
+/* Retain the original 28-bit range and round down to a page boundary. */
+#define SLIP_RESOURCE_EXTENDED_AVAILABLE_BYTES_MASK UINT32_C(0x0ffff000)
+
+uint32_t SlipResource_extendedHandles[SLIP_RESOURCE_EXTENDED_REGION_CAPACITY];
 uint16_t SlipResource_extendedCount;
-uint16_t SlipResource_conventionalSelectors[16];
+uint16_t SlipResource_conventionalSelectors[SLIP_RESOURCE_CONVENTIONAL_REGION_CAPACITY];
 uint16_t SlipResource_conventionalCount;
 uint32_t SlipResource_allocationRetries;
 uint32_t SlipResource_requestedAllocationBytes;
@@ -23,20 +33,20 @@ uint32_t SlipResource_AvailableExtended(void *context) {
 	bytes -= SlipResource_reservedExtendedBytes;
 	if (bytes < SlipResource_allocationReserveBytes)
 		return 0;
-	return (bytes - SlipResource_allocationReserveBytes) & 0x0ffff000u;
+	return (bytes - SlipResource_allocationReserveBytes) & SLIP_RESOURCE_EXTENDED_AVAILABLE_BYTES_MASK;
 }
 
 bool SlipResource_AllocateExtended(void *context, uint32_t bytes, SlipResourceRegion *region) {
 	const SlipResourceMemoryServices *const services = context;
-	if (SlipResource_extendedCount == 16)
+	if (SlipResource_extendedCount == SLIP_RESOURCE_EXTENDED_REGION_CAPACITY)
 		return false;
 	SlipResource_requestedAllocationBytes = bytes;
 	SlipResourceExtendedAllocation allocation;
 	uint32_t attemptedBytes = bytes;
 	if (!services->allocateExtended(services->context, attemptedBytes, &allocation)) {
-		SlipResource_allocationRetries = 32;
+		SlipResource_allocationRetries = SLIP_RESOURCE_EXTENDED_ALLOCATION_RETRY_COUNT;
 		for (;;) {
-			SlipResource_allocationReserveBytes += 4096;
+			SlipResource_allocationReserveBytes += SLIP_RESOURCE_EXTENDED_PAGE_BYTES;
 			if (SlipResource_requestedAllocationBytes < SlipResource_allocationReserveBytes)
 				return false;
 			attemptedBytes = SlipResource_requestedAllocationBytes - SlipResource_allocationReserveBytes;
@@ -55,15 +65,15 @@ bool SlipResource_AllocateExtended(void *context, uint32_t bytes, SlipResourceRe
 
 uint16_t SlipResource_AvailableConventional(void *context) {
 	const SlipResourceMemoryServices *const services = context;
-	SlipResourceConventionalAllocation allocation = services->allocateConventional(services->context, 0xffff);
-	if (!allocation.failed || allocation.errorCode == 7)
+	SlipResourceConventionalAllocation allocation = services->allocateConventional(services->context, UINT16_MAX);
+	if (!allocation.failed || allocation.errorCode == SLIP_DOS_MEMORY_DAMAGED)
 		SlipRuntime_Fatal("ResInstall - DOS memory damaged");
 	uint16_t paragraphs = allocation.availableParagraphs;
 	if (paragraphs < SlipResource_reservedConventionalParagraphs)
 		paragraphs = 0;
 	else
 		paragraphs = (uint16_t)(paragraphs - SlipResource_reservedConventionalParagraphs);
-	if (paragraphs <= 16)
+	if (paragraphs <= SLIP_RESOURCE_CONVENTIONAL_MIN_PARAGRAPHS)
 		paragraphs = 0;
 	return paragraphs;
 }
@@ -76,7 +86,7 @@ bool SlipResource_AllocateConventional(void *context, uint16_t paragraphs, SlipR
 	const uint16_t index = SlipResource_conventionalCount++;
 	SlipResource_conventionalSelectors[index] = allocation.selector;
 	region->block = allocation.block;
-	region->bytes = (uint32_t)paragraphs << 4;
+	region->bytes = (uint32_t)paragraphs << SLIP_RESOURCE_PARAGRAPH_SHIFT;
 	return true;
 }
 
@@ -89,7 +99,8 @@ void SlipResource_FreePlatform(void *context) {
 	}
 	count = SlipResource_conventionalCount;
 	for (uint32_t index = 0; index < count; ++index) {
-		if (services->freeConventional(services->context, SlipResource_conventionalSelectors[index]) == 7)
+		if (services->freeConventional(services->context, SlipResource_conventionalSelectors[index]) ==
+		    SLIP_DOS_MEMORY_DAMAGED)
 			SlipRuntime_Fatal("DOSExtendFreeAll - DOS memory damaged");
 	}
 }

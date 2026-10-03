@@ -2,7 +2,12 @@
 #include "input_navigation.h"
 #include "joystick_calibration.h"
 
-enum { CONTROLLER_SLOTS = 2, BUTTONS_PER_CONTROLLER = 2, SDL_AXIS_TO_GAMEPORT_SHIFT = 2 };
+enum {
+	CONTROLLER_SLOTS = 2,
+	BUTTONS_PER_CONTROLLER = 2,
+	SDL_AXIS_TO_GAMEPORT_SHIFT = 2,
+	SDL_AXIS_UNSIGNED_BIAS = 1 << 15
+};
 
 typedef struct SlipControllerSdlDevice {
 	SDL_JoystickID id;
@@ -32,8 +37,8 @@ bool SlipControllerSdl_Read(void *context, uint32_t joystick, uint16_t *x, uint1
 	const Sint16 axisY = device->gamepad ? SDL_GetGamepadAxis(device->gamepad, SDL_GAMEPAD_AXIS_LEFTY)
 	                                     : SDL_GetJoystickAxis(device->joystick, 1);
 
-	*x = (uint16_t)((((int32_t)axisX + 32768) >> SDL_AXIS_TO_GAMEPORT_SHIFT) + 1);
-	*y = (uint16_t)((((int32_t)axisY + 32768) >> SDL_AXIS_TO_GAMEPORT_SHIFT) + 1);
+	*x = (uint16_t)((((int32_t)axisX + SDL_AXIS_UNSIGNED_BIAS) >> SDL_AXIS_TO_GAMEPORT_SHIFT) + 1);
+	*y = (uint16_t)((((int32_t)axisY + SDL_AXIS_UNSIGNED_BIAS) >> SDL_AXIS_TO_GAMEPORT_SHIFT) + 1);
 	return true;
 }
 
@@ -69,7 +74,7 @@ static void SlipControllerSdl_Discover(void) {
 		}
 		device->id = ids[index];
 
-		if (SlipJoystick_Calibrate(0, slot, SlipControllerSdl_Read, NULL))
+		if (SlipJoystick_Calibrate(SLIP_JOYSTICK_CALIBRATION_INITIALIZE, slot, SlipControllerSdl_Read, NULL))
 			SlipJoystick_present[slot] = 1;
 	}
 	SDL_free(ids);

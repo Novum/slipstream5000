@@ -5,6 +5,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+enum {
+	SLIP_RESOURCE_BASE_NAME_BYTES = 8,
+	SLIP_RESOURCE_EXTENSION_BYTES = 3,
+	SLIP_RESOURCE_NAME_BYTES = SLIP_RESOURCE_BASE_NAME_BYTES + 1 + SLIP_RESOURCE_EXTENSION_BYTES,
+	SLIP_RESOURCE_NAME_BUFFER_BYTES = SLIP_RESOURCE_NAME_BYTES + 1,
+	SLIP_RESOURCE_WILDCARD_BUFFER_BYTES = SLIP_RESOURCE_NAME_BUFFER_BYTES + 1,
+	SLIP_RESOURCE_CALLBACK_CAPACITY = 32
+};
+
 struct SlipShape3DHeader;
 typedef void (*SlipResourceLoadedCallback)(struct SlipShape3DHeader *header);
 
@@ -14,12 +23,14 @@ typedef struct SlipResourceCallback {
 	uint32_t zeroInitializedWord;
 } SlipResourceCallback;
 
-extern SlipResourceCallback SlipResource_callbacks[32];
+extern SlipResourceCallback SlipResource_callbacks[SLIP_RESOURCE_CALLBACK_CAPACITY];
 extern uint32_t SlipResource_callbackCount;
 void SlipResource_RegisterCallback(uint32_t extension, SlipResourceLoadedCallback callback);
 extern uint32_t SlipResource_loadExtension;
 
 enum {
+	SLIP_RESOURCE_PARAGRAPH_SHIFT = 4,
+	SLIP_RESOURCE_PARAGRAPH_BYTES = 1 << SLIP_RESOURCE_PARAGRAPH_SHIFT,
 	SLIP_RESOURCE_DOS_BLOCK_HEADER_BYTES = 0x20,
 	SLIP_RESOURCE_DOS_HANDLE_BYTES = 0x10,
 	SLIP_RESOURCE_HANDLE_SENTINEL_COUNT = 2,

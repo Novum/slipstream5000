@@ -1,66 +1,74 @@
 #include "track_assets.h"
 #include "byte_order.h"
 #include "runtime.h"
+#include "shape_format.h"
+#include "track_format.h"
 #include "track_world.h"
 
 #include <string.h>
 
+enum {
+	SLIP_TRACK_ASSET_NAME_BUFFER_BYTES = SLIP_RESOURCE_NAME_BUFFER_BYTES,
+	SLIP_TRACK_AFFINE_DEPTH_THRESHOLD = 536800,
+	SLIP_TRACK_FULL_VIEWPORT_AFFINE_DEPTH_THRESHOLD = 780800
+};
+
 void SlipTrackAssets_LoadScenery(SlipTrackAssetBundle *bundle) {
 	uint8_t *const trd = bundle->trdPayload.data;
-	const uint16_t tableOffset = SlipBytes_ReadLE16(trd + 2);
+	const uint16_t tableOffset = SlipBytes_ReadLE16(trd + SLIP_TRD_GROUP_TABLE_OFFSET);
 	if (tableOffset == 0)
 		return;
 	uint8_t *entry = trd + tableOffset;
 	uint16_t remaining = SlipBytes_ReadLE16(entry);
-	entry += 2;
+	entry += SLIP_TRD_TABLE_COUNT_BYTES;
 	do {
-		const uint16_t sceneryOffset = SlipBytes_ReadLE16(entry + 8);
+		const uint16_t sceneryOffset = SlipBytes_ReadLE16(entry + SLIP_TRD_GROUP_SCENERY_LIST_OFFSET);
 		if (sceneryOffset != 0) {
 			uint8_t *scenery = trd + sceneryOffset;
 			uint16_t sceneryRemaining = SlipBytes_ReadLE16(scenery);
-			scenery += 2;
+			scenery += SLIP_TRD_TABLE_COUNT_BYTES;
 			do {
-				scenery[0x0c] = 0;
-				scenery[0x0d] = 0;
+				scenery[SLIP_TRK_SHAPE_HANDLE_OFFSET] = 0;
+				scenery[SLIP_TRK_SHAPE_HANDLE_OFFSET + 1] = 0;
 				uint16_t resource;
 				if (!bundle->resourceCalls->load(NULL, (const char *)scenery, &resource))
 					SlipRuntime_Fatal("TrackLoad - missing shape");
-				scenery[0x0c] = (uint8_t)resource;
-				scenery[0x0d] = (uint8_t)(resource >> 8);
+				scenery[SLIP_TRK_SHAPE_HANDLE_OFFSET] = (uint8_t)resource;
+				scenery[SLIP_TRK_SHAPE_HANDLE_OFFSET + 1] = (uint8_t)(resource >> 8);
 				const uint8_t *shape = bundle->resourceCalls->lock(NULL, resource);
-				uint32_t minimumY = SlipBytes_ReadLE32(shape + 0x28);
+				uint32_t minimumY = SlipBytes_ReadLE32(shape + SLIP_SHAPE_MINIMUM_Y_OFFSET);
 				bundle->resourceCalls->unlock(NULL, resource);
 				shape = bundle->resourceCalls->lock(NULL, resource);
-				const uint32_t radius = SlipBytes_ReadLE32(shape + 0x1c);
+				const uint32_t radius = SlipBytes_ReadLE32(shape + SLIP_SHAPE_RADIUS_OFFSET);
 				bundle->resourceCalls->unlock(NULL, resource);
 				minimumY = 0u - minimumY;
 				for (unsigned byte = 0; byte < 4; ++byte) {
-					scenery[0x1c + byte] = (uint8_t)(radius >> (byte * 8u));
-					scenery[0x20 + byte] = (uint8_t)(minimumY >> (byte * 8u));
+					scenery[SLIP_TRK_SHAPE_RADIUS_OFFSET + byte] = (uint8_t)(radius >> (byte * 8u));
+					scenery[SLIP_TRK_SHAPE_CENTER_Y_OFFSET + byte] = (uint8_t)(minimumY >> (byte * 8u));
 				}
-				scenery += 0x46;
+				scenery += SLIP_TRD_SCENERY_RECORD_BYTES;
 			} while (--sceneryRemaining != 0);
 		}
 		entry += SlipBytes_ReadLE16(entry);
 	} while (--remaining != 0);
 }
 
-static void SlipTrackAssets_CopyTrackName(char dst[13], const char *src) {
+static void SlipTrackAssets_CopyTrackName(char dst[SLIP_TRACK_ASSET_NAME_BUFFER_BYTES], const char *src) {
 	size_t i;
 
-	memset(dst, 0, 13u);
+	memset(dst, 0, SLIP_TRACK_ASSET_NAME_BUFFER_BYTES);
 	if (src == NULL) {
 		return;
 	}
-	for (i = 0; i < 12u && src[i] != '\0'; ++i) {
+	for (i = 0; i < SLIP_TRACK_ASSET_NAME_BUFFER_BYTES - 1 && src[i] != '\0'; ++i) {
 		dst[i] = src[i];
 	}
 }
 
-static bool SlipTrackAssets_MutateExtensionTail(char name[13], char extensionTail) {
+static bool SlipTrackAssets_MutateExtensionTail(char name[SLIP_TRACK_ASSET_NAME_BUFFER_BYTES], char extensionTail) {
 	const size_t len = strlen(name);
 
-	if (len == 0 || len >= 13u) {
+	if (len == 0 || len >= SLIP_TRACK_ASSET_NAME_BUFFER_BYTES) {
 		return false;
 	}
 	name[len - 1u] = extensionTail;
@@ -70,25 +78,25 @@ static bool SlipTrackAssets_MutateExtensionTail(char name[13], char extensionTai
 static void SlipTrackAssets_ReleaseActors(SlipResourcePayload *trd, SlipArticSlotReleaseResource releaseResource,
                                           void *user) {
 	if (trd->data != NULL) {
-		const uint16_t tableOffset = SlipBytes_ReadLE16(trd->data + 2);
+		const uint16_t tableOffset = SlipBytes_ReadLE16(trd->data + SLIP_TRD_GROUP_TABLE_OFFSET);
 		if (tableOffset != 0) {
 			uint8_t *entry = trd->data + tableOffset;
 			uint16_t remaining = SlipBytes_ReadLE16(entry);
-			entry += 2;
+			entry += SLIP_TRD_TABLE_COUNT_BYTES;
 			do {
-				const uint16_t actorsOffset = SlipBytes_ReadLE16(entry + 8);
+				const uint16_t actorsOffset = SlipBytes_ReadLE16(entry + SLIP_TRD_GROUP_SCENERY_LIST_OFFSET);
 				if (actorsOffset != 0) {
 					uint8_t *actor = trd->data + actorsOffset;
 					uint16_t actorsRemaining = SlipBytes_ReadLE16(actor);
-					actor += 2;
+					actor += SLIP_TRD_TABLE_COUNT_BYTES;
 					do {
-						if (SlipBytes_ReadLE16(actor + 0xc) != 0) {
+						if (SlipBytes_ReadLE16(actor + SLIP_TRK_SHAPE_HANDLE_OFFSET) != 0) {
 							if (releaseResource != NULL)
-								releaseResource(user, SlipBytes_ReadLE16(actor + 0xc));
-							actor[0xc] = 0;
-							actor[0xd] = 0;
+								releaseResource(user, SlipBytes_ReadLE16(actor + SLIP_TRK_SHAPE_HANDLE_OFFSET));
+							actor[SLIP_TRK_SHAPE_HANDLE_OFFSET] = 0;
+							actor[SLIP_TRK_SHAPE_HANDLE_OFFSET + 1] = 0;
 						}
-						actor += 0x46;
+						actor += SLIP_TRD_SCENERY_RECORD_BYTES;
 					} while (--actorsRemaining != 0);
 				}
 				entry += SlipBytes_ReadLE16(entry);
@@ -103,7 +111,7 @@ void SlipTrackAssets_FreeBundle(SlipTrackAssetBundle *bundle, SlipArticSlotRelea
 	if (bundle->trdHandle != 0)
 		SlipTrackAssets_ReleaseActors(&bundle->trdPayload, releaseResource, user);
 	uint16_t *handles[] = {&bundle->trkHandle, &bundle->trdHandle, &bundle->trcHandle};
-	for (unsigned i = 0; i < 3; ++i) {
+	for (unsigned i = 0; i < sizeof(handles) / sizeof(handles[0]); ++i) {
 		if (*handles[i] != 0) {
 			bundle->resourceCalls->unlock(NULL, *handles[i]);
 			bundle->resourceCalls->release(NULL, *handles[i]);
@@ -137,20 +145,21 @@ bool SlipTrackAssets_LoadBundle(const char *trkName, SlipTrackAssetBundle *bundl
 	if (!SlipTrackAssets_LoadPayload(bundle->trkName, &bundle->trkPayload, &bundle->trkHandle, calls)) {
 		return false;
 	}
-	if (bundle->trkPayload.size < 0xa4u)
+	if (bundle->trkPayload.size < SLIP_TRK_VIEWPORT_SETTINGS_END)
 		return false;
 
-	bundle->defaultTraversalGate = (int16_t)SlipBytes_ReadLE16(bundle->trkPayload.data + 0x9eu);
-	bundle->affineDepthThreshold = 0x000830e0u;
+	bundle->defaultTraversalGate =
+	    (int16_t)SlipBytes_ReadLE16(bundle->trkPayload.data + SLIP_TRK_DEFAULT_TRAVERSAL_GATE_OFFSET);
+	bundle->affineDepthThreshold = SLIP_TRACK_AFFINE_DEPTH_THRESHOLD;
 	bundle->useFullObjectViewport = 0;
-	if (SlipBytes_ReadLE16(bundle->trkPayload.data + 0xa2u) != 0) {
-		bundle->affineDepthThreshold = 0x000bea00u;
-		bundle->useFullObjectViewport = 0xffffffffu;
+	if (SlipBytes_ReadLE16(bundle->trkPayload.data + SLIP_TRK_FULL_OBJECT_VIEWPORT_OFFSET) != 0) {
+		bundle->affineDepthThreshold = SLIP_TRACK_FULL_VIEWPORT_AFFINE_DEPTH_THRESHOLD;
+		bundle->useFullObjectViewport = UINT32_MAX;
 	}
 
-	if (SlipBytes_ReadLE16(bundle->trkPayload.data + 2u) != 0x2bu)
+	if (SlipBytes_ReadLE16(bundle->trkPayload.data + SLIP_TRK_VERSION_OFFSET) != SLIP_TRK_VERSION)
 		SlipRuntime_Fatal("TrackLoad - wrong data version");
-	if (SlipBytes_ReadLE16(bundle->trkPayload.data + 4u) == 0)
+	if (SlipBytes_ReadLE16(bundle->trkPayload.data + SLIP_TRACK_LINKED_OFFSET) == 0)
 		SlipRuntime_Fatal("TrackLoad - this data is unlinked");
 
 	SlipTrackAssets_CopyTrackName(bundle->trdName, bundle->trkName);

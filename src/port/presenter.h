@@ -5,12 +5,21 @@
 #include <stddef.h>
 #include <stdint.h>
 
+enum {
+	SLIP_PRESENTER_VARIANT_COUNT = 2,
+	SLIP_PRESENTER_LAYER_COUNT = 4,
+	SLIP_PRESENTER_FRAME_CAPACITY = 20,
+	SLIP_PRESENTER_SEQUENCE_CAPACITY = 8,
+	SLIP_PRESENTER_RETURN_STACK_CAPACITY = 5,
+	SLIP_PRESENTER_IDLE_PROGRAM_BYTES = 80
+};
+
 typedef struct SlipPresenterSequence {
 	bool active;
 	const uint8_t *cursor;
 	const uint8_t *end;
 	int16_t stackIndex;
-	const uint8_t *returnStack[5];
+	const uint8_t *returnStack[SLIP_PRESENTER_RETURN_STACK_CAPACITY];
 	uint16_t delay;
 	uint16_t elapsed;
 } SlipPresenterSequence;
@@ -18,15 +27,15 @@ typedef struct SlipPresenterSequence {
 typedef struct SlipPresenterLayer {
 	uint16_t frame, count;
 	int16_t x, y;
-	uint16_t resources[20];
+	uint16_t resources[SLIP_PRESENTER_FRAME_CAPACITY];
 } SlipPresenterLayer;
 
 typedef struct SlipPresenter {
 	bool active;
 	uint16_t variant;
 	uint16_t faceResource;
-	SlipPresenterLayer layers[2][4];
-	SlipPresenterSequence sequences[8];
+	SlipPresenterLayer layers[SLIP_PRESENTER_VARIANT_COUNT][SLIP_PRESENTER_LAYER_COUNT];
+	SlipPresenterSequence sequences[SLIP_PRESENTER_SEQUENCE_CAPACITY];
 	uint16_t overshoot;
 } SlipPresenter;
 
@@ -38,5 +47,5 @@ void SlipPresenter_Queue(const uint8_t *program, size_t bytes);
 void SlipPresenter_Update(uint16_t delta);
 void SlipPresenter_Draw(uint8_t *framebuffer, int pitch, int16_t x, int16_t y);
 
-extern const uint8_t SlipPresenter_idle[80];
+extern const uint8_t SlipPresenter_idle[SLIP_PRESENTER_IDLE_PROGRAM_BYTES];
 #endif

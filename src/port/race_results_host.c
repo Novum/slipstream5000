@@ -19,7 +19,7 @@ void SlipRaceResults_Begin(SlipRaceResultsScreen *screen, uint16_t track, SlipRa
 	screen->racers = racers;
 	if (SlipRace_type == SLIP_RACE_TYPE_CHAMPIONSHIP)
 		goto display;
-	if (SlipRace_gameMode != 0)
+	if (SlipRace_gameMode != SLIP_RACE_GAME_SINGLE_PLAYER)
 		goto display;
 	SlipRaceFindRacer found = SlipRace_FindRacer(screen->racers, playerOne);
 	if (found.racerNotFound)
@@ -41,25 +41,31 @@ display:
 	SlipRaceResults_BeginDisplay(screen, archive, sound);
 }
 
+enum { SLIP_RACE_RESULTS_SPEECH_RESERVE_BYTES = 0x80000 };
+
 void SlipRaceResults_BeginDisplay(SlipRaceResultsScreen *screen, const char *archive, SlipGameSoundState *sound) {
 	SlipRaceVoiceCalls voices = SlipRaceVoiceHost_Calls(sound);
-	if (SlipRace_gameMode != 1)
-		SlipRaceVoice_Setup(sound->digitalCard, 1, 1, 0, 0x80000, &voices);
+	if (SlipRace_gameMode != SLIP_RACE_GAME_SPLIT_SCREEN)
+		SlipRaceVoice_Setup(sound->digitalCard, SLIP_RACE_VOICE_BANK_RESULTS, 1, 0,
+		                    SLIP_RACE_RESULTS_SPEECH_RESERVE_BYTES, &voices);
 	if (!SlipMenuMusic_ResultsStart(screen->racers) && sound->musicCard != 0)
 		SlipRuntime_Fatal("Could not load DOS results music.");
-	char secondaryPath[512];
-	const char *archives[2];
+	char secondaryPath[SLIP_MENU_ARCHIVE_PATH_BYTES];
+	const char *archives[SLIP_MENU_ARCHIVE_CAPACITY];
 	const size_t count = SlipMenu_BuildArchiveList(archive, secondaryPath, archives);
 	SlipRaceResults_LoadAssets(&screen->assets, archives, count, (uint16_t)SlipConfig_Language());
 	SlipInput_SetNavigation(&resultsNavigation);
-	if (SlipRace_gameMode != 1) {
+	if (SlipRace_gameMode != SLIP_RACE_GAME_SPLIT_SCREEN) {
 		for (uint16_t i = 0; i < screen->racers->racerCount; ++i) {
 			const SlipRaceRacerState *const racer = &screen->racers->records[i];
-			if (racer->racerType == 0) {
-				static const uint32_t winningVoices[2] = {0, 1};
-				static const uint32_t positionVoices[11] = {2, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11};
-				const uint32_t voice =
-				    racer->racePosition == 1 ? winningVoices[SlipRandom_Range(2)] : positionVoices[racer->racePosition];
+			if (racer->racerType == SLIP_RACER_PLAYER_ONE) {
+				enum { SLIP_RESULTS_WINNING_VOICE_COUNT = 2 };
+
+				static const uint32_t winningVoices[SLIP_RESULTS_WINNING_VOICE_COUNT] = {0, 1};
+				static const uint32_t positionVoices[SLIP_RACE_RACER_COUNT + 1] = {2, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+				const uint32_t voice = racer->racePosition == 1
+				                           ? winningVoices[SlipRandom_Range(SLIP_RESULTS_WINNING_VOICE_COUNT)]
+				                           : positionVoices[racer->racePosition];
 				SlipRaceVoice_Play(sound->digitalCard, voice, &voices);
 				break;
 			}

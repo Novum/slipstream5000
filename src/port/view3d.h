@@ -5,6 +5,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* MATHS.BIN starts with three little-endian offsets to its lookup tables. */
+enum {
+	SLIP_MATHS_SINE_TABLE_OFFSET = 0,
+	SLIP_MATHS_ARCSINE_TABLE_OFFSET = 2,
+	SLIP_MATHS_ARCTANGENT_TABLE_OFFSET = 4,
+	SLIP_MATHS_HEADER_BYTES = 6
+};
+
 typedef struct SlipView3DMaths {
 	uint8_t *data;
 	size_t size;
@@ -272,10 +280,32 @@ SlipView3DVec32 SlipView3D_TransformPositionByRows(const SlipView3DMatrix *matri
 
 SlipView3DVec32 SlipView3D_TransformVector(const SlipView3DMatrix *matrix, SlipView3DVec32 vector);
 
-void SlipView3D_BuildBoxCorners(const SlipView3DMatrix *matrix, int32_t boundsAndCorners[30],
+/* Six input bounds followed by eight output XYZ triples. Corner names
+ * specify the selected X, Y and Z bounds, in that order. */
+enum {
+	SLIP_VIEW_BOX_MIN_X = 0,
+	SLIP_VIEW_BOX_MIN_Y = 1,
+	SLIP_VIEW_BOX_MIN_Z = 2,
+	SLIP_VIEW_BOX_MAX_X = 3,
+	SLIP_VIEW_BOX_MAX_Y = 4,
+	SLIP_VIEW_BOX_MAX_Z = 5,
+	SLIP_VIEW_BOX_MIN_MIN_MAX = 6,
+	SLIP_VIEW_BOX_MIN_MAX_MAX = 9,
+	SLIP_VIEW_BOX_MAX_MAX_MAX = 12,
+	SLIP_VIEW_BOX_MAX_MIN_MAX = 15,
+	SLIP_VIEW_BOX_MIN_MIN_MIN = 18,
+	SLIP_VIEW_BOX_MIN_MAX_MIN = 21,
+	SLIP_VIEW_BOX_MAX_MAX_MIN = 24,
+	SLIP_VIEW_BOX_MAX_MIN_MIN = 27,
+	SLIP_VIEW_BOX_BOUNDS_AND_CORNERS_COUNT = 30
+};
+
+void SlipView3D_BuildBoxCorners(const SlipView3DMatrix *matrix,
+                                int32_t boundsAndCorners[SLIP_VIEW_BOX_BOUNDS_AND_CORNERS_COUNT],
                                 SlipView3DVec32 translation);
 
-void SlipView3D_BuildBoxCornersThunk(const SlipView3DMatrix *matrix, int32_t boundsAndCorners[30],
+void SlipView3D_BuildBoxCornersThunk(const SlipView3DMatrix *matrix,
+                                     int32_t boundsAndCorners[SLIP_VIEW_BOX_BOUNDS_AND_CORNERS_COUNT],
                                      SlipView3DVec32 translation);
 
 SlipView3DVec32 SlipView3D_TransformVertex(const SlipView3DMatrix *matrix, SlipView3DVec32 translation,

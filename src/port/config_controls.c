@@ -1,8 +1,10 @@
 #include "config_controls.h"
 #include <string.h>
 
+enum { SLIP_CONFIG_CONTROLS_PANEL_X = 39, SLIP_CONFIG_CONTROLS_PANEL_Y = 53, SLIP_CONFIG_DIRECTION_KEY_COUNT = 4 };
+
 SlipConfigControlsState SlipConfigControls_state;
-uint8_t SlipConfigControls_usedInputs[256];
+uint8_t SlipConfigControls_usedInputs[SLIP_INPUT_CODE_COUNT];
 
 void SlipConfigControls_Run(SlipConfigControlsState *state, uint32_t player, uint16_t configurationBackground,
                             const SlipConfigControlsCalls *calls) {
@@ -52,12 +54,13 @@ void SlipConfigControls_Run(SlipConfigControlsState *state, uint32_t player, uin
 			if (menu->pressed(menu->context, SLIP_INPUT_SCAN_ENTER) ||
 			    menu->pressed(menu->context, SLIP_INPUT_MOUSE_LEFT)) {
 				if (selected != 0) {
-					if (selected == 10)
+					if (selected == SLIP_CONFIG_BINDINGS_CLOSE)
 						break;
-					if (selected == 1 || selected == 2)
+					if (selected == SLIP_CONFIG_BINDINGS_MOVEMENT_LABEL ||
+					    selected == SLIP_CONFIG_BINDINGS_MOVEMENT_VALUE)
 						calls->cycleMovement(calls->context, state->player);
 					else {
-						state->pendingBinding = fields[selected - 3];
+						state->pendingBinding = fields[selected - SLIP_CONFIG_BINDINGS_UP];
 						calls->hidePointer(calls->context);
 					}
 				}
@@ -65,7 +68,8 @@ void SlipConfigControls_Run(SlipConfigControlsState *state, uint32_t player, uin
 		}
 		calls->drawBindings(calls->context, state);
 		draw->clippedSprite(draw->context, configurationBackground, 0, 0);
-		draw->clippedSprite(draw->context, state->workingSprite, 39, 53);
+		draw->clippedSprite(draw->context, state->workingSprite, SLIP_CONFIG_CONTROLS_PANEL_X,
+		                    SLIP_CONFIG_CONTROLS_PANEL_Y);
 		menu->present(menu->context);
 		menu->poll(menu->context);
 		if (menu->pressed(menu->context, SLIP_INPUT_SCAN_ESCAPE)) {
@@ -85,31 +89,21 @@ bool SlipConfigControls_Conflict(void) {
 	memset(SlipConfigControls_usedInputs, 0, sizeof(SlipConfigControls_usedInputs));
 	const SlipRaceControlBinding *const first = &SlipRace_controlBindings[0];
 	const SlipRaceControlBinding *const second = &SlipRace_controlBindings[1];
-	if (first->movementControl != 0 && second->movementControl != 0 &&
+	if (first->movementControl != SLIP_MOVEMENT_KEYBOARD && second->movementControl != SLIP_MOVEMENT_KEYBOARD &&
 	    first->movementControl == second->movementControl)
 		return true;
 	const SlipInputCode *const firstKeys[] = {&first->left,       &first->right, &first->up,    &first->down,
 	                                          &first->accelerate, &first->fire,  &first->select};
 	const SlipInputCode *const secondKeys[] = {&second->left,       &second->right, &second->up,    &second->down,
 	                                           &second->accelerate, &second->fire,  &second->select};
-	unsigned remaining = 7, index = 0;
-	if (first->movementControl != 0) {
-		index += 4;
-		remaining -= 4;
-	}
-	do {
-		SlipConfigControls_usedInputs[(uint16_t)*firstKeys[index++]] = 1;
-	} while (--remaining != 0);
-	remaining = 7;
-	index = 0;
-	if (second->movementControl != 0) {
-		index += 4;
-		remaining -= 4;
-	}
-	do {
-		if (SlipConfigControls_usedInputs[(uint16_t)*secondKeys[index++]] != 0)
+	const unsigned firstKey = first->movementControl != SLIP_MOVEMENT_KEYBOARD ? SLIP_CONFIG_DIRECTION_KEY_COUNT : 0;
+	for (unsigned index = firstKey; index < sizeof(firstKeys) / sizeof(firstKeys[0]); ++index)
+		SlipConfigControls_usedInputs[(uint16_t)*firstKeys[index]] = 1;
+	const unsigned secondKey = second->movementControl != SLIP_MOVEMENT_KEYBOARD ? SLIP_CONFIG_DIRECTION_KEY_COUNT : 0;
+	for (unsigned index = secondKey; index < sizeof(secondKeys) / sizeof(secondKeys[0]); ++index) {
+		if (SlipConfigControls_usedInputs[(uint16_t)*secondKeys[index]] != 0)
 			return true;
-	} while (--remaining != 0);
+	}
 	return false;
 }
 
@@ -141,8 +135,8 @@ void SlipConfigControls_Warn(SlipConfigConflictState *state, uint16_t configurat
 	for (;;) {
 		menu->updateTimer(menu->context);
 		SlipConfigMenuPoint point = menu->pointer(menu->context);
-		point.x = (int16_t)(point.x - 39);
-		point.y = (int16_t)(point.y - 53);
+		point.x = (int16_t)(point.x - SLIP_CONFIG_CONTROLS_PANEL_X);
+		point.y = (int16_t)(point.y - SLIP_CONFIG_CONTROLS_PANEL_Y);
 		const uint32_t selection = menu->hitTest(menu->context, SLIP_CONFIG_CONFLICT_TABLE, point);
 		state->selection = selection;
 		if (menu->pressed(menu->context, SLIP_INPUT_SCAN_ENTER) ||
@@ -152,7 +146,8 @@ void SlipConfigControls_Warn(SlipConfigConflictState *state, uint16_t configurat
 		}
 		calls->drawConflict(calls->context, state);
 		draw->clippedSprite(draw->context, configurationBackground, 0, 0);
-		draw->clippedSprite(draw->context, state->workingSprite, 39, 53);
+		draw->clippedSprite(draw->context, state->workingSprite, SLIP_CONFIG_CONTROLS_PANEL_X,
+		                    SLIP_CONFIG_CONTROLS_PANEL_Y);
 		menu->present(menu->context);
 		menu->poll(menu->context);
 		if (menu->pressed(menu->context, SLIP_INPUT_SCAN_ESCAPE))
@@ -171,9 +166,9 @@ void SlipConfigControls_Calibrate(SlipConfigCalibrationState *state, uint32_t jo
 	state->joystick = joystick;
 	menu->navigation(menu->context, SLIP_CONFIG_CALIBRATION_TABLE);
 	state->detected = 0;
-	if (calls->calibration(calls->context, 0, state->joystick)) {
+	if (calls->calibration(calls->context, SLIP_JOYSTICK_CALIBRATION_INITIALIZE, state->joystick)) {
 		state->detected = 1;
-		calls->calibration(calls->context, 1, state->joystick);
+		calls->calibration(calls->context, SLIP_JOYSTICK_CALIBRATION_RESET_RANGE, state->joystick);
 	}
 	uint16_t handle;
 	if (!menu->load(menu->context, "JOYCAL.SPR", &handle))
@@ -190,15 +185,15 @@ void SlipConfigControls_Calibrate(SlipConfigCalibrationState *state, uint32_t jo
 	for (;;) {
 		menu->updateTimer(menu->context);
 		SlipConfigMenuPoint point = menu->pointer(menu->context);
-		point.x = (int16_t)(point.x - 39);
-		point.y = (int16_t)(point.y - 53);
+		point.x = (int16_t)(point.x - SLIP_CONFIG_CONTROLS_PANEL_X);
+		point.y = (int16_t)(point.y - SLIP_CONFIG_CONTROLS_PANEL_Y);
 		const uint32_t selection = menu->hitTest(menu->context, SLIP_CONFIG_CALIBRATION_TABLE, point);
 		state->selection = selection;
 		if (menu->pressed(menu->context, SLIP_INPUT_SCAN_ENTER) ||
 		    menu->pressed(menu->context, SLIP_INPUT_MOUSE_LEFT)) {
 			if (selection != 0) {
 				if (state->detected == 1) {
-					if (!calls->calibration(calls->context, 3, state->joystick)) {
+					if (!calls->calibration(calls->context, SLIP_JOYSTICK_CALIBRATION_FINISH, state->joystick)) {
 						state->detected = 0;
 						continue;
 					}
@@ -210,10 +205,11 @@ void SlipConfigControls_Calibrate(SlipConfigCalibrationState *state, uint32_t jo
 			}
 		}
 		if (state->detected == 1)
-			calls->calibration(calls->context, 2, state->joystick);
+			calls->calibration(calls->context, SLIP_JOYSTICK_CALIBRATION_SAMPLE_RANGE, state->joystick);
 		calls->drawCalibration(calls->context, state);
 		draw->clippedSprite(draw->context, configurationBackground, 0, 0);
-		draw->clippedSprite(draw->context, state->workingSprite, 39, 53);
+		draw->clippedSprite(draw->context, state->workingSprite, SLIP_CONFIG_CONTROLS_PANEL_X,
+		                    SLIP_CONFIG_CONTROLS_PANEL_Y);
 		menu->present(menu->context);
 		menu->poll(menu->context);
 		if (menu->pressed(menu->context, SLIP_INPUT_SCAN_ESCAPE))
@@ -225,18 +221,18 @@ void SlipConfigControls_Calibrate(SlipConfigCalibrationState *state, uint32_t jo
 }
 
 void SlipConfigControls_CycleMovement(uint32_t player, SlipConfigMousePresent mousePresent, void *context) {
-	uint16_t limit = 3;
+	uint16_t limit = SLIP_MOVEMENT_MOUSE;
 	if (mousePresent(context) != 0)
-		limit = 4;
+		limit = SLIP_MOVEMENT_COUNT;
 	if ((uint16_t)player != 2) {
 		uint16_t mode = (uint16_t)(SlipRace_controlBindings[0].movementControl + 1u);
 		if ((int16_t)mode >= (int16_t)limit)
-			mode = 0;
+			mode = SLIP_MOVEMENT_KEYBOARD;
 		SlipRace_controlBindings[0].movementControl = mode;
 	} else {
 		uint16_t mode = (uint16_t)(SlipRace_controlBindings[1].movementControl + 1u);
 		if ((int16_t)mode >= (int16_t)limit)
-			mode = 0;
+			mode = SLIP_MOVEMENT_KEYBOARD;
 		SlipRace_controlBindings[1].movementControl = mode;
 	}
 }

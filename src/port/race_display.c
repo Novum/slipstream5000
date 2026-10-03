@@ -1,9 +1,24 @@
 #include "race_display.h"
 #include "gpu/renderer.h"
 #include "port_app_bridge.h"
+#include "race.h"
 #include "raster/overlay.h"
 #include "vga_dac.h"
 #include <string.h>
+
+enum {
+	SLIP_RACE_DISPLAY_MAXIMUM_OUTPUT_DIMENSION = 8192,
+	SLIP_RACE_DISPLAY_SPLIT_VIEW_HEIGHT = SLIPSTREAM_SCREEN_HEIGHT / 2,
+	SLIP_RACE_DISPLAY_HUD_CENTER_TOP = 0,
+	SLIP_RACE_DISPLAY_HUD_CENTER_MIDDLE = 1,
+	SLIP_RACE_DISPLAY_HUD_RIGHT_EDGE = 2,
+	SLIP_RACE_DISPLAY_HUD_LEFT_EDGE = 3,
+	SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE = 4,
+	SLIP_RACE_DISPLAY_HUD_REGION_COUNT = 5,
+	SLIP_RACE_DISPLAY_LEFT_HUD_MARGIN = 8,
+	SLIP_RACE_DISPLAY_LEFT_HUD_ART_OFFSET = 14,
+	SLIP_RACE_DISPLAY_BOTTOM_HUD_SHIFT = 7
+};
 
 bool SlipRaceDisplay_highRes;
 bool SlipRaceDisplay_ready;
@@ -33,7 +48,7 @@ void SlipRaceDisplay_BeginFrame(uint8_t *overlay) {
 	SlipRaceDisplay_EndFrame();
 	monitor = (SDL_Rect){0};
 	if (!SlipRaceDisplay_highRes || outputSize == NULL || !outputSize(&width, &height) || width < 2 || height < 2 ||
-	    width > 8192 || height > 8192)
+	    width > SLIP_RACE_DISPLAY_MAXIMUM_OUTPUT_DIMENSION || height > SLIP_RACE_DISPLAY_MAXIMUM_OUTPUT_DIMENSION)
 		return;
 	if (!SlipRaceGpu_Available())
 		return;
@@ -55,15 +70,19 @@ bool SlipRaceDisplay_BeginWorld(SlipDraw3DProjectState *project, SlipRaceDisplay
 	if (!frameActive)
 		return false;
 	SlipRaceDisplay_SaveView(project, saved);
-	const int top = gameMode == 1 && project->minY >= 100 ? height / 2 : 0;
-	const int bottom = gameMode == 1 && top == 0 ? height / 2 : height;
+	const int top = gameMode == SLIP_RACE_GAME_SPLIT_SCREEN && project->minY >= SLIP_RACE_DISPLAY_SPLIT_VIEW_HEIGHT
+	                    ? height / 2
+	                    : 0;
+	const int bottom = gameMode == SLIP_RACE_GAME_SPLIT_SCREEN && top == 0 ? height / 2 : height;
 	const int viewHeight = bottom - top;
 	worldHeight = viewHeight;
-	alignHudEdges = gameMode != 1;
-	originalHeight = gameMode == 1 ? 100 : 200;
+	alignHudEdges = gameMode != SLIP_RACE_GAME_SPLIT_SCREEN;
+	originalHeight =
+	    gameMode == SLIP_RACE_GAME_SPLIT_SCREEN ? SLIP_RACE_DISPLAY_SPLIT_VIEW_HEIGHT : SLIPSTREAM_SCREEN_HEIGHT;
 	int lineWidth = (viewHeight + originalHeight / 2) / originalHeight;
 	SlipRaceGpu_BeginWorld(lineWidth < 1 ? 1 : lineWidth);
-	const int originalTop = gameMode == 1 && top != 0 ? 100 : 0;
+	const int originalTop =
+	    gameMode == SLIP_RACE_GAME_SPLIT_SCREEN && top != 0 ? SLIP_RACE_DISPLAY_SPLIT_VIEW_HEIGHT : 0;
 	const int centerY = top + (project->centerY - originalTop) * viewHeight / originalHeight;
 	/* Match the original vertical field of view; extra horizontal pixels reveal more of the track. */
 	const uint32_t scale = (uint32_t)((uint64_t)project->perspectiveScale * viewHeight / originalHeight);
@@ -95,14 +114,15 @@ bool SlipRaceDisplay_BeginMonitor(SlipDraw3DProjectState *project, SlipRaceDispl
 	SlipRaceDisplay_SaveView(project, saved);
 	monitor =
 	    (SDL_Rect){project->minX, project->minY, project->maxX - project->minX + 1, project->maxY - project->minY + 1};
-	const float sy = height / 200.f, sx = sy * 5 / 6;
-	const float left = (width - 320 * sx) / 2;
+	const float sy = height / (float)SLIPSTREAM_SCREEN_HEIGHT,
+	            sx = sy * SLIPSTREAM_PIXEL_ASPECT_WIDTH / SLIPSTREAM_PIXEL_ASPECT_HEIGHT;
+	const float left = (width - SLIPSTREAM_SCREEN_WIDTH * sx) / 2;
 	const int minX = (int)(left + project->minX * sx), minY = (int)(project->minY * sy);
 	const int maxX = (int)(left + (project->maxX + 1) * sx) - 1;
 	const int maxY = (int)((project->maxY + 1) * sy) - 1;
 	const int centerX = (int)(left + project->centerX * sx), centerY = (int)(project->centerY * sy);
 	worldHeight = height;
-	originalHeight = 200;
+	originalHeight = SLIPSTREAM_SCREEN_HEIGHT;
 	SlipRaceGpu_BeginWorld((int)(sy + .5f) > 0 ? (int)(sy + .5f) : 1);
 	project->squarePixels = true;
 	SlipDraw3D_SetProjectionScale(project, (uint32_t)(project->perspectiveScale * sy));
@@ -117,7 +137,7 @@ void SlipRaceDisplay_EndMonitor(const SlipRaceDisplayView *saved) {
 	SlipRaceDisplay_EndWorld(saved);
 	/* The native scene replaces the old indexed monitor pixels; labels remain an overlay. */
 	for (int y = monitor.y; y < monitor.y + monitor.h; y++)
-		memset(overlayCoverage + y * 320 + monitor.x, 0, (size_t)monitor.w);
+		memset(overlayCoverage + y * SLIPSTREAM_SCREEN_WIDTH + monitor.x, 0, (size_t)monitor.w);
 }
 
 bool SlipRaceDisplay_BeginMap(void) {
@@ -167,21 +187,28 @@ static void SlipRaceDisplay_DrawHudRegion(const int *r, SDL_FRect destination) {
 
 void SlipRaceDisplay_DrawOverlay(void) {
 	const float h = (float)height, w = (float)width;
-	const float hudWidth = h * 4 / 3, left = (w - hudWidth) / 2, sx = hudWidth / 320, sy = h / 200;
+	const float hudWidth = h * SLIPSTREAM_DISPLAY_ASPECT_WIDTH / SLIPSTREAM_DISPLAY_ASPECT_HEIGHT,
+	            left = (w - hudWidth) / 2, sx = hudWidth / SLIPSTREAM_SCREEN_WIDTH, sy = h / SLIPSTREAM_SCREEN_HEIGHT;
 	if (!alignHudEdges) {
-		SlipRaceGpu_Overlay(overlayPixels, overlayCoverage, 0, 0, 320, 200, (SDL_FRect){left, 0, hudWidth, h});
+		SlipRaceGpu_Overlay(overlayPixels, overlayCoverage, 0, 0, SLIPSTREAM_SCREEN_WIDTH, SLIPSTREAM_SCREEN_HEIGHT,
+		                    (SDL_FRect){left, 0, hudWidth, h});
 	} else {
-		const int rects[][4] = {
-		    {110, 0, 250, 38}, {0, 38, 250, 150}, {250, 0, 320, 150}, {0, 0, 110, 38}, {0, 150, 320, 193}};
-		for (int i = 0; i < 5; i++) {
+		const int rects[SLIP_RACE_DISPLAY_HUD_REGION_COUNT][4] = {
+		    [SLIP_RACE_DISPLAY_HUD_CENTER_TOP] = {110, 0, 250, 38},
+		    [SLIP_RACE_DISPLAY_HUD_CENTER_MIDDLE] = {0, 38, 250, 150},
+		    [SLIP_RACE_DISPLAY_HUD_RIGHT_EDGE] = {250, 0, SLIPSTREAM_SCREEN_WIDTH, 150},
+		    [SLIP_RACE_DISPLAY_HUD_LEFT_EDGE] = {0, 0, 110, 38},
+		    [SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE] = {0, 150, SLIPSTREAM_SCREEN_WIDTH, 193}};
+		for (int i = 0; i < SLIP_RACE_DISPLAY_HUD_REGION_COUNT; i++) {
 			const int *r = rects[i];
 			float x = left + r[0] * sx, y = r[1] * sy;
-			if (i == 2)
+			if (i == SLIP_RACE_DISPLAY_HUD_RIGHT_EDGE)
 				x = w - hudWidth + r[0] * sx;
-			if (i == 3)
-				x = h * 8 / 200 - 14 * sx;
-			if (i == 4)
-				y += 7 * sy;
+			if (i == SLIP_RACE_DISPLAY_HUD_LEFT_EDGE)
+				x = h * SLIP_RACE_DISPLAY_LEFT_HUD_MARGIN / SLIPSTREAM_SCREEN_HEIGHT -
+				    SLIP_RACE_DISPLAY_LEFT_HUD_ART_OFFSET * sx;
+			if (i == SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE)
+				y += SLIP_RACE_DISPLAY_BOTTOM_HUD_SHIFT * sy;
 			SlipRaceDisplay_DrawHudRegion(r, (SDL_FRect){x, y, (r[2] - r[0]) * sx, (r[3] - r[1]) * sy});
 		}
 		if (monitor.w)

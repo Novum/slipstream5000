@@ -1,6 +1,7 @@
 #ifndef SLIPSTREAM5000_RACE_SESSION_H
 #define SLIPSTREAM5000_RACE_SESSION_H
 
+#include "input.h"
 #include "race.h"
 #include "race_intro.h"
 #include "race_recording.h"
@@ -41,8 +42,9 @@ void SlipRaceSession_StartNew(const char *resPath, uint16_t track, SlipRaceRacer
 void SlipRaceSession_Replay(const char *resPath, uint16_t track, SlipRaceRacerTable *racers, uint32_t environmentDetail,
                             uint32_t shading, uint32_t textures, uint32_t shadows);
 
-SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld[256], bool inputPressed[256],
-                                             uint32_t windowSize, int mouseX, int mouseY);
+SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld[SLIP_INPUT_CODE_COUNT],
+                                             bool inputPressed[SLIP_INPUT_CODE_COUNT], uint32_t windowSize, int mouseX,
+                                             int mouseY);
 
 void SlipRaceSession_ConfigurationReturn(void);
 bool SlipRaceSession_IsPaused(void);
@@ -53,8 +55,9 @@ void SlipRaceSession_BindSoundHost(SlipGameSoundState *gameSound, uint16_t sound
 
 void SlipRaceSession_PlayIntro(const char *resPath, uint16_t axTrack, uint16_t selectedDriver, uint16_t language,
                                uint32_t environmentDetail, uint32_t shading, uint32_t textures, uint32_t shadows,
-                               uint32_t windowSize, const bool inputHeld[256], bool inputPressed[256],
-                               const SlipRaceIntroScriptHost *scriptHost, const SlipRaceIntroResources *resources);
+                               uint32_t windowSize, const bool inputHeld[SLIP_INPUT_CODE_COUNT],
+                               bool inputPressed[SLIP_INPUT_CODE_COUNT], const SlipRaceIntroScriptHost *scriptHost,
+                               const SlipRaceIntroResources *resources);
 
 struct SlipTimedEffect;
 uint32_t SlipRaceSession_AttachTimedEffect(uint16_t object, int32_t radius, const struct SlipTimedEffect *emitter,

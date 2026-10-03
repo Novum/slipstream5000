@@ -9,7 +9,31 @@
 #define SLIPSTREAM_SCREEN_WIDTH 320
 #define SLIPSTREAM_SCREEN_HEIGHT 200
 
-enum { RASTER_PERSPECTIVE_ENTRY_COUNT = 502 };
+/* Mode 13h fills a 4:3 display; each indexed pixel has a 5:6 aspect. */
+enum {
+	SLIPSTREAM_DISPLAY_ASPECT_WIDTH = 4,
+	SLIPSTREAM_DISPLAY_ASPECT_HEIGHT = 3,
+	SLIPSTREAM_PIXEL_ASPECT_WIDTH = 5,
+	SLIPSTREAM_PIXEL_ASPECT_HEIGHT = 6
+};
+
+/* A row extends outside the previous span on either or both sides. */
+enum { RASTER_SPAN_EXTENDS_LEFT = 1u, RASTER_SPAN_EXTENDS_RIGHT = 2u };
+
+enum {
+	/* Scanline coordinates and texture accumulators carry sixteen fractional bits. */
+	RASTER_FRACTION_BITS = 16,
+	RASTER_PERSPECTIVE_ENTRY_COUNT = 502,
+	RASTER_PERSPECTIVE_SPLIT_CAPACITY = 16,
+	RASTER_RECTANGLE_OUTLINE_FLAG = 0x8000
+};
+
+/* Diagnostic failure stages retained in span traces. */
+enum {
+	RASTER_LONG_SPAN_INVALID_SPAN = 1,
+	RASTER_LONG_SPAN_INVALID_RUN = 2,
+	RASTER_LONG_SPAN_INVALID_TEXTURE_SAMPLE = 3
+};
 
 typedef struct RasterPerspectiveSplit {
 	uint16_t screenFraction;
@@ -17,7 +41,7 @@ typedef struct RasterPerspectiveSplit {
 } RasterPerspectiveSplit;
 
 typedef struct RasterPerspectiveEntry {
-	RasterPerspectiveSplit splits[16];
+	RasterPerspectiveSplit splits[RASTER_PERSPECTIVE_SPLIT_CAPACITY];
 } RasterPerspectiveEntry;
 
 void Raster_BuildPerspectiveTable(RasterPerspectiveEntry table[RASTER_PERSPECTIVE_ENTRY_COUNT]);

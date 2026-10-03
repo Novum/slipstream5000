@@ -8,8 +8,8 @@
 /* Native identities for the original singleton material globals. */
 SlipMaterialResidency SlipMaterialHost_residency;
 SlipMaterialInstallState SlipMaterialHost_install = {.materials = &SlipMaterialHost_residency};
-static char frameName[13];
-static char resetFrameName[13];
+static char frameName[SLIP_MATERIAL_FRAME_NAME_BYTES];
+static char resetFrameName[SLIP_MATERIAL_FRAME_NAME_BYTES];
 static const SlipMaterialFrameCalls frameCalls = {.find = SlipResourceHost_Find};
 
 /* Host ABI adapters only; the callers and resource policy remain translated. */
@@ -64,7 +64,8 @@ static uint32_t SlipMaterialHost_Size(void *context, uint16_t resource) {
 
 static uint32_t SlipMaterialHost_AllocationSize(void *context, uint16_t resource) {
 	const uint32_t bytes = SlipMaterialHost_Size(context, resource);
-	return ((bytes + 3u) & ~3u) + 0x20u;
+	return ((bytes + SLIP_RESOURCE_ALIGNMENT_LOW_MASK) & SLIP_RESOURCE_ALIGNMENT_MASK) +
+	       SLIP_RESOURCE_DOS_BLOCK_HEADER_BYTES;
 }
 
 static uint32_t SlipMaterialHost_Root(void *context, uint64_t value) {
@@ -103,7 +104,7 @@ const SlipMaterialResidencyCalls SlipMaterialHost_residencyCalls = {.context = &
                                                                     .protect = SlipMaterialHost_Protect,
                                                                     .unlock = SlipResourceHost_Unlock};
 
-static char materialKey[16];
+static char materialKey[SLIP_DRAW3D_MATERIAL_KEY_BYTES];
 
 static bool SlipMaterialHost_FindMaterial(void *context, const char *name, uint16_t *index) {
 	return SlipMaterial_Find(context, name, materialKey, index);

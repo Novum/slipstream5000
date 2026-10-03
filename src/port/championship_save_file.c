@@ -1,18 +1,24 @@
 #include "championship_save_file.h"
 #include <string.h>
 
-typedef char SaveDirectoryHeaderSizeCheck[sizeof(SlipChampionshipSaveDirectoryHeader) == 4 ? 1 : -1];
-typedef char SaveDirectoryEntrySizeCheck[sizeof(SlipChampionshipSaveDirectoryEntry) == 36 ? 1 : -1];
+/* Preserve the original two-byte spare tail in the native name-list allocation. */
+enum { SLIP_SAVE_NAMES_SPARE_BYTES = 2 };
+
+typedef char
+    SaveDirectoryHeaderSizeCheck[sizeof(SlipChampionshipSaveDirectoryHeader) == SLIP_SAVE_DIRECTORY_HEADER_BYTES ? 1
+                                                                                                                 : -1];
+typedef char
+    SaveDirectoryEntrySizeCheck[sizeof(SlipChampionshipSaveDirectoryEntry) == SLIP_SAVE_DIRECTORY_ENTRY_BYTES ? 1 : -1];
 
 void SlipChampionshipSave_InitializeFile(const SlipChampionshipSaveFileCalls *calls) {
-	static const SlipChampionshipSaveDirectoryHeader header = {2, 6};
+	static const SlipChampionshipSaveDirectoryHeader header = {SLIP_SAVE_DIRECTORY_VERSION, SLIP_SAVE_SLOT_COUNT};
 	static const SlipChampionshipSaveDirectoryEntry emptyEntry = {0};
 	int32_t file;
-	if (!calls->open(calls->context, "SLIPSTRM.SAV", 0, &file)) {
+	if (!calls->open(calls->context, "SLIPSTRM.SAV", SLIP_SAVE_OPEN_READ, &file)) {
 		if (!calls->create(calls->context, "SLIPSTRM.SAV", &file))
 			return;
 		if (calls->write(calls->context, file, 0, &header, sizeof(header))) {
-			for (unsigned slot = 0; slot < 6; ++slot) {
+			for (unsigned slot = 0; slot < SLIP_SAVE_SLOT_COUNT; ++slot) {
 				if (!calls->write(calls->context, file, -1, &emptyEntry, sizeof(emptyEntry)))
 					break;
 			}
@@ -28,9 +34,9 @@ SlipChampionshipSaveNames SlipChampionshipSave_LoadNames(const SlipChampionshipS
 		return result;
 
 	const SlipChampionshipSaveDirectory *const directory = calls->lockDirectory(calls->context, directoryResource);
-	if (directory->header.version == 2) {
+	if (directory->header.version == SLIP_SAVE_DIRECTORY_VERSION) {
 		result.slotCount = directory->header.slotCount;
-		const uint16_t namesBytes = (uint16_t)(32u * result.slotCount + 2u);
+		const uint16_t namesBytes = (uint16_t)(SLIP_SAVE_NAME_BYTES * result.slotCount + SLIP_SAVE_NAMES_SPARE_BYTES);
 		uint16_t namesResource;
 		if (calls->allocate(calls->context, namesBytes, 0, &namesResource)) {
 			char *destination = calls->lockNames(calls->context, namesResource);
@@ -54,7 +60,8 @@ SlipChampionshipSaveNames SlipChampionshipSave_LoadNames(const SlipChampionshipS
 	return result;
 }
 
-bool SlipChampionshipSave_Store(uint16_t slot, const char name[32], const SlipChampionshipSaveStoreCalls *calls) {
+bool SlipChampionshipSave_Store(uint16_t slot, const char name[SLIP_SAVE_NAME_BYTES],
+                                const SlipChampionshipSaveStoreCalls *calls) {
 	const SlipChampionshipSaveFileCalls *const fileCalls = &calls->file;
 	const SlipChampionshipSaveDirectoryCalls *const resourceCalls = &calls->directory;
 	SlipChampionshipSave_InitializeFile(fileCalls);
@@ -66,7 +73,7 @@ bool SlipChampionshipSave_Store(uint16_t slot, const char name[32], const SlipCh
 	if (!calls->size(calls->context, "SLIPSTRM.SAV", &fileBytes))
 		return false;
 	int32_t file;
-	if (!fileCalls->open(fileCalls->context, "SLIPSTRM.SAV", 1, &file))
+	if (!fileCalls->open(fileCalls->context, "SLIPSTRM.SAV", SLIP_SAVE_OPEN_UPDATE, &file))
 		return false;
 	const SlipChampionshipSavePayload *const serialized = calls->lockPayload(calls->context, payload.resource);
 	const uint16_t payloadOffset = (uint16_t)fileBytes;
@@ -89,7 +96,7 @@ bool SlipChampionshipSave_Store(uint16_t slot, const char name[32], const SlipCh
 	    resourceCalls->lockDirectory(resourceCalls->context, directoryResource);
 	directory->slots[slot].payloadOffset = payloadOffset;
 	directory->slots[slot].checksum = payload.checksum;
-	memcpy(directory->slots[slot].name, name, 32);
+	memcpy(directory->slots[slot].name, name, SLIP_SAVE_NAME_BYTES);
 	(void)calls->rewrite(calls->context, "SLIPSTRM.SAV", directory, updatedBytes);
 	resourceCalls->unlock(resourceCalls->context, directoryResource);
 	resourceCalls->release(resourceCalls->context, directoryResource);
@@ -103,7 +110,8 @@ bool SlipChampionshipSave_Load(uint16_t slot, SlipRaceRacerTable *racers, uint32
 		return false;
 	const SlipChampionshipSaveDirectory *const directory = calls->lockDirectory(calls->context, resource);
 	bool loaded = false;
-	if (directory->header.version == 2 && (int16_t)slot < (int16_t)directory->header.slotCount) {
+	if (directory->header.version == SLIP_SAVE_DIRECTORY_VERSION &&
+	    (int16_t)slot < (int16_t)directory->header.slotCount) {
 		const uint16_t offset = directory->slots[slot].payloadOffset;
 		if (offset != 0) {
 			const SlipChampionshipSavePayload *const payload = (const void *)((const uint8_t *)directory + offset);

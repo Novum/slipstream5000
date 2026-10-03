@@ -1,5 +1,8 @@
 #include "shape_vertices.h"
 #include "byte_order.h"
+#include "fixed_point.h"
+#include "renderer_flags.h"
+#include "shape_format.h"
 
 /* These loads read the serialized SHP header and vertex-list count. */
 
@@ -16,11 +19,11 @@ void SlipShapeVertices_Matrices(SlipActorShapeState *state, const SlipView3DMatr
 
 void SlipShapeVertices_Initialize(SlipActorShapeState *state, uint8_t *shape, const SlipShapeVertexCalls *calls) {
 	state->shape = shape;
-	const uint16_t scale = SlipBytes_ReadLE16(shape + 2);
+	const uint16_t scale = SlipBytes_ReadLE16(shape + SLIP_SHAPE_SCALE_SHIFT_OFFSET);
 	SlipDraw3DTransformFn transform;
 	SlipDraw3DSourcePointFn source;
 	if (scale != 0) {
-		state->transformShift = 14u - scale;
+		state->transformShift = SLIP_Q14_FRACTION_BITS - scale;
 		state->sourceShift = scale;
 		transform = SlipShapeVertices_TransformShifted;
 		source = SlipShapeVertices_SourceShifted;
@@ -28,9 +31,10 @@ void SlipShapeVertices_Initialize(SlipActorShapeState *state, uint8_t *shape, co
 		transform = SlipShapeVertices_Transform;
 		source = SlipShapeVertices_Source;
 	}
-	const uint8_t *const vertices = shape + SlipBytes_ReadLE32(shape + 0x10);
+	const uint8_t *const vertices = shape + SlipBytes_ReadLE32(shape + SLIP_SHAPE_VERTEX_TABLE_OFFSET);
 	const uint16_t count = SlipBytes_ReadLE16(vertices);
-	calls->buildVertices(calls->context, vertices + 2, count, 6, transform, source);
+	calls->buildVertices(calls->context, vertices + SLIP_SHAPE_TABLE_COUNT_BYTES, count, SLIP_SHAPE_VERTEX_BYTES,
+	                     transform, source);
 }
 
 SlipDraw3DVec32 SlipShapeVertices_Transform(uint32_t x, uint32_t y, uint32_t z, SlipDraw3DVertexRecord *record,
@@ -51,7 +55,7 @@ SlipView3DVec32 SlipShapeVertices_Source(int16_t x, int16_t y, int16_t z, void *
 
 SlipView3DVec32 SlipShapeVertices_SourceShifted(int16_t x, int16_t y, int16_t z, void *context) {
 	SlipActorShapeState *const state = context;
-	const uint32_t shift = state->sourceShift & 31u;
+	const uint32_t shift = state->sourceShift & SLIP_DWORD_SHIFT_COUNT_MASK;
 	return (SlipView3DVec32){(int32_t)((uint32_t)(int32_t)x << shift), (int32_t)((uint32_t)(int32_t)y << shift),
 	                         (int32_t)((uint32_t)(int32_t)z << shift)};
 }
@@ -74,7 +78,7 @@ SlipDraw3DVec32 SlipShapeVertices_TransformShifted(uint32_t x, uint32_t y, uint3
 	const uint32_t sumZ = sourceZForOutputZ + sourceYForOutputZ + sourceXForOutputZ;
 	const uint32_t sumY = sourceZForOutputY + sourceYForOutputY + sourceXForOutputY;
 	const uint32_t sumX = sourceZForOutputX + sourceYForOutputX + sourceXForOutputX;
-	const uint32_t shift = state->transformShift & 31u;
+	const uint32_t shift = state->transformShift & SLIP_DWORD_SHIFT_COUNT_MASK;
 	return (SlipDraw3DVec32){(int32_t)((uint32_t)((int32_t)sumX >> shift) + (uint32_t)state->viewPosition.x),
 	                         (int32_t)((uint32_t)((int32_t)sumY >> shift) + (uint32_t)state->viewPosition.y),
 	                         (int32_t)((uint32_t)((int32_t)sumZ >> shift) + (uint32_t)state->viewPosition.z)};

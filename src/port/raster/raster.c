@@ -1,4 +1,58 @@
 #include "raster.h"
+#include "../sprite_format.h"
+#include "fixed_point.h"
+#include "random_sequence.h"
+
+enum {
+	RASTER_AFFINE_EDGE_FAILED = 0,
+	RASTER_AFFINE_EDGE_ADVANCED = 1,
+	RASTER_AFFINE_EDGE_FINISHED = 2,
+	RASTER_EDGE_HALF_PIXEL_Q16 = 1 << (RASTER_FRACTION_BITS - 1),
+	RASTER_FRACTION_ONE_Q16 = 1 << RASTER_FRACTION_BITS,
+	RASTER_PERSPECTIVE_BUCKET_ROUND_BIAS = 64,
+	RASTER_SHADE_FRACTION_BITS = 8,
+	RASTER_GRADIENT_HALF_FRACTION_Q8 = 1 << (RASTER_SHADE_FRACTION_BITS - 1),
+	RASTER_DITHER_BITS_MASK = 31,
+	RASTER_DITHER_INITIAL_SEED = 0x5a4a,
+	RASTER_DEPTH_RATIO_NUMERATOR_SHIFT = 31,
+	RASTER_DEPTH_RATIO_OUTPUT_SHIFT = RASTER_DEPTH_RATIO_NUMERATOR_SHIFT - RASTER_FRACTION_BITS,
+	RASTER_TEXTURE_SPAN_ENDPOINT_BASE_TOKEN = 0x2c44c,
+	RASTER_PERSPECTIVE_SPLIT_SAMPLE_COUNT = 64,
+	/* Ordered subdivision slots; the adaptive split fractions are not evenly spaced. */
+	RASTER_PERSPECTIVE_FIRST_SIXTEENTH_SPLIT = 0,
+	RASTER_PERSPECTIVE_THIRD_SIXTEENTH_SPLIT = 2,
+	RASTER_PERSPECTIVE_FIFTH_SIXTEENTH_SPLIT = 4,
+	RASTER_PERSPECTIVE_SEVENTH_SIXTEENTH_SPLIT = 6,
+	RASTER_PERSPECTIVE_EIGHTH_SPLIT_STRIDE = RASTER_PERSPECTIVE_SPLIT_CAPACITY / 8,
+	RASTER_PERSPECTIVE_FIRST_EIGHTH_SPLIT = RASTER_PERSPECTIVE_EIGHTH_SPLIT_STRIDE - 1,
+	RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT = 3 * RASTER_PERSPECTIVE_EIGHTH_SPLIT_STRIDE - 1,
+	RASTER_PERSPECTIVE_LAST_SPLIT = RASTER_PERSPECTIVE_SPLIT_CAPACITY - 2,
+	RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT = RASTER_PERSPECTIVE_SPLIT_CAPACITY / 4 - 1,
+	RASTER_PERSPECTIVE_MIDDLE_SPLIT = RASTER_PERSPECTIVE_SPLIT_CAPACITY / 2 - 1,
+	RASTER_PERSPECTIVE_LAST_QUARTER_SPLIT = 3 * RASTER_PERSPECTIVE_SPLIT_CAPACITY / 4 - 1,
+	RASTER_COPY_DWORD_BYTES = sizeof(uint32_t),
+	RASTER_COPY_ALIGNMENT_MASK = RASTER_COPY_DWORD_BYTES - 1,
+	RASTER_COPY_MINIMUM_DWORD_BYTES = 2 * RASTER_COPY_DWORD_BYTES,
+	RASTER_PERSPECTIVE_MINIMUM_DEPTH_RATIO = 32,
+	RASTER_PERSPECTIVE_DEPTH_RATIO_STEP = 128,
+	RASTER_PERSPECTIVE_MAXIMUM_TABLE_DEPTH_RATIO = 64128,
+	RASTER_PERSPECTIVE_ENTRY_BUCKET_SHIFT = 7,
+	RASTER_PERSPECTIVE_TWO_SEGMENT_BUCKET_BIAS = 128,
+	RASTER_PERSPECTIVE_MULTI_SEGMENT_BUCKET_BIAS = 64,
+	RASTER_PERSPECTIVE_SHORT_SPAN_WIDTH = 20,
+	RASTER_PERSPECTIVE_AFFINE_DEPTH_RATIO_MINIMUM = 64000,
+	RASTER_PERSPECTIVE_TWO_SEGMENT_DEPTH_RATIO_MINIMUM = 49152,
+	RASTER_PERSPECTIVE_EIGHT_SEGMENT_DEPTH_RATIO_MAXIMUM = 32768,
+	RASTER_PERSPECTIVE_EIGHT_SEGMENT_WIDTH_MINIMUM = 80,
+	RASTER_PERSPECTIVE_FOUR_SEGMENT_WIDTH_MINIMUM = 40,
+	RASTER_PERSPECTIVE_TABLE_BASE_TOKEN = 0x33310,
+	RASTER_AFFINE_POLYGON_POINT_CAPACITY = 64,
+	RASTER_TEXTURE_UV_VISIT_CAPACITY = 64,
+	RASTER_NORMALIZE_COMPONENT_HIGH_MASK = UINT32_MAX ^ INT16_MAX,
+	RASTER_NORMALIZE_MAXIMUM_COMPONENT_BIT = 14,
+	RASTER_NORMALIZE_OUTPUT_SHIFT = RASTER_FRACTION_BITS - SLIP_Q14_FRACTION_BITS
+};
+
 #include "byte_order.h"
 #include "software.h"
 
@@ -23,18 +77,19 @@ int16_t g_clipMaxY;
 enum { CLIP_LEFT = 1, CLIP_RIGHT = 2, CLIP_TOP = 4, CLIP_BOTTOM = 8 };
 
 static int Raster_TexturedPointOffsetValid(uint32_t pointBufferBase, size_t pointBufferBytes, uint32_t offset) {
-	return offset >= pointBufferBase && (size_t)(offset - pointBufferBase) + 0x20u <= pointBufferBytes;
+	return offset >= pointBufferBase &&
+	       (size_t)(offset - pointBufferBase) + sizeof(RasterTexturedPoint) <= pointBufferBytes;
 }
 
 static uint16_t Raster_AddU16WithCarry(uint16_t a, uint16_t b, bool *carryOut) {
 	const uint32_t sum = (uint32_t)a + (uint32_t)b;
 
-	*carryOut = sum > 0xffffu;
+	*carryOut = sum > UINT16_MAX;
 	return (uint16_t)sum;
 }
 
 static int32_t Raster_DivideSignedScaled14(int32_t numeratorSource, int32_t denominator) {
-	const int64_t numerator = (int64_t)numeratorSource << 14;
+	const int64_t numerator = (int64_t)numeratorSource << SLIP_Q14_FRACTION_BITS;
 
 	return (int32_t)(numerator / denominator);
 }
@@ -43,16 +98,16 @@ static uint32_t Raster_MultiplyShift14RoundAdd(int32_t valueDelta, int32_t quoti
 	const int64_t product = (int64_t)valueDelta * (int64_t)quotient;
 	const uint32_t productLow = (uint32_t)product;
 	const uint32_t productHigh = (uint32_t)((uint64_t)product >> 32);
-	const uint32_t shifted = (productLow >> 14) | (productHigh << 18);
+	const uint32_t shifted = (productLow >> SLIP_Q14_FRACTION_BITS) | (productHigh << SLIP_Q14_DWORD_HIGH_SHIFT);
 
-	*carryOut = (productLow & 0x00002000u) != 0u;
+	*carryOut = (productLow & SLIP_Q14_HALF) != 0u;
 	return shifted + addend + (*carryOut ? 1u : 0u);
 }
 
 static int Raster_SampleTextureByte(const uint8_t *const *textureRows, size_t textureRowCount, size_t textureRowBytes,
                                     uint32_t texU, uint32_t texV, uint8_t *sampleOut) {
-	const uint16_t texY = (uint16_t)(texV >> 16);
-	const uint16_t texX = (uint16_t)(texU >> 16);
+	const uint16_t texY = (uint16_t)(texV >> RASTER_FRACTION_BITS);
+	const uint16_t texX = (uint16_t)(texU >> RASTER_FRACTION_BITS);
 
 	if (textureRows == NULL || texY >= textureRowCount || textureRows[texY] == NULL || texX >= textureRowBytes ||
 	    sampleOut == NULL) {
@@ -72,28 +127,28 @@ static void Raster_WriteLE32(uint8_t *p, uint32_t value) {
 static uint32_t Raster_MultiplyUnsignedShift14(uint32_t left, uint32_t right) {
 	const uint64_t product = (uint64_t)left * (uint64_t)right;
 
-	return (uint32_t)(product >> 14);
+	return (uint32_t)(product >> SLIP_Q14_FRACTION_BITS);
 }
 
 static uint32_t Raster_DepthRatioBucket(uint32_t depthMin, uint32_t depthMax) {
-	const int64_t numerator = (int64_t)(int32_t)depthMin * INT64_C(0x80000000);
+	const int64_t numerator = (int64_t)(int32_t)depthMin * (INT64_C(1) << RASTER_DEPTH_RATIO_NUMERATOR_SHIFT);
 	const int32_t quotient = (int32_t)(numerator / (int32_t)depthMax);
 
-	return (uint32_t)quotient >> 15;
+	return (uint32_t)quotient >> RASTER_DEPTH_RATIO_OUTPUT_SHIFT;
 }
 
 static uint16_t Raster_MultiplyUnsigned16High(uint16_t a, uint16_t b) {
-	return (uint16_t)(((uint32_t)a * (uint32_t)b) >> 16);
+	return (uint16_t)(((uint32_t)a * (uint32_t)b) >> RASTER_FRACTION_BITS);
 }
 
 static int32_t Raster_MultiplySignedShift16(uint16_t coefficient, int32_t delta) {
 	const int64_t product = (int64_t)(int32_t)(uint32_t)coefficient * (int64_t)delta;
 
-	return (int32_t)(product >> 16);
+	return (int32_t)(product >> RASTER_FRACTION_BITS);
 }
 
 static int32_t Raster_DivideWrappedFixed16(int32_t delta, uint32_t divisor) {
-	const uint32_t shifted = (uint32_t)delta << 16;
+	const uint32_t shifted = (uint32_t)delta << RASTER_FRACTION_BITS;
 
 	return (int32_t)shifted / (int32_t)divisor;
 }
@@ -144,9 +199,9 @@ typedef struct ShadedEdgeState {
 	uint16_t shadeAccumulator;
 } ShadedEdgeState;
 
-static int Raster_FixedXInt(int32_t acc) { return acc >> 16; }
+static int Raster_FixedXInt(int32_t acc) { return acc >> RASTER_FRACTION_BITS; }
 
-enum { RASTER_FLAT_EDGE_FRACTION_BITS = 16, RASTER_FLAT_EDGE_HALF_PIXEL = 0x8000u };
+enum { RASTER_FLAT_EDGE_FRACTION_BITS = RASTER_FRACTION_BITS, RASTER_FLAT_EDGE_HALF_PIXEL = 0x8000u };
 
 static int Raster_StepLeftFlat(FlatEdgeState *edge, int currentY) {
 	if (currentY == edge->bottomY) {
@@ -231,8 +286,8 @@ static void Raster_AdvanceFlatEdge(FlatEdgeState *edge) {
 static int Raster_StepLeftShaded(ShadedEdgeState *edge, int currentY) {
 	if (currentY == edge->bottomY) {
 
-		edge->xAccumulator =
-		    (int32_t)((uint32_t)edge->points[edge->currentIndex].x << 16) | (uint16_t)edge->xAccumulator;
+		edge->xAccumulator = (int32_t)((uint32_t)edge->points[edge->currentIndex].x << RASTER_FRACTION_BITS) |
+		                     (uint16_t)edge->xAccumulator;
 		edge->shadeAccumulator = edge->points[edge->currentIndex].shade;
 		return 0;
 	}
@@ -259,7 +314,7 @@ static int Raster_StepLeftShaded(ShadedEdgeState *edge, int currentY) {
 		dy = nextY - currentY;
 		edge->scanlinesRemaining = dy;
 		edge->xStep = Raster_DivideWrappedFixed16(nextX - oldX, (uint32_t)dy);
-		edge->xAccumulator = ((int32_t)oldX << 16) + 0x8000;
+		edge->xAccumulator = ((int32_t)oldX << RASTER_FRACTION_BITS) + RASTER_EDGE_HALF_PIXEL_Q16;
 		edge->shadeAccumulator = oldShade;
 		edge->shadeStep = (int16_t)((int16_t)(nextShade - oldShade) / dy);
 		return 0;
@@ -269,8 +324,8 @@ static int Raster_StepLeftShaded(ShadedEdgeState *edge, int currentY) {
 static int Raster_StepRightShaded(ShadedEdgeState *edge, int currentY) {
 	if (currentY == edge->bottomY) {
 
-		edge->xAccumulator =
-		    (int32_t)((uint32_t)edge->points[edge->currentIndex].x << 16) | (uint16_t)edge->xAccumulator;
+		edge->xAccumulator = (int32_t)((uint32_t)edge->points[edge->currentIndex].x << RASTER_FRACTION_BITS) |
+		                     (uint16_t)edge->xAccumulator;
 		edge->shadeAccumulator = edge->points[edge->currentIndex].shade;
 		return 0;
 	}
@@ -303,7 +358,7 @@ static int Raster_StepRightShaded(ShadedEdgeState *edge, int currentY) {
 		dy = nextY - currentY;
 		edge->scanlinesRemaining = dy;
 		edge->xStep = Raster_DivideWrappedFixed16(nextX - oldX, (uint32_t)dy);
-		edge->xAccumulator = ((int32_t)oldX << 16) + 0x8000;
+		edge->xAccumulator = ((int32_t)oldX << RASTER_FRACTION_BITS) + RASTER_EDGE_HALF_PIXEL_Q16;
 		edge->shadeAccumulator = oldShade;
 		edge->shadeStep = (int16_t)((int16_t)(nextShade - oldShade) / dy);
 		return 0;
@@ -346,16 +401,16 @@ static void Raster_FillShadedSpan(uint8_t leftColor, uint8_t rightColor, int16_t
 	}
 
 	if (colorDeltaPlusOne <= count) {
-		const uint16_t quotient = (uint16_t)(((uint32_t)count << 8) / colorDeltaPlusOne);
-		const uint8_t stepWhole = (uint8_t)(quotient >> 8);
+		const uint16_t quotient = (uint16_t)(((uint32_t)count << RASTER_SHADE_FRACTION_BITS) / colorDeltaPlusOne);
+		const uint8_t stepWhole = (uint8_t)(quotient >> RASTER_SHADE_FRACTION_BITS);
 		const uint8_t stepFrac = (uint8_t)quotient;
-		uint8_t frac = 0x80u;
+		uint8_t frac = RASTER_GRADIENT_HALF_FRACTION_Q8;
 		int remaining = count;
 		uint8_t color = leftColor;
 
 		while (remaining > 0) {
 			const uint16_t fracSum = (uint16_t)frac + stepFrac;
-			const int run = stepWhole + (fracSum > 0xffu ? 1 : 0);
+			const int run = stepWhole + (fracSum > UINT8_MAX ? 1 : 0);
 
 			frac = (uint8_t)fracSum;
 
@@ -365,10 +420,10 @@ static void Raster_FillShadedSpan(uint8_t leftColor, uint8_t rightColor, int16_t
 			color = (uint8_t)(color + colorStep);
 		}
 	} else {
-		const uint16_t quotient = (uint16_t)(((uint32_t)colorDeltaPlusOne << 8) / count);
-		const uint8_t stepWhole = (uint8_t)(quotient >> 8);
+		const uint16_t quotient = (uint16_t)(((uint32_t)colorDeltaPlusOne << RASTER_SHADE_FRACTION_BITS) / count);
+		const uint8_t stepWhole = (uint8_t)(quotient >> RASTER_SHADE_FRACTION_BITS);
 		const uint8_t stepFrac = (uint8_t)quotient;
-		uint8_t frac = 0x80u;
+		uint8_t frac = RASTER_GRADIENT_HALF_FRACTION_Q8;
 		uint8_t color = leftColor;
 		uint16_t i;
 
@@ -379,7 +434,7 @@ static void Raster_FillShadedSpan(uint8_t leftColor, uint8_t rightColor, int16_t
 			if (colorStep > 0) {
 				fracSum = (uint16_t)frac + stepFrac;
 				frac = (uint8_t)fracSum;
-				color = (uint8_t)(color + stepWhole + (fracSum > 0xffu ? 1u : 0u));
+				color = (uint8_t)(color + stepWhole + (fracSum > UINT8_MAX ? 1u : 0u));
 			} else {
 				const uint8_t oldFrac = frac;
 
@@ -394,7 +449,7 @@ static uint16_t Raster_DitherLfsrStep(uint16_t seed) {
 	uint16_t next = (uint16_t)((seed + 1u) >> 1);
 
 	if (((seed + 1u) & 1u) != 0) {
-		next ^= 0xb400u;
+		next ^= SLIP_RANDOM_LFSR_FEEDBACK_MASK;
 	}
 	return next;
 }
@@ -405,7 +460,7 @@ static uint8_t Raster_DitheredSpanPixel(uint8_t color, uint8_t ditherMask, uint1
 }
 
 static uint8_t Raster_DitherMaskFromBl(uint8_t ditherBits) {
-	const uint8_t maskedBits = (uint8_t)(ditherBits & 0x1fu);
+	const uint8_t maskedBits = (uint8_t)(ditherBits & RASTER_DITHER_BITS_MASK);
 	uint32_t mask;
 
 	if (maskedBits == 0) {
@@ -468,7 +523,7 @@ void Raster_RestoreScreen(const RasterSurfaceBinding *saved) {
 RasterSurfaceBounds Raster_GetSurfaceBounds(void) {
 	if (spriteSurfaceActive)
 		return (RasterSurfaceBounds){0, 0, (int32_t)spriteSurfaceWidth - 1, (int32_t)spriteSurfaceHeight - 1};
-	return (RasterSurfaceBounds){0, 0, 319, 199};
+	return (RasterSurfaceBounds){0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1};
 }
 
 void Raster_SetClipRect(int16_t minX, int16_t minY, int16_t maxX, int16_t maxY) {
@@ -592,17 +647,17 @@ void RasterSoftware_DrawLineSolid(uint8_t color, int16_t x0, int16_t y0, int16_t
 
 	if (deltaX == 0) {
 		count = (uint32_t)deltaY + 1u;
-		do {
+		for (uint32_t pixelIndex = 0; pixelIndex < count; ++pixelIndex) {
 			*dst = color;
 			dst += rowStep;
-		} while (--count != 0u);
+		}
 		return;
 	}
 
 	if (deltaX < deltaY) {
 		count = deltaY;
 		error = (uint16_t)((deltaY >> 1) - deltaX);
-		do {
+		for (uint32_t pixelIndex = 0; pixelIndex < count; ++pixelIndex) {
 			if ((int16_t)error >= 0) {
 				*dst = color;
 				dst += rowStep;
@@ -613,7 +668,7 @@ void RasterSoftware_DrawLineSolid(uint8_t color, int16_t x0, int16_t y0, int16_t
 				dst += rowStep;
 			}
 			error = (uint16_t)(error - deltaX);
-		} while (--count != 0u);
+		}
 		*dst = color;
 		return;
 	}
@@ -621,17 +676,17 @@ void RasterSoftware_DrawLineSolid(uint8_t color, int16_t x0, int16_t y0, int16_t
 	if (deltaX == deltaY) {
 		count = deltaY;
 		++rowStep;
-		do {
+		for (uint32_t pixelIndex = 0; pixelIndex < count; ++pixelIndex) {
 			*dst = color;
 			dst += rowStep;
-		} while (--count != 0u);
+		}
 		*dst = color;
 		return;
 	}
 
 	count = (uint32_t)deltaX + 1u;
 	error = (uint16_t)(deltaX >> 1);
-	do {
+	for (uint32_t pixelIndex = 0; pixelIndex < count; ++pixelIndex) {
 		*dst = color;
 		++dst;
 		error = (uint16_t)(error - deltaY);
@@ -639,7 +694,7 @@ void RasterSoftware_DrawLineSolid(uint8_t color, int16_t x0, int16_t y0, int16_t
 			error = (uint16_t)(error + deltaX);
 			dst += rowStep;
 		}
-	} while (--count != 0u);
+	}
 }
 
 void RasterSoftware_DrawLineClipped(uint8_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
@@ -687,8 +742,8 @@ void RasterSoftware_FillRectClipped(uint8_t color, int16_t x0, int16_t y0, int16
 void RasterSoftware_FillRectUnchecked(uint16_t color, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
 	int16_t y;
 
-	if ((color & 0x8000u) != 0) {
-		color &= 0x7fffu;
+	if ((color & RASTER_RECTANGLE_OUTLINE_FLAG) != 0) {
+		color &= UINT16_MAX ^ RASTER_RECTANGLE_OUTLINE_FLAG;
 		RasterSoftware_DrawLineSolid((uint8_t)color, x1, y0, x1, y1);
 		RasterSoftware_DrawLineSolid((uint8_t)color, x0, y1, x1, y1);
 		RasterSoftware_DrawLineSolid((uint8_t)color, x0, y0, x0, y1);
@@ -717,7 +772,7 @@ void RasterSoftware_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, 
 		++columns;
 	} else {
 		++columns;
-		const uint32_t source = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(record);
+		const uint32_t source = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(record + SLIP_SPRITE_WIDTH_OFFSET);
 		const int32_t numerator = (int32_t)((source >> 16) | (source << 16));
 		scaledSpriteHorizontalStep = (uint32_t)(numerator / (int16_t)columns);
 	}
@@ -726,21 +781,22 @@ void RasterSoftware_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, 
 	const uint16_t heightDifference = (uint16_t)(bottom - top);
 	if (heightDifference != 0) {
 		rows = (uint16_t)(heightDifference + 1);
-		const uint32_t source = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(record + 2);
+		const uint32_t source = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(record + SLIP_SPRITE_HEIGHT_OFFSET);
 		const int32_t numerator = (int32_t)((source >> 16) | (source << 16));
 		const uint32_t step = (uint32_t)(numerator / (int16_t)rows);
 
-		const uint16_t wholeBytes = (uint16_t)((int16_t)(step >> 16) * (int16_t)SlipBytes_ReadLE16(record));
-		scaledSpriteVerticalStep = (step & 0xffffu) | ((uint32_t)wholeBytes << 16);
+		const uint16_t wholeBytes = (uint16_t)((int16_t)(step >> RASTER_FRACTION_BITS) *
+		                                       (int16_t)SlipBytes_ReadLE16(record + SLIP_SPRITE_WIDTH_OFFSET));
+		scaledSpriteVerticalStep = (step & UINT16_MAX) | ((uint32_t)wholeBytes << 16);
 	}
-	scaledSpriteSourceWidth = SlipBytes_ReadLE16(record);
-	scaledSpriteTransparent = SlipBytes_ReadLE16(record + 8);
+	scaledSpriteSourceWidth = SlipBytes_ReadLE16(record + SLIP_SPRITE_WIDTH_OFFSET);
+	scaledSpriteTransparent = SlipBytes_ReadLE16(record + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 	uint32_t sourceOffset = 0;
 	if (left < g_clipMinX) {
 		const uint16_t skipped = (uint16_t)(g_clipMinX - left);
 		scaledSpriteColumns = (uint16_t)(scaledSpriteColumns - skipped);
 		const uint32_t product = (uint32_t)(int32_t)(int16_t)skipped * scaledSpriteHorizontalStep;
-		sourceOffset += (uint16_t)(product >> 16);
+		sourceOffset += (uint16_t)(product >> RASTER_FRACTION_BITS);
 		left = g_clipMinX;
 	}
 	if (right > g_clipMaxX)
@@ -748,8 +804,9 @@ void RasterSoftware_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, 
 	if (top < g_clipMinY) {
 		const uint16_t skipped = (uint16_t)(g_clipMinY - top);
 		rows = (uint16_t)(rows - skipped);
-		const uint16_t wholeBytes = (uint16_t)(skipped * (uint16_t)(scaledSpriteVerticalStep >> 16));
-		const uint16_t carriedRows = (uint16_t)(((uint32_t)skipped * (uint16_t)scaledSpriteVerticalStep) >> 16);
+		const uint16_t wholeBytes = (uint16_t)(skipped * (uint16_t)(scaledSpriteVerticalStep >> RASTER_FRACTION_BITS));
+		const uint16_t carriedRows =
+		    (uint16_t)(((uint32_t)skipped * (uint16_t)scaledSpriteVerticalStep) >> RASTER_FRACTION_BITS);
 		sourceOffset += (uint16_t)(wholeBytes + (uint16_t)(scaledSpriteSourceWidth * carriedRows));
 		top = g_clipMinY;
 	}
@@ -768,13 +825,13 @@ void RasterSoftware_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, 
 				*pixel++ = pixels[sampleOffset];
 				const uint32_t sum = (uint32_t)horizontalFraction + (uint16_t)scaledSpriteHorizontalStep;
 				horizontalFraction = (uint16_t)sum;
-				sampleOffset += (scaledSpriteHorizontalStep >> 16) + (sum >> 16);
+				sampleOffset += (scaledSpriteHorizontalStep >> RASTER_FRACTION_BITS) + (sum >> RASTER_FRACTION_BITS);
 			} while (--remaining != 0);
 			const uint32_t sum = (uint32_t)verticalFraction + (uint16_t)scaledSpriteVerticalStep;
 			verticalFraction = (uint16_t)sum;
 			if (sum > UINT16_MAX)
 				sourceOffset += scaledSpriteSourceWidth;
-			sourceOffset += scaledSpriteVerticalStep >> 16;
+			sourceOffset += scaledSpriteVerticalStep >> RASTER_FRACTION_BITS;
 			destination += g_screenPitch;
 		} while (--rows != 0);
 	} else {
@@ -790,13 +847,13 @@ void RasterSoftware_DrawSpriteScaled(const uint8_t *record, size_t recordBytes, 
 				++pixel;
 				const uint32_t sum = (uint32_t)horizontalFraction + (uint16_t)scaledSpriteHorizontalStep;
 				horizontalFraction = (uint16_t)sum;
-				sampleOffset += (scaledSpriteHorizontalStep >> 16) + (sum >> 16);
+				sampleOffset += (scaledSpriteHorizontalStep >> RASTER_FRACTION_BITS) + (sum >> RASTER_FRACTION_BITS);
 			} while (--remaining != 0);
 			const uint32_t sum = (uint32_t)verticalFraction + (uint16_t)scaledSpriteVerticalStep;
 			verticalFraction = (uint16_t)sum;
 			if (sum > UINT16_MAX)
 				sourceOffset += scaledSpriteSourceWidth;
-			sourceOffset += scaledSpriteVerticalStep >> 16;
+			sourceOffset += scaledSpriteVerticalStep >> RASTER_FRACTION_BITS;
 			destination += g_screenPitch;
 		} while (--rows != 0);
 	}
@@ -922,8 +979,9 @@ void RasterSoftware_DrawShadedFlatPolygon(const RasterShadedPoint *points, uint1
 	}
 
 	if (bottomY == topY) {
-		Raster_FillShadedSpan((uint8_t)(points[leftTop].shade >> 8), (uint8_t)(points[rightTop].shade >> 8),
-		                      (int16_t)topY, (int16_t)points[leftTop].x, (int16_t)points[rightTop].x);
+		Raster_FillShadedSpan((uint8_t)(points[leftTop].shade >> RASTER_SHADE_FRACTION_BITS),
+		                      (uint8_t)(points[rightTop].shade >> RASTER_SHADE_FRACTION_BITS), (int16_t)topY,
+		                      (int16_t)points[leftTop].x, (int16_t)points[rightTop].x);
 		return;
 	}
 
@@ -946,7 +1004,8 @@ void RasterSoftware_DrawShadedFlatPolygon(const RasterShadedPoint *points, uint1
 	}
 
 	while (y < bottomY) {
-		Raster_FillShadedSpan((uint8_t)(left.shadeAccumulator >> 8), (uint8_t)(right.shadeAccumulator >> 8), (int16_t)y,
+		Raster_FillShadedSpan((uint8_t)(left.shadeAccumulator >> RASTER_SHADE_FRACTION_BITS),
+		                      (uint8_t)(right.shadeAccumulator >> RASTER_SHADE_FRACTION_BITS), (int16_t)y,
 		                      (int16_t)Raster_FixedXInt(left.xAccumulator),
 		                      (int16_t)Raster_FixedXInt(right.xAccumulator));
 		++y;
@@ -960,7 +1019,8 @@ void RasterSoftware_DrawShadedFlatPolygon(const RasterShadedPoint *points, uint1
 		}
 	}
 
-	Raster_FillShadedSpan((uint8_t)(left.shadeAccumulator >> 8), (uint8_t)(right.shadeAccumulator >> 8), (int16_t)y,
+	Raster_FillShadedSpan((uint8_t)(left.shadeAccumulator >> RASTER_SHADE_FRACTION_BITS),
+	                      (uint8_t)(right.shadeAccumulator >> RASTER_SHADE_FRACTION_BITS), (int16_t)y,
 	                      (int16_t)Raster_FixedXInt(left.xAccumulator), (int16_t)Raster_FixedXInt(right.xAccumulator));
 }
 
@@ -982,7 +1042,7 @@ void RasterSoftware_DrawDitheredFlatPolygon(uint8_t color, uint8_t ditherBits, c
 	}
 
 	ditherMask = Raster_DitherMaskFromBl(ditherBits);
-	seed = 0x5a4au;
+	seed = RASTER_DITHER_INITIAL_SEED;
 	topY = (int)points[0].y;
 	bottomY = topY;
 	leftTop = 0;
@@ -1063,16 +1123,16 @@ int Raster_BuildTextureRowTable(const uint8_t *texturePayload, size_t texturePay
 	memset(result, 0, sizeof(*result));
 	result->pushad = true;
 	result->rowScroll = rowScroll;
-	if (texturePayload == NULL || texturePayloadBytes < 0x10u || textureRows == NULL) {
+	if (texturePayload == NULL || texturePayloadBytes < SLIP_SPRITE_HEADER_BYTES || textureRows == NULL) {
 		return 0;
 	}
 	textureWidth = SlipBytes_ReadLE16(texturePayload);
-	textureHeight = SlipBytes_ReadLE16(texturePayload + 0x02u);
+	textureHeight = SlipBytes_ReadLE16(texturePayload + SLIP_SPRITE_HEIGHT_OFFSET);
 	result->textureWidth = textureWidth;
 	result->textureHeight = textureHeight;
 	if (textureWidth == 0u || textureHeight == 0u || textureHeight > rowCapacity ||
-	    (size_t)textureHeight > (SIZE_MAX - 0x10u) / (size_t)textureWidth ||
-	    texturePayloadBytes < 0x10u + (size_t)textureWidth * textureHeight) {
+	    (size_t)textureHeight > (SIZE_MAX - SLIP_SPRITE_HEADER_BYTES) / (size_t)textureWidth ||
+	    texturePayloadBytes < SLIP_SPRITE_HEADER_BYTES + (size_t)textureWidth * textureHeight) {
 		return 0;
 	}
 	rotatedRows = 0;
@@ -1082,7 +1142,7 @@ int Raster_BuildTextureRowTable(const uint8_t *texturePayload, size_t texturePay
 	result->rotationRowOffset = rotatedRows;
 	rowsWritten = 0;
 	if (rowScroll == 0u || rotatedRows == 0u || rotatedRows == textureHeight) {
-		const uint8_t *row = texturePayload + 0x10u;
+		const uint8_t *row = texturePayload + SLIP_SPRITE_HEADER_BYTES;
 
 		result->directRows = true;
 		while (textureHeight != 0u) {
@@ -1092,7 +1152,7 @@ int Raster_BuildTextureRowTable(const uint8_t *texturePayload, size_t texturePay
 			--textureHeight;
 		}
 	} else {
-		const uint8_t *row = texturePayload + 0x10u + (size_t)rotatedRows * textureWidth;
+		const uint8_t *row = texturePayload + SLIP_SPRITE_HEADER_BYTES + (size_t)rotatedRows * textureWidth;
 		uint32_t firstPassRows = (uint32_t)textureHeight - rotatedRows;
 		uint32_t secondPassRows = rotatedRows;
 
@@ -1104,7 +1164,7 @@ int Raster_BuildTextureRowTable(const uint8_t *texturePayload, size_t texturePay
 			++rowsWritten;
 			--firstPassRows;
 		}
-		row = texturePayload + 0x10u;
+		row = texturePayload + SLIP_SPRITE_HEADER_BYTES;
 		result->secondPassRows = secondPassRows;
 		while (secondPassRows != 0u) {
 			textureRows[rowsWritten] = row;
@@ -1151,18 +1211,19 @@ int Raster_PrepareTextureUVExtents(const uint8_t *texturePayload, size_t texture
 	result->savedMultiplyHighWorkValue = true;
 	result->savedVScaleWorkValue = true;
 	result->savedPointCursor = true;
-	if (texturePayload == NULL || texturePayloadBytes < 0x04u || pointBuffer == NULL || pointCount == 0u ||
-	    (size_t)pointCount > SIZE_MAX / 0x20u || pointBufferBytes < (size_t)pointCount * 0x20u || visits == NULL ||
+	if (texturePayload == NULL || texturePayloadBytes < SLIP_SPRITE_DIMENSIONS_END || pointBuffer == NULL ||
+	    pointCount == 0u || (size_t)pointCount > SIZE_MAX / sizeof(RasterTexturedPoint) ||
+	    pointBufferBytes < (size_t)pointCount * sizeof(RasterTexturedPoint) || visits == NULL ||
 	    visitCapacity < pointCount) {
 		return 0;
 	}
 	textureWidth = SlipBytes_ReadLE16(texturePayload);
-	textureHeight = SlipBytes_ReadLE16(texturePayload + 0x02u);
+	textureHeight = SlipBytes_ReadLE16(texturePayload + SLIP_SPRITE_HEIGHT_OFFSET);
 	if (textureWidth == 0u || textureHeight == 0u) {
 		return 0;
 	}
-	uScale = ((uint32_t)(uint16_t)(textureWidth - 1u) << 16) | 0xffffu;
-	vScale = ((uint32_t)(uint16_t)(textureHeight - 1u) << 16) | 0xffffu;
+	uScale = ((uint32_t)(uint16_t)(textureWidth - 1u) << RASTER_FRACTION_BITS) | UINT16_MAX;
+	vScale = ((uint32_t)(uint16_t)(textureHeight - 1u) << RASTER_FRACTION_BITS) | UINT16_MAX;
 	result->textureWidth = textureWidth;
 	result->textureHeight = textureHeight;
 	result->uScale = uScale;
@@ -1173,17 +1234,17 @@ int Raster_PrepareTextureUVExtents(const uint8_t *texturePayload, size_t texture
 	visitCount = 0;
 	while (remaining != 0u) {
 		uint8_t *const point = pointBuffer + pointOffset;
-		const uint32_t rawU = SlipBytes_ReadLE32(point + 0x0cu);
-		const uint32_t rawV = SlipBytes_ReadLE32(point + 0x10u);
+		const uint32_t rawU = SlipBytes_ReadLE32(point + offsetof(RasterTexturedPoint, u));
+		const uint32_t rawV = SlipBytes_ReadLE32(point + offsetof(RasterTexturedPoint, v));
 		const uint32_t scaledU = Raster_MultiplyUnsignedShift14(rawU, uScale);
 		const uint32_t scaledV = Raster_MultiplyUnsignedShift14(rawV, vScale);
 
-		Raster_WriteLE32(point + 0x18u, scaledU);
-		Raster_WriteLE32(point + 0x1cu, scaledV);
+		Raster_WriteLE32(point + offsetof(RasterTexturedPoint, scaledU), scaledU);
+		Raster_WriteLE32(point + offsetof(RasterTexturedPoint, scaledV), scaledV);
 		--remaining;
 		visits[visitCount] =
 		    (RasterTextureUVExtentsVisit){pointOffset, rawU, scaledU, rawV, scaledV, remaining, remaining != 0u};
-		pointOffset += 0x20u;
+		pointOffset += sizeof(RasterTexturedPoint);
 		++visitCount;
 	}
 	result->visitCount = visitCount;
@@ -1221,12 +1282,12 @@ int Raster_PrepareTexturedEntry(uint32_t textureHandle, const uint8_t *lockedPay
 	result->lockedPayload = (uintptr_t)lockedPayload;
 	result->storedTexturePayload = (uintptr_t)lockedPayload;
 	result->restoredPointCursor = true;
-	if (lockedPayload == NULL || lockedPayloadBytes < 0x0au) {
+	if (lockedPayload == NULL || lockedPayloadBytes < SLIP_SPRITE_TRANSPARENT_COLOUR_END) {
 		return 0;
 	}
-	textureHeaderWord = SlipBytes_ReadLE16(lockedPayload + 0x08u);
+	textureHeaderWord = SlipBytes_ReadLE16(lockedPayload + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 	result->textureHeaderWord = textureHeaderWord;
-	result->branchTextureHeaderMinusOne = textureHeaderWord == 0xffffu;
+	result->branchTextureHeaderMinusOne = textureHeaderWord == SLIP_SPRITE_NO_TRANSPARENT_COLOUR;
 	if (!result->branchTextureHeaderMinusOne) {
 		result->popad = true;
 		result->calledUnlockTextureResource = true;
@@ -1238,13 +1299,13 @@ int Raster_PrepareTexturedEntry(uint32_t textureHandle, const uint8_t *lockedPay
 	result->calledBuildTextureRowTable = true;
 	result->pointBufferBase = pointBufferBase;
 	result->inputPointCount = pointCount;
-	if (pointBuffer == NULL || pointCount == 0u || (size_t)pointCount > SIZE_MAX / 0x20u ||
-	    pointBufferBytes < (size_t)pointCount * 0x20u ||
+	if (pointBuffer == NULL || pointCount == 0u || (size_t)pointCount > SIZE_MAX / sizeof(RasterTexturedPoint) ||
+	    pointBufferBytes < (size_t)pointCount * sizeof(RasterTexturedPoint) ||
 	    (pointCount > 1u && (visits == NULL || visitCapacity < (size_t)pointCount - 1u))) {
 		return 0;
 	}
 	{
-		RasterTextureUVExtentsVisit uvVisits[64];
+		RasterTextureUVExtentsVisit uvVisits[RASTER_TEXTURE_UV_VISIT_CAPACITY];
 		RasterTextureUVExtents uvExtents;
 
 		if (pointCount > sizeof(uvVisits) / sizeof(uvVisits[0]) ||
@@ -1256,9 +1317,9 @@ int Raster_PrepareTexturedEntry(uint32_t textureHandle, const uint8_t *lockedPay
 
 	remainingCount = pointCount - 1u;
 	result->pointCountAfterDec = remainingCount;
-	topY = SlipBytes_ReadLEI32(pointBuffer + 0x04u);
+	topY = SlipBytes_ReadLEI32(pointBuffer + offsetof(RasterPoint, y));
 	bottomY = topY;
-	pointOffset = 0x20u;
+	pointOffset = sizeof(RasterTexturedPoint);
 	topLeftPointOffset = 0;
 	topRightPointOffset = 0;
 	visitCount = 0;
@@ -1271,7 +1332,7 @@ int Raster_PrepareTexturedEntry(uint32_t textureHandle, const uint8_t *lockedPay
 	while (remainingCount != 0u) {
 		const uint8_t *const point = pointBuffer + pointOffset;
 		const int32_t pointX = SlipBytes_ReadLEI32(point);
-		const int32_t pointY = SlipBytes_ReadLEI32(point + 0x04u);
+		const int32_t pointY = SlipBytes_ReadLEI32(point + offsetof(RasterPoint, y));
 		RasterTexturedEntryScanVisit visit;
 
 		memset(&visit, 0, sizeof(visit));
@@ -1306,7 +1367,7 @@ int Raster_PrepareTexturedEntry(uint32_t textureHandle, const uint8_t *lockedPay
 				visit.updateTopPair = true;
 			}
 		}
-		pointOffset += 0x20u;
+		pointOffset += sizeof(RasterTexturedPoint);
 		--remainingCount;
 		visit.pointOffsetAfterAdd = pointOffset;
 		visit.remainingCountAfterDec = remainingCount;
@@ -1360,13 +1421,13 @@ int Raster_PrepareAffineTexturedEntry(uint32_t textureHandle, const uint8_t *loc
 	result->calledBuildTextureRowTable = true;
 	result->pointBufferBase = pointBufferBase;
 	result->inputPointCount = pointCount;
-	if (pointBuffer == NULL || pointCount == 0u || (size_t)pointCount > SIZE_MAX / 0x20u ||
-	    pointBufferBytes < (size_t)pointCount * 0x20u ||
+	if (pointBuffer == NULL || pointCount == 0u || (size_t)pointCount > SIZE_MAX / sizeof(RasterTexturedPoint) ||
+	    pointBufferBytes < (size_t)pointCount * sizeof(RasterTexturedPoint) ||
 	    (pointCount > 1u && (visits == NULL || visitCapacity < (size_t)pointCount - 1u))) {
 		return 0;
 	}
 	{
-		RasterTextureUVExtentsVisit uvVisits[64];
+		RasterTextureUVExtentsVisit uvVisits[RASTER_TEXTURE_UV_VISIT_CAPACITY];
 		RasterTextureUVExtents uvExtents;
 
 		if (pointCount > sizeof(uvVisits) / sizeof(uvVisits[0]) ||
@@ -1378,9 +1439,9 @@ int Raster_PrepareAffineTexturedEntry(uint32_t textureHandle, const uint8_t *loc
 
 	remainingCount = pointCount - 1u;
 	result->pointCountAfterDec = remainingCount;
-	topY = SlipBytes_ReadLEI32(pointBuffer + 0x04u);
+	topY = SlipBytes_ReadLEI32(pointBuffer + offsetof(RasterPoint, y));
 	bottomY = topY;
-	pointOffset = 0x20u;
+	pointOffset = sizeof(RasterTexturedPoint);
 	topLeftPointOffset = 0;
 	topRightPointOffset = 0;
 	visitCount = 0;
@@ -1393,7 +1454,7 @@ int Raster_PrepareAffineTexturedEntry(uint32_t textureHandle, const uint8_t *loc
 	while (remainingCount != 0u) {
 		const uint8_t *const point = pointBuffer + pointOffset;
 		const int32_t pointX = SlipBytes_ReadLEI32(point);
-		const int32_t pointY = SlipBytes_ReadLEI32(point + 0x04u);
+		const int32_t pointY = SlipBytes_ReadLEI32(point + offsetof(RasterPoint, y));
 		RasterAffineTexturedEntryScanVisit visit;
 
 		memset(&visit, 0, sizeof(visit));
@@ -1428,7 +1489,7 @@ int Raster_PrepareAffineTexturedEntry(uint32_t textureHandle, const uint8_t *loc
 				visit.updateTopPair = true;
 			}
 		}
-		pointOffset += 0x20u;
+		pointOffset += sizeof(RasterTexturedPoint);
 		--remainingCount;
 		visit.pointOffsetAfterAdd = pointOffset;
 		visit.remainingCountAfterDec = remainingCount;
@@ -1463,7 +1524,8 @@ int Raster_StepLeftEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferBa
 		return 0;
 	}
 	memset(result, 0, sizeof(*result));
-	if (pointBuffer == NULL || pointBufferEnd < pointBufferBase || ((pointBufferEnd - pointBufferBase) % 0x20u) != 0u) {
+	if (pointBuffer == NULL || pointBufferEnd < pointBufferBase ||
+	    ((pointBufferEnd - pointBufferBase) % sizeof(RasterTexturedPoint)) != 0u) {
 		return 0;
 	}
 	currentOffset = initialPointOffset;
@@ -1483,8 +1545,8 @@ int Raster_StepLeftEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferBa
 		result->pointOffsetIn = currentOffset;
 		currentX = SlipBytes_ReadLEI32(current);
 		result->currentX = currentX;
-		result->spanLeftTexU = SlipBytes_ReadLE32(current + 0x18u);
-		result->spanLeftTexV = SlipBytes_ReadLE32(current + 0x1cu);
+		result->spanLeftTexU = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, scaledU));
+		result->spanLeftTexV = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, scaledV));
 		result->currentY = currentY;
 		result->bottomY = bottomY;
 		result->atBottom = currentY == bottomY;
@@ -1499,15 +1561,15 @@ int Raster_StepLeftEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferBa
 			candidateOffset = pointBufferEnd;
 			result->wrappedEndOffset = candidateOffset;
 		}
-		if (candidateOffset < pointBufferBase + 0x20u) {
+		if (candidateOffset < pointBufferBase + (uint32_t)sizeof(RasterTexturedPoint)) {
 			return 0;
 		}
-		candidateOffset -= 0x20u;
+		candidateOffset -= sizeof(RasterTexturedPoint);
 		if (!Raster_TexturedPointOffsetValid(pointBufferBase, pointBufferBytes, candidateOffset)) {
 			return 0;
 		}
 		candidate = pointBuffer + (candidateOffset - pointBufferBase);
-		candidateY = SlipBytes_ReadLEI32(candidate + 0x04u);
+		candidateY = SlipBytes_ReadLEI32(candidate + offsetof(RasterPoint, y));
 		result->candidateOffset = candidateOffset;
 		result->candidateY = candidateY;
 		result->carryCandidateAbove = currentY > candidateY;
@@ -1531,11 +1593,13 @@ int Raster_StepLeftEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferBa
 		result->edgeHeight = edgeHeight;
 		result->remaining = (uint16_t)edgeHeight;
 		result->texUStep =
-		    (int32_t)(SlipBytes_ReadLE32(candidate + 0x18u) - result->spanLeftTexU) / (int32_t)edgeHeight;
+		    (int32_t)(SlipBytes_ReadLE32(candidate + offsetof(RasterTexturedPoint, scaledU)) - result->spanLeftTexU) /
+		    (int32_t)edgeHeight;
 		result->texVStep =
-		    (int32_t)(SlipBytes_ReadLE32(candidate + 0x1cu) - result->spanLeftTexV) / (int32_t)edgeHeight;
+		    (int32_t)(SlipBytes_ReadLE32(candidate + offsetof(RasterTexturedPoint, scaledV)) - result->spanLeftTexV) /
+		    (int32_t)edgeHeight;
 		result->xStep = Raster_DivideWrappedFixed16(candidateX - currentX, edgeHeight);
-		result->xFraction = 0x8000u;
+		result->xFraction = RASTER_EDGE_HALF_PIXEL_Q16;
 		result->pointOffsetOut = candidateOffset;
 		result->carryOut = false;
 		return 1;
@@ -1551,7 +1615,8 @@ int Raster_StepRightEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferB
 		return 0;
 	}
 	memset(result, 0, sizeof(*result));
-	if (pointBuffer == NULL || pointBufferEnd < pointBufferBase || ((pointBufferEnd - pointBufferBase) % 0x20u) != 0u) {
+	if (pointBuffer == NULL || pointBufferEnd < pointBufferBase ||
+	    ((pointBufferEnd - pointBufferBase) % sizeof(RasterTexturedPoint)) != 0u) {
 		return 0;
 	}
 	currentOffset = initialPointOffset;
@@ -1571,8 +1636,8 @@ int Raster_StepRightEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferB
 		result->pointOffsetIn = currentOffset;
 		currentX = SlipBytes_ReadLEI32(current);
 		result->currentX = currentX;
-		result->spanRightTexU = SlipBytes_ReadLE32(current + 0x18u);
-		result->spanRightTexV = SlipBytes_ReadLE32(current + 0x1cu);
+		result->spanRightTexU = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, scaledU));
+		result->spanRightTexV = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, scaledV));
 		result->currentY = currentY;
 		result->bottomY = bottomY;
 		result->atBottom = currentY == bottomY;
@@ -1582,7 +1647,7 @@ int Raster_StepRightEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferB
 			return 1;
 		}
 
-		candidateOffset = currentOffset + 0x20u;
+		candidateOffset = currentOffset + (uint32_t)sizeof(RasterTexturedPoint);
 		if (candidateOffset == pointBufferEnd) {
 			candidateOffset = pointBufferBase;
 			result->wrappedBaseOffset = candidateOffset;
@@ -1591,7 +1656,7 @@ int Raster_StepRightEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferB
 			return 0;
 		}
 		candidate = pointBuffer + (candidateOffset - pointBufferBase);
-		candidateY = SlipBytes_ReadLEI32(candidate + 0x04u);
+		candidateY = SlipBytes_ReadLEI32(candidate + offsetof(RasterPoint, y));
 		result->candidateOffset = candidateOffset;
 		result->candidateY = candidateY;
 		result->carryCandidateAbove = currentY > candidateY;
@@ -1615,11 +1680,13 @@ int Raster_StepRightEdgeAffine(const uint8_t *pointBuffer, uint32_t pointBufferB
 		result->edgeHeight = edgeHeight;
 		result->remaining = (uint16_t)edgeHeight;
 		result->texUStep =
-		    (int32_t)(SlipBytes_ReadLE32(candidate + 0x18u) - result->spanRightTexU) / (int32_t)edgeHeight;
+		    (int32_t)(SlipBytes_ReadLE32(candidate + offsetof(RasterTexturedPoint, scaledU)) - result->spanRightTexU) /
+		    (int32_t)edgeHeight;
 		result->texVStep =
-		    (int32_t)(SlipBytes_ReadLE32(candidate + 0x1cu) - result->spanRightTexV) / (int32_t)edgeHeight;
+		    (int32_t)(SlipBytes_ReadLE32(candidate + offsetof(RasterTexturedPoint, scaledV)) - result->spanRightTexV) /
+		    (int32_t)edgeHeight;
 		result->xStep = Raster_DivideWrappedFixed16(candidateX - currentX, edgeHeight);
-		result->xFraction = 0x8000u;
+		result->xFraction = RASTER_EDGE_HALF_PIXEL_Q16;
 		result->pointOffsetOut = candidateOffset;
 		result->carryOut = false;
 		return 1;
@@ -1636,7 +1703,8 @@ int Raster_StepLeftEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t 
 		return 0;
 	}
 	memset(result, 0, sizeof(*result));
-	if (pointBuffer == NULL || pointBufferEnd < pointBufferBase || ((pointBufferEnd - pointBufferBase) % 0x20u) != 0u) {
+	if (pointBuffer == NULL || pointBufferEnd < pointBufferBase ||
+	    ((pointBufferEnd - pointBufferBase) % sizeof(RasterTexturedPoint)) != 0u) {
 		return 0;
 	}
 	currentOffset = initialPointOffset;
@@ -1656,9 +1724,9 @@ int Raster_StepLeftEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t 
 		result->pointOffsetIn = currentOffset;
 		currentX = SlipBytes_ReadLEI32(current);
 		result->currentX = currentX;
-		result->currentDepth = SlipBytes_ReadLE32(current + 0x14u);
-		result->currentScaledU = SlipBytes_ReadLE32(current + 0x18u);
-		result->currentScaledV = SlipBytes_ReadLE32(current + 0x1cu);
+		result->currentDepth = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, depth));
+		result->currentScaledU = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, scaledU));
+		result->currentScaledV = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, scaledV));
 		result->leftBaseDepth = result->currentDepth;
 		result->leftBaseTexU = result->currentScaledU;
 		result->leftBaseTexV = result->currentScaledV;
@@ -1676,15 +1744,15 @@ int Raster_StepLeftEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t 
 			candidateOffset = pointBufferEnd;
 			result->wrappedEndOffset = candidateOffset;
 		}
-		if (candidateOffset < pointBufferBase + 0x20u) {
+		if (candidateOffset < pointBufferBase + (uint32_t)sizeof(RasterTexturedPoint)) {
 			return 0;
 		}
-		candidateOffset -= 0x20u;
+		candidateOffset -= sizeof(RasterTexturedPoint);
 		if (!Raster_TexturedPointOffsetValid(pointBufferBase, pointBufferBytes, candidateOffset)) {
 			return 0;
 		}
 		candidate = pointBuffer + (candidateOffset - pointBufferBase);
-		candidateY = SlipBytes_ReadLEI32(candidate + 0x04u);
+		candidateY = SlipBytes_ReadLEI32(candidate + offsetof(RasterPoint, y));
 		result->candidateOffset = candidateOffset;
 		result->candidateY = candidateY;
 		result->carryCandidateAbove = currentY > candidateY;
@@ -1710,9 +1778,10 @@ int Raster_StepLeftEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t 
 		result->accumulatedBaseDepthPerRow = 0;
 		result->accumulatedNextPointDepthPerRow = 0;
 		result->baseDepthPerRow = result->leftBaseDepth / edgeHeight;
-		result->nextPointDepthPerRow = SlipBytes_ReadLE32(candidate + 0x14u) / edgeHeight;
+		result->nextPointDepthPerRow =
+		    SlipBytes_ReadLE32(candidate + offsetof(RasterTexturedPoint, depth)) / edgeHeight;
 		result->xStep = Raster_DivideWrappedFixed16(candidateX - currentX, edgeHeight);
-		result->xFraction = 0x8000u;
+		result->xFraction = RASTER_EDGE_HALF_PIXEL_Q16;
 		result->pointOffsetOut = candidateOffset;
 		result->carryOut = false;
 		return 1;
@@ -1729,7 +1798,8 @@ int Raster_StepRightEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t
 		return 0;
 	}
 	memset(result, 0, sizeof(*result));
-	if (pointBuffer == NULL || pointBufferEnd < pointBufferBase || ((pointBufferEnd - pointBufferBase) % 0x20u) != 0u) {
+	if (pointBuffer == NULL || pointBufferEnd < pointBufferBase ||
+	    ((pointBufferEnd - pointBufferBase) % sizeof(RasterTexturedPoint)) != 0u) {
 		return 0;
 	}
 	currentOffset = initialPointOffset;
@@ -1749,9 +1819,9 @@ int Raster_StepRightEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t
 		result->pointOffsetIn = currentOffset;
 		currentX = SlipBytes_ReadLEI32(current);
 		result->currentX = currentX;
-		result->currentDepth = SlipBytes_ReadLE32(current + 0x14u);
-		result->currentScaledU = SlipBytes_ReadLE32(current + 0x18u);
-		result->currentScaledV = SlipBytes_ReadLE32(current + 0x1cu);
+		result->currentDepth = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, depth));
+		result->currentScaledU = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, scaledU));
+		result->currentScaledV = SlipBytes_ReadLE32(current + offsetof(RasterTexturedPoint, scaledV));
 		result->rightBaseDepth = result->currentDepth;
 		result->rightBaseTexU = result->currentScaledU;
 		result->rightBaseTexV = result->currentScaledV;
@@ -1764,7 +1834,7 @@ int Raster_StepRightEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t
 			return 1;
 		}
 
-		candidateOffset = currentOffset + 0x20u;
+		candidateOffset = currentOffset + (uint32_t)sizeof(RasterTexturedPoint);
 		if (candidateOffset == pointBufferEnd) {
 			candidateOffset = pointBufferBase;
 			result->wrappedBaseOffset = candidateOffset;
@@ -1773,7 +1843,7 @@ int Raster_StepRightEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t
 			return 0;
 		}
 		candidate = pointBuffer + (candidateOffset - pointBufferBase);
-		candidateY = SlipBytes_ReadLEI32(candidate + 0x04u);
+		candidateY = SlipBytes_ReadLEI32(candidate + offsetof(RasterPoint, y));
 		result->candidateOffset = candidateOffset;
 		result->candidateY = candidateY;
 		result->carryCandidateAbove = currentY > candidateY;
@@ -1799,9 +1869,10 @@ int Raster_StepRightEdgeTexturedPerspective(const uint8_t *pointBuffer, uint32_t
 		result->accumulatedBaseDepthPerRow = 0;
 		result->accumulatedNextPointDepthPerRow = 0;
 		result->baseDepthPerRow = result->rightBaseDepth / edgeHeight;
-		result->nextPointDepthPerRow = SlipBytes_ReadLE32(candidate + 0x14u) / edgeHeight;
+		result->nextPointDepthPerRow =
+		    SlipBytes_ReadLE32(candidate + offsetof(RasterTexturedPoint, depth)) / edgeHeight;
 		result->xStep = Raster_DivideWrappedFixed16(candidateX - currentX, edgeHeight);
-		result->xFraction = 0x8000u;
+		result->xFraction = RASTER_EDGE_HALF_PIXEL_Q16;
 		result->pointOffsetOut = candidateOffset;
 		result->carryOut = false;
 		return 1;
@@ -1826,7 +1897,7 @@ int Raster_AdvancePerspectiveTexturedEdges(const RasterTexturedAdvanceEdgesState
 	result->leftRemainingOne = state->leftRemaining == 1u;
 	result->rightRemainingOne = state->rightRemaining == 1u;
 	if (result->leftRemainingOne || result->rightRemainingOne) {
-		result->oneRowFlag = 0xffffffffu;
+		result->oneRowFlag = UINT32_MAX;
 	}
 
 	result->out = *state;
@@ -1837,13 +1908,13 @@ int Raster_AdvancePerspectiveTexturedEdges(const RasterTexturedAdvanceEdgesState
 	result->out.rightAccumulatedNextPointDepthPerRow += state->rightNextPointDepthPerRow;
 
 	leftStepLo = (uint16_t)state->leftXStep;
-	leftStepHi = (uint16_t)((uint32_t)state->leftXStep >> 16);
+	leftStepHi = (uint16_t)((uint32_t)state->leftXStep >> RASTER_FRACTION_BITS);
 	result->out.leftXFraction = Raster_AddU16WithCarry(state->leftXFraction, leftStepLo, &leftCarry);
 	result->leftFractionCarry = leftCarry;
 	result->out.leftX = (int16_t)((uint16_t)state->leftX + leftStepHi + (leftCarry ? 1u : 0u));
 
 	rightStepLo = (uint16_t)state->rightXStep;
-	rightStepHi = (uint16_t)((uint32_t)state->rightXStep >> 16);
+	rightStepHi = (uint16_t)((uint32_t)state->rightXStep >> RASTER_FRACTION_BITS);
 	result->out.rightXFraction = Raster_AddU16WithCarry(state->rightXFraction, rightStepLo, &rightCarry);
 	result->rightFractionCarry = rightCarry;
 	result->out.rightX = (int16_t)((uint16_t)state->rightX + rightStepHi + (rightCarry ? 1u : 0u));
@@ -1917,7 +1988,7 @@ int Raster_SetupPerspectiveTexturedSpan(const RasterTexturedSpanSetupState *stat
 
 	result->calledDispatchTexturedSpan = true;
 	result->spanCoreTexturePayload = state->texturePayload;
-	result->spanCoreEndpointBase = 0x0002c44cu;
+	result->spanCoreEndpointBase = RASTER_TEXTURE_SPAN_ENDPOINT_BASE_TOKEN;
 	result->spanCoreLeftX = state->spanLeftX;
 	result->spanCoreRightX = state->spanRightX;
 
@@ -1970,7 +2041,7 @@ int Raster_DrawTexturedSpanCore(const RasterTexturedSpanCoreState *state, Raster
 	currentTexV = state->startTexV;
 	result->currentTexU = currentTexU;
 	result->currentTexV = currentTexV;
-	masked = state->transparentWord != 0xffffu;
+	masked = state->transparentWord != SLIP_SPRITE_NO_TRANSPARENT_COLOUR;
 	result->maskedBranch = masked;
 
 	remainingForAlignment = pixelCount;
@@ -1987,7 +2058,7 @@ int Raster_DrawTexturedSpanCore(const RasterTexturedSpanCoreState *state, Raster
 			destination += 2u;
 			remainingForAlignment -= 2u;
 		}
-		result->dwordLoopCount = remainingForAlignment >> 2;
+		result->dwordLoopCount = remainingForAlignment / RASTER_COPY_DWORD_BYTES;
 		result->wordTail = (remainingForAlignment & 2u) != 0u;
 		result->byteTail = (remainingForAlignment & 1u) != 0u;
 	}
@@ -2022,24 +2093,25 @@ int Raster_DrawAffineHorizontalSpan(const RasterAffineHorizontalSpanState *state
 	}
 	memset(result, 0, sizeof(*result));
 	result->in = *state;
-	if (state->pointBuffer == NULL || state->lockedPayload == NULL || state->lockedPayloadBytes < 0x0au ||
+	if (state->pointBuffer == NULL || state->lockedPayload == NULL ||
+	    state->lockedPayloadBytes < SLIP_SPRITE_TRANSPARENT_COLOUR_END ||
 	    state->topLeftPointOffset > state->pointBufferBytes || state->topRightPointOffset > state->pointBufferBytes ||
-	    state->pointBufferBytes - state->topLeftPointOffset < 0x20u ||
-	    state->pointBufferBytes - state->topRightPointOffset < 0x20u) {
+	    state->pointBufferBytes - state->topLeftPointOffset < sizeof(RasterTexturedPoint) ||
+	    state->pointBufferBytes - state->topRightPointOffset < sizeof(RasterTexturedPoint)) {
 		return 0;
 	}
 
 	topLeftPoint = state->pointBuffer + state->topLeftPointOffset;
 	topRightPoint = state->pointBuffer + state->topRightPointOffset;
-	result->spanLeftTexU = SlipBytes_ReadLE32(topLeftPoint + 0x18u);
-	result->spanLeftTexV = SlipBytes_ReadLE32(topLeftPoint + 0x1cu);
-	result->spanRightTexU = SlipBytes_ReadLE32(topRightPoint + 0x18u);
-	result->spanRightTexV = SlipBytes_ReadLE32(topRightPoint + 0x1cu);
-	result->endpointBase = 0x0002c44cu;
+	result->spanLeftTexU = SlipBytes_ReadLE32(topLeftPoint + offsetof(RasterTexturedPoint, scaledU));
+	result->spanLeftTexV = SlipBytes_ReadLE32(topLeftPoint + offsetof(RasterTexturedPoint, scaledV));
+	result->spanRightTexU = SlipBytes_ReadLE32(topRightPoint + offsetof(RasterTexturedPoint, scaledU));
+	result->spanRightTexV = SlipBytes_ReadLE32(topRightPoint + offsetof(RasterTexturedPoint, scaledV));
+	result->endpointBase = RASTER_TEXTURE_SPAN_ENDPOINT_BASE_TOKEN;
 	result->spanCoreLeftX = SlipBytes_ReadLEI32(topLeftPoint);
 	result->spanCoreRightX = SlipBytes_ReadLEI32(topRightPoint);
 	result->spanCoreTexturePayload = (uintptr_t)state->lockedPayload;
-	result->transparentWord = SlipBytes_ReadLE16(state->lockedPayload + 0x08u);
+	result->transparentWord = SlipBytes_ReadLE16(state->lockedPayload + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 
 	memset(&spanCoreState, 0, sizeof(spanCoreState));
 	spanCoreState.screenRow = state->screenRow;
@@ -2076,18 +2148,19 @@ int Raster_DrawAffineScanlineLoop(const RasterAffineScanlineLoopState *state, Ra
 	memset(result, 0, sizeof(*result));
 	result->in = *state;
 	result->out = *state;
-	if (state->screenRows == NULL || state->lockedPayload == NULL || state->lockedPayloadBytes < 0x0au ||
-	    state->pointBuffer == NULL || state->pointBufferEnd < state->pointBufferBase ||
-	    ((state->pointBufferEnd - state->pointBufferBase) % 0x20u) != 0u ||
+	if (state->screenRows == NULL || state->lockedPayload == NULL ||
+	    state->lockedPayloadBytes < SLIP_SPRITE_TRANSPARENT_COLOUR_END || state->pointBuffer == NULL ||
+	    state->pointBufferEnd < state->pointBufferBase ||
+	    ((state->pointBufferEnd - state->pointBufferBase) % sizeof(RasterTexturedPoint)) != 0u ||
 	    (state->scanline < state->bottomY && (visits == NULL || visitCapacity == 0u))) {
 		return 0;
 	}
 
 	current = *state;
 	leftStepLo = (uint16_t)current.leftXStep;
-	leftStepHi = (uint16_t)((uint32_t)current.leftXStep >> 16);
+	leftStepHi = (uint16_t)((uint32_t)current.leftXStep >> RASTER_FRACTION_BITS);
 	rightStepLo = (uint16_t)current.rightXStep;
-	rightStepHi = (uint16_t)((uint32_t)current.rightXStep >> 16);
+	rightStepHi = (uint16_t)((uint32_t)current.rightXStep >> RASTER_FRACTION_BITS);
 	while (current.scanline < current.bottomY) {
 		RasterAffineScanlineLoopVisit *visit;
 		RasterTexturedSpanCoreState spanCoreState;
@@ -2122,7 +2195,8 @@ int Raster_DrawAffineScanlineLoop(const RasterAffineScanlineLoopState *state, Ra
 		spanCoreState.startTexV = current.spanLeftTexV;
 		spanCoreState.endTexU = current.spanRightTexU;
 		spanCoreState.endTexV = current.spanRightTexV;
-		spanCoreState.transparentWord = SlipBytes_ReadLE16(current.lockedPayload + 0x08u);
+		spanCoreState.transparentWord =
+		    SlipBytes_ReadLE16(current.lockedPayload + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 		spanCoreState.textureRows = current.textureRows;
 		spanCoreState.textureRowCount = current.textureRowCount;
 		spanCoreState.textureRowBytes = current.textureRowBytes;
@@ -2177,7 +2251,7 @@ int Raster_DrawAffineScanlineLoop(const RasterAffineScanlineLoopState *state, Ra
 			current.leftXFraction = leftStep.xFraction;
 			current.leftRemaining = leftStep.remaining;
 			leftStepLo = (uint16_t)current.leftXStep;
-			leftStepHi = (uint16_t)((uint32_t)current.leftXStep >> 16);
+			leftStepHi = (uint16_t)((uint32_t)current.leftXStep >> RASTER_FRACTION_BITS);
 		}
 
 		--current.rightRemaining;
@@ -2209,7 +2283,7 @@ int Raster_DrawAffineScanlineLoop(const RasterAffineScanlineLoopState *state, Ra
 			current.rightXFraction = rightStep.xFraction;
 			current.rightRemaining = rightStep.remaining;
 			rightStepLo = (uint16_t)current.rightXStep;
-			rightStepHi = (uint16_t)((uint32_t)current.rightXStep >> 16);
+			rightStepHi = (uint16_t)((uint32_t)current.rightXStep >> RASTER_FRACTION_BITS);
 		}
 
 		visit->loop = current.scanline < current.bottomY;
@@ -2232,7 +2306,8 @@ int Raster_DrawAffineScanlineLoop(const RasterAffineScanlineLoopState *state, Ra
 		finalSpanState.startTexV = current.spanLeftTexV;
 		finalSpanState.endTexU = current.spanRightTexU;
 		finalSpanState.endTexV = current.spanRightTexV;
-		finalSpanState.transparentWord = SlipBytes_ReadLE16(current.lockedPayload + 0x08u);
+		finalSpanState.transparentWord =
+		    SlipBytes_ReadLE16(current.lockedPayload + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 		finalSpanState.textureRows = current.textureRows;
 		finalSpanState.textureRowCount = current.textureRowCount;
 		finalSpanState.textureRowBytes = current.textureRowBytes;
@@ -2246,8 +2321,11 @@ int Raster_DrawAffineScanlineLoop(const RasterAffineScanlineLoopState *state, Ra
 	return 1;
 }
 
+/* Largest power of four representable in uint64_t, for the base-four square root. */
+static const uint64_t RASTER_ISQRT_INITIAL_BIT = UINT64_C(1) << 62;
+
 static uint32_t Raster_IsqrtU64(uint64_t value) {
-	uint64_t bit = (uint64_t)1 << 62;
+	uint64_t bit = RASTER_ISQRT_INITIAL_BIT;
 	uint64_t root = 0;
 
 	while (bit > value) {
@@ -2282,7 +2360,7 @@ static void Raster_NormalizePair(int32_t componentX, int32_t componentY, int32_t
 		absY = -absY;
 		signY = 1;
 	}
-	highBits = ((uint32_t)absX | (uint32_t)absY) & 0xffff8000u;
+	highBits = ((uint32_t)absX | (uint32_t)absY) & RASTER_NORMALIZE_COMPONENT_HIGH_MASK;
 	if (highBits != 0u) {
 		uint32_t scan = highBits;
 		int shift = 0;
@@ -2290,7 +2368,7 @@ static void Raster_NormalizePair(int32_t componentX, int32_t componentY, int32_t
 		while (scan >>= 1) {
 			++shift;
 		}
-		shift -= 14;
+		shift -= RASTER_NORMALIZE_MAXIMUM_COMPONENT_BIT;
 		absX >>= shift;
 		absY >>= shift;
 	}
@@ -2309,8 +2387,10 @@ static void Raster_NormalizePair(int32_t componentX, int32_t componentY, int32_t
 		return;
 	}
 
-	*resultX = (int16_t)((((int32_t)(int16_t)absX << 16) >> 2) / (int32_t)(int16_t)length);
-	*resultY = (int16_t)((((int32_t)(int16_t)absY << 16) >> 2) / (int32_t)(int16_t)length);
+	*resultX = (int16_t)((((int32_t)(int16_t)absX << RASTER_FRACTION_BITS) >> RASTER_NORMALIZE_OUTPUT_SHIFT) /
+	                     (int32_t)(int16_t)length);
+	*resultY = (int16_t)((((int32_t)(int16_t)absY << RASTER_FRACTION_BITS) >> RASTER_NORMALIZE_OUTPUT_SHIFT) /
+	                     (int32_t)(int16_t)length);
 }
 
 static void Raster_FindPerspectiveSplit(uint32_t firstScreenFraction, uint32_t firstTextureFraction,
@@ -2354,17 +2434,17 @@ static void Raster_FindPerspectiveSplit(uint32_t firstScreenFraction, uint32_t f
 		negativeNormalizedScreenDelta = -normalizedScreenDelta;
 	}
 	currentScreenFraction = startScreenFraction;
-	screenFractionStep = (endScreenFraction - startScreenFraction) / 0x40u;
-	for (i = 0; i < 0x40; ++i) {
+	screenFractionStep = (endScreenFraction - startScreenFraction) / RASTER_PERSPECTIVE_SPLIT_SAMPLE_COUNT;
+	for (i = 0; i < RASTER_PERSPECTIVE_SPLIT_SAMPLE_COUNT; ++i) {
 		const uint64_t product = (uint64_t)currentScreenFraction * depth;
-		const uint32_t projected = (uint32_t)(product >> 16);
-		const uint32_t denominator = projected - currentScreenFraction + 0x10000u;
+		const uint32_t projected = (uint32_t)(product >> RASTER_FRACTION_BITS);
+		const uint32_t denominator = projected - currentScreenFraction + RASTER_FRACTION_ONE_Q16;
 		const uint32_t currentTextureFraction =
-		    denominator == 0u ? 0u : (uint32_t)(((uint64_t)projected << 16) / denominator);
+		    denominator == 0u ? 0u : (uint32_t)(((uint64_t)projected << RASTER_FRACTION_BITS) / denominator);
 		const int64_t scoreWide =
 		    (int64_t)(int32_t)(currentScreenFraction - startScreenFraction) * normalizedTextureDelta +
 		    (int64_t)(int32_t)(currentTextureFraction - startTextureFraction) * negativeNormalizedScreenDelta;
-		const int32_t score = (int32_t)(scoreWide >> 16);
+		const int32_t score = (int32_t)(scoreWide >> RASTER_FRACTION_BITS);
 
 		if (bestScore < score) {
 			bestScore = score;
@@ -2379,7 +2459,7 @@ static void Raster_FindPerspectiveSplit(uint32_t firstScreenFraction, uint32_t f
 
 void Raster_BuildPerspectiveTable(RasterPerspectiveEntry table[RASTER_PERSPECTIVE_ENTRY_COUNT]) {
 	RasterPerspectiveEntry *entry = table;
-	uint32_t depth = 0x20u;
+	uint32_t depth = RASTER_PERSPECTIVE_MINIMUM_DEPTH_RATIO;
 	for (;;) {
 		uint32_t screenFraction;
 		uint32_t textureFraction;
@@ -2388,83 +2468,110 @@ void Raster_BuildPerspectiveTable(RasterPerspectiveEntry table[RASTER_PERSPECTIV
 
 		screenFraction = 0;
 		textureFraction = 0;
-		endScreenFraction = 0x10000u;
-		endTextureFraction = 0x10000u;
+		endScreenFraction = RASTER_FRACTION_ONE_Q16;
+		endTextureFraction = RASTER_FRACTION_ONE_Q16;
 		Raster_FindPerspectiveSplit(screenFraction, textureFraction, endScreenFraction, endTextureFraction, depth,
 		                            &screenFraction, &textureFraction);
-		entry->splits[7] = (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
+		entry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT] =
+		    (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
 
 		endScreenFraction = 0;
 		endTextureFraction = 0;
 		Raster_FindPerspectiveSplit(screenFraction, textureFraction, endScreenFraction, endTextureFraction, depth,
 		                            &screenFraction, &textureFraction);
-		entry->splits[3] = (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
+		entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT] =
+		    (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
 
 		endScreenFraction = 0;
 		endTextureFraction = 0;
 		Raster_FindPerspectiveSplit(screenFraction, textureFraction, endScreenFraction, endTextureFraction, depth,
 		                            &screenFraction, &textureFraction);
-		entry->splits[1] = (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
+		entry->splits[RASTER_PERSPECTIVE_FIRST_EIGHTH_SPLIT] =
+		    (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
 
 		endScreenFraction = 0;
 		endTextureFraction = 0;
 		Raster_FindPerspectiveSplit(screenFraction, textureFraction, endScreenFraction, endTextureFraction, depth,
 		                            &screenFraction, &textureFraction);
-		entry->splits[0] = (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
+		entry->splits[RASTER_PERSPECTIVE_FIRST_SIXTEENTH_SPLIT] =
+		    (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
 
-		screenFraction = entry->splits[1].screenFraction;
-		textureFraction = entry->splits[1].textureFraction;
-		endScreenFraction = entry->splits[3].screenFraction;
-		endTextureFraction = entry->splits[3].textureFraction;
+		screenFraction = entry->splits[RASTER_PERSPECTIVE_FIRST_EIGHTH_SPLIT].screenFraction;
+		textureFraction = entry->splits[RASTER_PERSPECTIVE_FIRST_EIGHTH_SPLIT].textureFraction;
+		endScreenFraction = entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].screenFraction;
+		endTextureFraction = entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].textureFraction;
 		Raster_FindPerspectiveSplit(screenFraction, textureFraction, endScreenFraction, endTextureFraction, depth,
 		                            &screenFraction, &textureFraction);
-		entry->splits[2] = (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
+		entry->splits[RASTER_PERSPECTIVE_THIRD_SIXTEENTH_SPLIT] =
+		    (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
 
-		screenFraction = entry->splits[7].screenFraction;
-		textureFraction = entry->splits[7].textureFraction;
-		endScreenFraction = entry->splits[3].screenFraction;
-		endTextureFraction = entry->splits[3].textureFraction;
+		screenFraction = entry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT].screenFraction;
+		textureFraction = entry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT].textureFraction;
+		endScreenFraction = entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].screenFraction;
+		endTextureFraction = entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].textureFraction;
 		Raster_FindPerspectiveSplit(screenFraction, textureFraction, endScreenFraction, endTextureFraction, depth,
 		                            &screenFraction, &textureFraction);
-		entry->splits[5] = (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
+		entry->splits[RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT] =
+		    (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
 
-		screenFraction = entry->splits[5].screenFraction;
-		textureFraction = entry->splits[5].textureFraction;
-		endScreenFraction = entry->splits[3].screenFraction;
-		endTextureFraction = entry->splits[3].textureFraction;
+		screenFraction = entry->splits[RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT].screenFraction;
+		textureFraction = entry->splits[RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT].textureFraction;
+		endScreenFraction = entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].screenFraction;
+		endTextureFraction = entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].textureFraction;
 		Raster_FindPerspectiveSplit(screenFraction, textureFraction, endScreenFraction, endTextureFraction, depth,
 		                            &screenFraction, &textureFraction);
-		entry->splits[4] = (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
+		entry->splits[RASTER_PERSPECTIVE_FIFTH_SIXTEENTH_SPLIT] =
+		    (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
 
-		screenFraction = entry->splits[5].screenFraction;
-		textureFraction = entry->splits[5].textureFraction;
-		endScreenFraction = entry->splits[7].screenFraction;
-		endTextureFraction = entry->splits[7].textureFraction;
+		screenFraction = entry->splits[RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT].screenFraction;
+		textureFraction = entry->splits[RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT].textureFraction;
+		endScreenFraction = entry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT].screenFraction;
+		endTextureFraction = entry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT].textureFraction;
 		Raster_FindPerspectiveSplit(screenFraction, textureFraction, endScreenFraction, endTextureFraction, depth,
 		                            &screenFraction, &textureFraction);
-		entry->splits[6] = (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
+		entry->splits[RASTER_PERSPECTIVE_SEVENTH_SIXTEENTH_SPLIT] =
+		    (RasterPerspectiveSplit){(uint16_t)screenFraction, (uint16_t)textureFraction};
 
-		entry->splits[14] = (RasterPerspectiveSplit){(uint16_t)(0x10000u - entry->splits[0].textureFraction),
-		                                             (uint16_t)(0x10000u - entry->splits[0].screenFraction)};
-		entry->splits[13] = (RasterPerspectiveSplit){(uint16_t)(0x10000u - entry->splits[1].textureFraction),
-		                                             (uint16_t)(0x10000u - entry->splits[1].screenFraction)};
-		entry->splits[12] = (RasterPerspectiveSplit){(uint16_t)(0x10000u - entry->splits[2].textureFraction),
-		                                             (uint16_t)(0x10000u - entry->splits[2].screenFraction)};
-		entry->splits[11] = (RasterPerspectiveSplit){(uint16_t)(0x10000u - entry->splits[3].textureFraction),
-		                                             (uint16_t)(0x10000u - entry->splits[3].screenFraction)};
-		entry->splits[10] = (RasterPerspectiveSplit){(uint16_t)(0x10000u - entry->splits[4].textureFraction),
-		                                             (uint16_t)(0x10000u - entry->splits[4].screenFraction)};
-		entry->splits[9] = (RasterPerspectiveSplit){(uint16_t)(0x10000u - entry->splits[5].textureFraction),
-		                                            (uint16_t)(0x10000u - entry->splits[5].screenFraction)};
-		entry->splits[8] = (RasterPerspectiveSplit){(uint16_t)(0x10000u - entry->splits[6].textureFraction),
-		                                            (uint16_t)(0x10000u - entry->splits[6].screenFraction)};
+		entry->splits[RASTER_PERSPECTIVE_LAST_SPLIT - RASTER_PERSPECTIVE_FIRST_SIXTEENTH_SPLIT] =
+		    (RasterPerspectiveSplit){
+		        (uint16_t)(RASTER_FRACTION_ONE_Q16 -
+		                   entry->splits[RASTER_PERSPECTIVE_FIRST_SIXTEENTH_SPLIT].textureFraction),
+		        (uint16_t)(RASTER_FRACTION_ONE_Q16 -
+		                   entry->splits[RASTER_PERSPECTIVE_FIRST_SIXTEENTH_SPLIT].screenFraction)};
+		entry->splits[RASTER_PERSPECTIVE_LAST_SPLIT - RASTER_PERSPECTIVE_FIRST_EIGHTH_SPLIT] = (RasterPerspectiveSplit){
+		    (uint16_t)(RASTER_FRACTION_ONE_Q16 - entry->splits[RASTER_PERSPECTIVE_FIRST_EIGHTH_SPLIT].textureFraction),
+		    (uint16_t)(RASTER_FRACTION_ONE_Q16 - entry->splits[RASTER_PERSPECTIVE_FIRST_EIGHTH_SPLIT].screenFraction)};
+		entry->splits[RASTER_PERSPECTIVE_LAST_SPLIT - RASTER_PERSPECTIVE_THIRD_SIXTEENTH_SPLIT] =
+		    (RasterPerspectiveSplit){
+		        (uint16_t)(RASTER_FRACTION_ONE_Q16 -
+		                   entry->splits[RASTER_PERSPECTIVE_THIRD_SIXTEENTH_SPLIT].textureFraction),
+		        (uint16_t)(RASTER_FRACTION_ONE_Q16 -
+		                   entry->splits[RASTER_PERSPECTIVE_THIRD_SIXTEENTH_SPLIT].screenFraction)};
+		entry->splits[RASTER_PERSPECTIVE_LAST_QUARTER_SPLIT] = (RasterPerspectiveSplit){
+		    (uint16_t)(RASTER_FRACTION_ONE_Q16 - entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].textureFraction),
+		    (uint16_t)(RASTER_FRACTION_ONE_Q16 - entry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].screenFraction)};
+		entry->splits[RASTER_PERSPECTIVE_LAST_SPLIT - RASTER_PERSPECTIVE_FIFTH_SIXTEENTH_SPLIT] =
+		    (RasterPerspectiveSplit){
+		        (uint16_t)(RASTER_FRACTION_ONE_Q16 -
+		                   entry->splits[RASTER_PERSPECTIVE_FIFTH_SIXTEENTH_SPLIT].textureFraction),
+		        (uint16_t)(RASTER_FRACTION_ONE_Q16 -
+		                   entry->splits[RASTER_PERSPECTIVE_FIFTH_SIXTEENTH_SPLIT].screenFraction)};
+		entry->splits[RASTER_PERSPECTIVE_LAST_SPLIT - RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT] = (RasterPerspectiveSplit){
+		    (uint16_t)(RASTER_FRACTION_ONE_Q16 - entry->splits[RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT].textureFraction),
+		    (uint16_t)(RASTER_FRACTION_ONE_Q16 - entry->splits[RASTER_PERSPECTIVE_THIRD_EIGHTH_SPLIT].screenFraction)};
+		entry->splits[RASTER_PERSPECTIVE_LAST_SPLIT - RASTER_PERSPECTIVE_SEVENTH_SIXTEENTH_SPLIT] =
+		    (RasterPerspectiveSplit){
+		        (uint16_t)(RASTER_FRACTION_ONE_Q16 -
+		                   entry->splits[RASTER_PERSPECTIVE_SEVENTH_SIXTEENTH_SPLIT].textureFraction),
+		        (uint16_t)(RASTER_FRACTION_ONE_Q16 -
+		                   entry->splits[RASTER_PERSPECTIVE_SEVENTH_SIXTEENTH_SPLIT].screenFraction)};
 
 		++entry;
-		if (depth == 0x20u) {
+		if (depth == RASTER_PERSPECTIVE_MINIMUM_DEPTH_RATIO) {
 			depth = 0;
 		}
-		depth += 0x80u;
-		if (depth > 0xfa80u) {
+		depth += RASTER_PERSPECTIVE_DEPTH_RATIO_STEP;
+		if (depth > RASTER_PERSPECTIVE_MAXIMUM_TABLE_DEPTH_RATIO) {
 			break;
 		}
 	}
@@ -2473,7 +2580,7 @@ void Raster_BuildPerspectiveTable(RasterPerspectiveEntry table[RASTER_PERSPECTIV
 RasterPerspectiveEntry *Raster_perspectiveTable;
 
 static const RasterPerspectiveEntry *Raster_PerspectiveEntry(uint32_t bucket, uint32_t bias) {
-	return &Raster_perspectiveTable[(bucket + bias) >> 7];
+	return &Raster_perspectiveTable[(bucket + bias) >> RASTER_PERSPECTIVE_ENTRY_BUCKET_SHIFT];
 }
 
 static int Raster_DrawTexturedRun(uint8_t *destination, size_t destinationBytes, uint32_t pixelCount,
@@ -2482,12 +2589,12 @@ static int Raster_DrawTexturedRun(uint8_t *destination, size_t destinationBytes,
                                   size_t textureRowBytes, size_t *pixelsWritten, uint32_t runIndex,
                                   RasterTexturedSpanDispatch *diagnostic) {
 	uint32_t i;
-	const int masked = transparentWord != 0xffffu;
+	const int masked = transparentWord != SLIP_SPRITE_NO_TRANSPARENT_COLOUR;
 
 	if (currentTexU == NULL || currentTexV == NULL || pixelsWritten == NULL || destination == NULL ||
 	    destinationBytes < pixelCount) {
 		if (diagnostic != NULL) {
-			diagnostic->longSpanFailStage = 2u;
+			diagnostic->longSpanFailStage = RASTER_LONG_SPAN_INVALID_RUN;
 			diagnostic->longSpanFailRun = runIndex;
 			diagnostic->longSpanFailPixel = pixelCount;
 		}
@@ -2500,12 +2607,12 @@ static int Raster_DrawTexturedRun(uint8_t *destination, size_t destinationBytes,
 		                              &sample)) {
 			if (diagnostic != NULL) {
 				diagnostic->longSpanFailRun = runIndex;
-				diagnostic->longSpanFailStage = 3u;
+				diagnostic->longSpanFailStage = RASTER_LONG_SPAN_INVALID_TEXTURE_SAMPLE;
 				diagnostic->longSpanFailPixel = i;
 				diagnostic->longSpanFailTexU = *currentTexU;
 				diagnostic->longSpanFailTexV = *currentTexV;
-				diagnostic->longSpanFailTexX = (uint16_t)(*currentTexU >> 16);
-				diagnostic->longSpanFailTexY = (uint16_t)(*currentTexV >> 16);
+				diagnostic->longSpanFailTexX = (uint16_t)(*currentTexU >> RASTER_FRACTION_BITS);
+				diagnostic->longSpanFailTexY = (uint16_t)(*currentTexV >> RASTER_FRACTION_BITS);
 			}
 			return 0;
 		}
@@ -2545,13 +2652,13 @@ static int Raster_DispatchTwoSegmentTexturedSpan(const RasterTexturedSpanDispatc
 	if (state == NULL || result == NULL || state->screenRow == NULL || state->spanLeftX < 0 || state->spanRightX < 0 ||
 	    (size_t)state->spanRightX >= state->screenRowBytes) {
 		if (result != NULL) {
-			result->longSpanFailStage = 1u;
+			result->longSpanFailStage = RASTER_LONG_SPAN_INVALID_SPAN;
 		}
 		return 0;
 	}
-	perspectiveEntry = Raster_PerspectiveEntry(ratioBucket, 0x80u);
-	segmentCoeff = perspectiveEntry->splits[7].screenFraction;
-	interpCoeff = perspectiveEntry->splits[7].textureFraction;
+	perspectiveEntry = Raster_PerspectiveEntry(ratioBucket, RASTER_PERSPECTIVE_TWO_SEGMENT_BUCKET_BIAS);
+	segmentCoeff = perspectiveEntry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT].screenFraction;
+	interpCoeff = perspectiveEntry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT].textureFraction;
 	if (result->depthSwapped) {
 		const uint16_t tmp = segmentCoeff;
 
@@ -2624,7 +2731,7 @@ static int Raster_DispatchTwoSegmentTexturedSpan(const RasterTexturedSpanDispatc
 	destinationBytes = state->screenRowBytes - (size_t)state->spanLeftX;
 	currentTexU = state->startTexU;
 	currentTexV = state->startTexV;
-	result->maskedLongSpan = state->transparentWord != 0xffffu;
+	result->maskedLongSpan = state->transparentWord != SLIP_SPRITE_NO_TRANSPARENT_COLOUR;
 	if (!Raster_DrawTexturedRun(destination, destinationBytes, segment0, &currentTexU, &currentTexV, segment0TexUStep,
 	                            segment0TexVStep, state->transparentWord, state->textureRows, state->textureRowCount,
 	                            state->textureRowBytes, &result->longSpanPixelsWritten, 0u, result)) {
@@ -2642,12 +2749,19 @@ static int Raster_DispatchTwoSegmentTexturedSpan(const RasterTexturedSpanDispatc
 
 static int Raster_DispatchEightSegmentTexturedSpan(const RasterTexturedSpanDispatchState *state, uint32_t ratioBucket,
                                                    RasterTexturedSpanDispatch *result) {
+	enum {
+		SEGMENT_COUNT = 8,
+		SPLIT_COUNT = SEGMENT_COUNT - 1,
+		LAST_SPLIT = SPLIT_COUNT - 1,
+		FINAL_SEGMENT = SEGMENT_COUNT - 1
+	};
+
 	const RasterPerspectiveEntry *perspectiveEntry;
-	uint16_t segmentCountCoeff[7];
-	uint16_t segmentInterpCoeff[7];
-	uint16_t segmentPixels[8];
-	int32_t texUSteps[8] = {0};
-	int32_t texVSteps[8] = {0};
+	uint16_t segmentCountCoeff[SPLIT_COUNT];
+	uint16_t segmentInterpCoeff[SPLIT_COUNT];
+	uint16_t segmentPixels[SEGMENT_COUNT];
+	int32_t texUSteps[SEGMENT_COUNT] = {0};
+	int32_t texVSteps[SEGMENT_COUNT] = {0};
 	uint16_t spanWidth;
 	uint16_t cumulative;
 	int16_t remainingPixels;
@@ -2666,14 +2780,16 @@ static int Raster_DispatchEightSegmentTexturedSpan(const RasterTexturedSpanDispa
 	if (state == NULL || result == NULL || state->screenRow == NULL || state->spanLeftX < 0 || state->spanRightX < 0 ||
 	    (size_t)state->spanRightX >= state->screenRowBytes) {
 		if (result != NULL) {
-			result->longSpanFailStage = 1u;
+			result->longSpanFailStage = RASTER_LONG_SPAN_INVALID_SPAN;
 		}
 		return 0;
 	}
 
-	perspectiveEntry = Raster_PerspectiveEntry(ratioBucket, 0x40u);
-	for (i = 0; i < 7u; ++i) {
-		const RasterPerspectiveSplit *const split = &perspectiveEntry->splits[1 + i * 2];
+	perspectiveEntry = Raster_PerspectiveEntry(ratioBucket, RASTER_PERSPECTIVE_MULTI_SEGMENT_BUCKET_BIAS);
+	for (i = 0; i < SPLIT_COUNT; ++i) {
+		const RasterPerspectiveSplit *const split =
+		    &perspectiveEntry
+		         ->splits[RASTER_PERSPECTIVE_FIRST_EIGHTH_SPLIT + i * RASTER_PERSPECTIVE_EIGHTH_SPLIT_STRIDE];
 		const uint16_t lowWord = split->screenFraction;
 		const uint16_t highWord = split->textureFraction;
 
@@ -2689,12 +2805,12 @@ static int Raster_DispatchEightSegmentTexturedSpan(const RasterTexturedSpanDispa
 	spanWidth = (uint16_t)result->inclusiveWidth;
 	segmentPixels[0] = Raster_MultiplyUnsigned16High(segmentCountCoeff[0], spanWidth);
 	cumulative = segmentPixels[0];
-	for (i = 1u; i < 7u; ++i) {
+	for (i = 1u; i < SPLIT_COUNT; ++i) {
 		segmentPixels[i] = (uint16_t)(Raster_MultiplyUnsigned16High(segmentCountCoeff[i], spanWidth) - cumulative);
 		cumulative = (uint16_t)(cumulative + segmentPixels[i]);
 	}
 	remainingPixels = (int16_t)(spanWidth - cumulative);
-	segmentPixels[7] = remainingPixels < 0 ? 0u : (uint16_t)remainingPixels;
+	segmentPixels[FINAL_SEGMENT] = remainingPixels < 0 ? 0u : (uint16_t)remainingPixels;
 
 	result->longSpanSegment0PixelCount = segmentPixels[0];
 	result->longSpanSegment1PixelCount = segmentPixels[1];
@@ -2705,7 +2821,7 @@ static int Raster_DispatchEightSegmentTexturedSpan(const RasterTexturedSpanDispa
 	texVDelta = (int32_t)(state->endTexV - state->startTexV);
 	remainingTexU = texUDelta;
 	remainingTexV = texVDelta;
-	for (i = 0; i < 6u; ++i) {
+	for (i = 0; i < LAST_SPLIT; ++i) {
 		if (segmentPixels[i] != 0u) {
 			const int32_t texUEnd = Raster_MultiplySignedShift16(segmentInterpCoeff[i], texUDelta);
 			const int32_t texVEnd = Raster_MultiplySignedShift16(segmentInterpCoeff[i], texVDelta);
@@ -2716,18 +2832,18 @@ static int Raster_DispatchEightSegmentTexturedSpan(const RasterTexturedSpanDispa
 			previousTexVEnd = texVEnd;
 		}
 	}
-	if (segmentPixels[6] != 0u) {
-		const int32_t texUEnd = Raster_MultiplySignedShift16(segmentInterpCoeff[6], texUDelta);
-		const int32_t texVEnd = Raster_MultiplySignedShift16(segmentInterpCoeff[6], texVDelta);
+	if (segmentPixels[LAST_SPLIT] != 0u) {
+		const int32_t texUEnd = Raster_MultiplySignedShift16(segmentInterpCoeff[LAST_SPLIT], texUDelta);
+		const int32_t texVEnd = Raster_MultiplySignedShift16(segmentInterpCoeff[LAST_SPLIT], texVDelta);
 
 		remainingTexU = texUDelta - texUEnd;
 		remainingTexV = texVDelta - texVEnd;
-		texUSteps[6] = (texUEnd - previousTexUEnd) / (int32_t)segmentPixels[6];
-		texVSteps[6] = (texVEnd - previousTexVEnd) / (int32_t)segmentPixels[6];
+		texUSteps[LAST_SPLIT] = (texUEnd - previousTexUEnd) / (int32_t)segmentPixels[LAST_SPLIT];
+		texVSteps[LAST_SPLIT] = (texVEnd - previousTexVEnd) / (int32_t)segmentPixels[LAST_SPLIT];
 	}
-	if (segmentPixels[7] != 0u) {
-		texUSteps[7] = remainingTexU / (int32_t)segmentPixels[7];
-		texVSteps[7] = remainingTexV / (int32_t)segmentPixels[7];
+	if (segmentPixels[FINAL_SEGMENT] != 0u) {
+		texUSteps[FINAL_SEGMENT] = remainingTexU / (int32_t)segmentPixels[FINAL_SEGMENT];
+		texVSteps[FINAL_SEGMENT] = remainingTexV / (int32_t)segmentPixels[FINAL_SEGMENT];
 	}
 
 	result->longSpanStartTexU = state->startTexU;
@@ -2741,8 +2857,8 @@ static int Raster_DispatchEightSegmentTexturedSpan(const RasterTexturedSpanDispa
 	destinationBytes = state->screenRowBytes - (size_t)state->spanLeftX;
 	currentTexU = state->startTexU;
 	currentTexV = state->startTexV;
-	result->maskedLongSpan = state->transparentWord != 0xffffu;
-	for (i = 0; i < 8u; ++i) {
+	result->maskedLongSpan = state->transparentWord != SLIP_SPRITE_NO_TRANSPARENT_COLOUR;
+	for (i = 0; i < SEGMENT_COUNT; ++i) {
 		if (!Raster_DrawTexturedRun(destination, destinationBytes, segmentPixels[i], &currentTexU, &currentTexV,
 		                            texUSteps[i], texVSteps[i], state->transparentWord, state->textureRows,
 		                            state->textureRowCount, state->textureRowBytes, &result->longSpanPixelsWritten,
@@ -2800,7 +2916,7 @@ int Raster_DispatchTexturedSpan(const RasterTexturedSpanDispatchState *state, Ra
 		return 1;
 	}
 	result->inclusiveWidth = (uint32_t)result->spanNegatedDelta + 1u;
-	result->jumpShortSpan = result->inclusiveWidth < 0x14u;
+	result->jumpShortSpan = result->inclusiveWidth < RASTER_PERSPECTIVE_SHORT_SPAN_WIDTH;
 	if (result->jumpShortSpan) {
 		memset(&coreState, 0, sizeof(coreState));
 		coreState.screenRow = state->screenRow;
@@ -2850,27 +2966,27 @@ int Raster_DispatchTexturedSpan(const RasterTexturedSpanDispatchState *state, Ra
 	}
 	ratioBucket = Raster_DepthRatioBucket(depthLow, depthHigh);
 	result->reciprocalBucket = ratioBucket;
-	result->reciprocalTooLargeReturn = ratioBucket >= 0x0000fa00u;
+	result->reciprocalTooLargeReturn = ratioBucket >= RASTER_PERSPECTIVE_AFFINE_DEPTH_RATIO_MINIMUM;
 	if (result->reciprocalTooLargeReturn) {
 		return Raster_DispatchSavedTexturedSpanCore(state, result);
 	}
-	result->reciprocalClamped = ratioBucket < 0x20u;
+	result->reciprocalClamped = ratioBucket < RASTER_PERSPECTIVE_MINIMUM_DEPTH_RATIO;
 	if (result->reciprocalClamped) {
-		ratioBucket = 0x20u;
+		ratioBucket = RASTER_PERSPECTIVE_MINIMUM_DEPTH_RATIO;
 		result->reciprocalBucket = ratioBucket;
 	}
 	result->longSpanBranch = true;
-	if (ratioBucket >= 0x0000c000u) {
+	if (ratioBucket >= RASTER_PERSPECTIVE_TWO_SEGMENT_DEPTH_RATIO_MINIMUM) {
 		result->twoSegmentBranch = true;
 		return Raster_DispatchTwoSegmentTexturedSpan(state, ratioBucket, result);
 	}
-	if (ratioBucket <= 0x00008000u) {
+	if (ratioBucket <= RASTER_PERSPECTIVE_EIGHT_SEGMENT_DEPTH_RATIO_MAXIMUM) {
 		result->lowDepthRatioBranch = true;
-		if (result->inclusiveWidth >= 0x50u) {
+		if (result->inclusiveWidth >= RASTER_PERSPECTIVE_EIGHT_SEGMENT_WIDTH_MINIMUM) {
 			return Raster_DispatchEightSegmentTexturedSpan(state, ratioBucket, result);
 		}
 	}
-	if (result->inclusiveWidth < 0x28u) {
+	if (result->inclusiveWidth < RASTER_PERSPECTIVE_FOUR_SEGMENT_WIDTH_MINIMUM) {
 		result->twoSegmentBranch = true;
 		return Raster_DispatchTwoSegmentTexturedSpan(state, ratioBucket, result);
 	}
@@ -2887,7 +3003,7 @@ int Raster_DispatchTexturedSpan(const RasterTexturedSpanDispatchState *state, Ra
 		if ((size_t)state->spanRightX >= state->screenRowBytes) {
 			return 0;
 		}
-		perspectiveEntry = Raster_PerspectiveEntry(ratioBucket, 0x40u);
+		perspectiveEntry = Raster_PerspectiveEntry(ratioBucket, RASTER_PERSPECTIVE_MULTI_SEGMENT_BUCKET_BIAS);
 		memset(&setupState, 0, sizeof(setupState));
 		setupState.reciprocalBucket = ratioBucket;
 		setupState.spanWidth = result->inclusiveWidth;
@@ -2896,13 +3012,16 @@ int Raster_DispatchTexturedSpan(const RasterTexturedSpanDispatchState *state, Ra
 		setupState.startTexV = state->startTexV;
 		setupState.endTexU = state->endTexU;
 		setupState.endTexV = state->endTexV;
-		setupState.perspectiveTableBase = 0x00033310u;
+		setupState.perspectiveTableBase = RASTER_PERSPECTIVE_TABLE_BASE_TOKEN;
 		setupState.split3PackedFractions =
-		    ((uint32_t)perspectiveEntry->splits[3].textureFraction << 16) | perspectiveEntry->splits[3].screenFraction;
+		    ((uint32_t)perspectiveEntry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].textureFraction << 16) |
+		    perspectiveEntry->splits[RASTER_PERSPECTIVE_FIRST_QUARTER_SPLIT].screenFraction;
 		setupState.split7PackedFractions =
-		    ((uint32_t)perspectiveEntry->splits[7].textureFraction << 16) | perspectiveEntry->splits[7].screenFraction;
-		setupState.split11PackedFractions = ((uint32_t)perspectiveEntry->splits[11].textureFraction << 16) |
-		                                    perspectiveEntry->splits[11].screenFraction;
+		    ((uint32_t)perspectiveEntry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT].textureFraction << 16) |
+		    perspectiveEntry->splits[RASTER_PERSPECTIVE_MIDDLE_SPLIT].screenFraction;
+		setupState.split11PackedFractions =
+		    ((uint32_t)perspectiveEntry->splits[RASTER_PERSPECTIVE_LAST_QUARTER_SPLIT].textureFraction << 16) |
+		    perspectiveEntry->splits[RASTER_PERSPECTIVE_LAST_QUARTER_SPLIT].screenFraction;
 		result->calledSetupLongTexturedSpan = true;
 		if (!Raster_SetupLongTexturedSpan(&setupState, &setup)) {
 			return 0;
@@ -2916,7 +3035,7 @@ int Raster_DispatchTexturedSpan(const RasterTexturedSpanDispatchState *state, Ra
 		destinationBytes = state->screenRowBytes - (size_t)state->spanLeftX;
 		currentTexU = setup.startTexU;
 		currentTexV = setup.startTexV;
-		result->maskedLongSpan = state->transparentWord != 0xffffu;
+		result->maskedLongSpan = state->transparentWord != SLIP_SPRITE_NO_TRANSPARENT_COLOUR;
 		if (!result->maskedLongSpan) {
 			RasterTexturedLongSpanSegment0State segment0State;
 			RasterTexturedLongSpanSegment0 segment0;
@@ -3112,7 +3231,9 @@ int Raster_SetupLongTexturedSpan(const RasterTexturedLongSpanSetupState *state, 
 	}
 	memset(result, 0, sizeof(*result));
 	result->in = *state;
-	result->tableOffset = ((state->reciprocalBucket + 0x40u) >> 1) & 0xffffffc0u;
+	result->tableOffset =
+	    ((state->reciprocalBucket + RASTER_PERSPECTIVE_BUCKET_ROUND_BIAS) >> RASTER_PERSPECTIVE_ENTRY_BUCKET_SHIFT) *
+	    sizeof(RasterPerspectiveEntry);
 	result->startTexU = state->startTexU;
 	result->startTexV = state->startTexV;
 	result->endTexU = state->endTexU;
@@ -3212,7 +3333,7 @@ int Raster_DrawOpaqueLongTexturedSpanSegment0(const RasterTexturedLongSpanSegmen
 	result->in = *state;
 	result->loadedTexUStep = state->texUStep;
 	result->transparentWord = state->transparentWord;
-	result->maskedJump = state->transparentWord != 0xffffu;
+	result->maskedJump = state->transparentWord != SLIP_SPRITE_NO_TRANSPARENT_COLOUR;
 	if (result->maskedJump) {
 		result->currentTexU = state->currentTexU;
 		result->currentTexV = state->currentTexV;
@@ -3242,7 +3363,7 @@ int Raster_DrawOpaqueLongTexturedSpanSegment0(const RasterTexturedLongSpanSegmen
 	if (result->wordAlignPrologue) {
 		remainingForAlignment -= 2u;
 	}
-	result->dwordLoopCount = remainingForAlignment >> 2;
+	result->dwordLoopCount = remainingForAlignment / RASTER_COPY_DWORD_BYTES;
 	result->wordTail = (remainingForAlignment & 2u) != 0u;
 	result->byteTail = (remainingForAlignment & 1u) != 0u;
 
@@ -3302,7 +3423,7 @@ int Raster_DrawOpaqueLongTexturedSpanSegment1(const RasterTexturedLongSpanSegmen
 	if (result->wordAlignPrologue) {
 		remainingForAlignment -= 2u;
 	}
-	result->dwordLoopCount = remainingForAlignment >> 2;
+	result->dwordLoopCount = remainingForAlignment / RASTER_COPY_DWORD_BYTES;
 	result->wordTail = (remainingForAlignment & 2u) != 0u;
 	result->byteTail = (remainingForAlignment & 1u) != 0u;
 
@@ -3362,7 +3483,7 @@ int Raster_DrawOpaqueLongTexturedSpanSegment2(const RasterTexturedLongSpanSegmen
 	if (result->wordAlignPrologue) {
 		remainingForAlignment -= 2u;
 	}
-	result->dwordLoopCount = remainingForAlignment >> 2;
+	result->dwordLoopCount = remainingForAlignment / RASTER_COPY_DWORD_BYTES;
 	result->wordTail = (remainingForAlignment & 2u) != 0u;
 	result->byteTail = (remainingForAlignment & 1u) != 0u;
 
@@ -3423,7 +3544,7 @@ int Raster_DrawOpaqueLongTexturedSpanSegment3(const RasterTexturedLongSpanSegmen
 	if (result->wordAlignPrologue) {
 		remainingForAlignment -= 2u;
 	}
-	result->dwordLoopCount = remainingForAlignment >> 2;
+	result->dwordLoopCount = remainingForAlignment / RASTER_COPY_DWORD_BYTES;
 	result->wordTail = (remainingForAlignment & 2u) != 0u;
 	result->byteTail = (remainingForAlignment & 1u) != 0u;
 
@@ -3652,7 +3773,8 @@ int Raster_DrawMaskedLongTexturedSpanSegment3(const RasterTexturedMaskedLongSpan
 }
 
 static int Raster_PointAbsOffsetValid(uint32_t pointBufferBase, size_t pointBufferBytes, uint32_t pointOffset) {
-	return pointOffset >= pointBufferBase && (size_t)(pointOffset - pointBufferBase) + 0x20u <= pointBufferBytes;
+	return pointOffset >= pointBufferBase &&
+	       (size_t)(pointOffset - pointBufferBase) + sizeof(RasterTexturedPoint) <= pointBufferBytes;
 }
 
 static int Raster_DispatchPerspectiveTexturedSpanRows(
@@ -3682,8 +3804,8 @@ static int Raster_DispatchPerspectiveTexturedSpanRows(
     uint32_t rightTexV, uint32_t leftDepth, uint32_t rightDepth, RasterTexturedSpanDispatch *dispatch) {
 	RasterTexturedSpanDispatchState dispatchState;
 
-	if (dispatch == NULL || lockedPayload == NULL || lockedPayloadBytes < 0x0au || scanY < 0 ||
-	    (size_t)scanY >= screenRowCount || screenRows == NULL || screenRows[scanY] == NULL) {
+	if (dispatch == NULL || lockedPayload == NULL || lockedPayloadBytes < SLIP_SPRITE_TRANSPARENT_COLOUR_END ||
+	    scanY < 0 || (size_t)scanY >= screenRowCount || screenRows == NULL || screenRows[scanY] == NULL) {
 		return 0;
 	}
 	memset(&dispatchState, 0, sizeof(dispatchState));
@@ -3692,14 +3814,14 @@ static int Raster_DispatchPerspectiveTexturedSpanRows(
 	dispatchState.scanlineIndex = (uint32_t)scanY;
 	dispatchState.spanLeftX = leftX;
 	dispatchState.spanRightX = rightX;
-	dispatchState.endpointBase = 0x0002c44cu;
+	dispatchState.endpointBase = RASTER_TEXTURE_SPAN_ENDPOINT_BASE_TOKEN;
 	dispatchState.startTexU = leftTexU;
 	dispatchState.startTexV = leftTexV;
 	dispatchState.endTexU = rightTexU;
 	dispatchState.endTexV = rightTexV;
 	dispatchState.startDepth = leftDepth;
 	dispatchState.endDepth = rightDepth;
-	dispatchState.transparentWord = SlipBytes_ReadLE16(lockedPayload + 0x08u);
+	dispatchState.transparentWord = SlipBytes_ReadLE16(lockedPayload + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 	dispatchState.textureRows = textureRows;
 	dispatchState.textureRowCount = textureRowCount;
 	dispatchState.textureRowBytes = textureRowBytes;
@@ -3740,12 +3862,12 @@ static int Raster_SetupAndDispatchPerspectiveSpan(
 	spanState.rightBaseDepth = rightBaseDepth;
 	spanState.rightBaseTexU = rightBaseTexU;
 	spanState.rightBaseTexV = rightBaseTexV;
-	spanState.leftPointDepth = SlipBytes_ReadLE32(leftPoint + 0x14u);
-	spanState.leftPointTexU = SlipBytes_ReadLE32(leftPoint + 0x18u);
-	spanState.leftPointTexV = SlipBytes_ReadLE32(leftPoint + 0x1cu);
-	spanState.rightPointDepth = SlipBytes_ReadLE32(rightPoint + 0x14u);
-	spanState.rightPointTexU = SlipBytes_ReadLE32(rightPoint + 0x18u);
-	spanState.rightPointTexV = SlipBytes_ReadLE32(rightPoint + 0x1cu);
+	spanState.leftPointDepth = SlipBytes_ReadLE32(leftPoint + offsetof(RasterTexturedPoint, depth));
+	spanState.leftPointTexU = SlipBytes_ReadLE32(leftPoint + offsetof(RasterTexturedPoint, scaledU));
+	spanState.leftPointTexV = SlipBytes_ReadLE32(leftPoint + offsetof(RasterTexturedPoint, scaledV));
+	spanState.rightPointDepth = SlipBytes_ReadLE32(rightPoint + offsetof(RasterTexturedPoint, depth));
+	spanState.rightPointTexU = SlipBytes_ReadLE32(rightPoint + offsetof(RasterTexturedPoint, scaledU));
+	spanState.rightPointTexV = SlipBytes_ReadLE32(rightPoint + offsetof(RasterTexturedPoint, scaledV));
 	spanState.currentRowPointer = (uintptr_t)state->screenRows[edgeState->scanY];
 	spanState.nextRowPointer = (uintptr_t)state->screenRows[edgeState->scanY + 1];
 
@@ -3783,7 +3905,7 @@ int Raster_DrawMaskedPerspectiveTexturedPolygon(const RasterMaskedPerspectiveTex
 	RasterTexturedAdvanceEdgesState edgeState;
 	RasterTexturedLeftEdgeStep leftEdge;
 	RasterTexturedRightEdgeStep rightEdge;
-	RasterTextureUVExtentsVisit uvVisits[64];
+	RasterTextureUVExtentsVisit uvVisits[RASTER_TEXTURE_UV_VISIT_CAPACITY];
 	RasterTextureUVExtents uvExtents;
 	uint32_t pointBufferEnd;
 	uint32_t topLeftOffset;
@@ -3818,7 +3940,8 @@ int Raster_DrawMaskedPerspectiveTexturedPolygon(const RasterMaskedPerspectiveTex
 	result->pointBufferBase = state->pointBufferBase;
 	result->inputPointCount = state->pointCount;
 	if (state->pointBuffer == NULL || state->pointCount == 0u ||
-	    state->pointBufferBytes < (size_t)state->pointCount * 0x20u || visits == NULL || visitCapacity == 0u) {
+	    state->pointBufferBytes < (size_t)state->pointCount * sizeof(RasterTexturedPoint) || visits == NULL ||
+	    visitCapacity == 0u) {
 		return 0;
 	}
 	if (state->pointCount > sizeof(uvVisits) / sizeof(uvVisits[0]) ||
@@ -3827,20 +3950,20 @@ int Raster_DrawMaskedPerspectiveTexturedPolygon(const RasterMaskedPerspectiveTex
 	                                    sizeof(uvVisits) / sizeof(uvVisits[0]), &uvExtents)) {
 		return 0;
 	}
-	pointBufferEnd = state->pointBufferBase + state->pointCount * 0x20u;
+	pointBufferEnd = state->pointBufferBase + state->pointCount * (uint32_t)sizeof(RasterTexturedPoint);
 	result->pointBufferEnd = pointBufferEnd;
 
-	topY = SlipBytes_ReadLEI32(state->pointBuffer + 0x04u);
+	topY = SlipBytes_ReadLEI32(state->pointBuffer + offsetof(RasterPoint, y));
 	bottomY = topY;
 	topLeftOffset = state->pointBufferBase;
 	topRightOffset = state->pointBufferBase;
 	result->topY = topY;
 	result->bottomY = bottomY;
 	for (i = 1u; i < state->pointCount; ++i) {
-		const uint32_t pointOffset = state->pointBufferBase + i * 0x20u;
-		const uint8_t *const point = state->pointBuffer + i * 0x20u;
+		const uint32_t pointOffset = state->pointBufferBase + i * (uint32_t)sizeof(RasterTexturedPoint);
+		const uint8_t *const point = state->pointBuffer + i * (uint32_t)sizeof(RasterTexturedPoint);
 		const int32_t pointX = SlipBytes_ReadLEI32(point);
-		const int32_t pointY = SlipBytes_ReadLEI32(point + 0x04u);
+		const int32_t pointY = SlipBytes_ReadLEI32(point + offsetof(RasterPoint, y));
 
 		if (bottomY < pointY) {
 			bottomY = pointY;
@@ -3881,8 +4004,10 @@ int Raster_DrawMaskedPerspectiveTexturedPolygon(const RasterMaskedPerspectiveTex
 		visits[0].calledDispatchTexturedSpan = true;
 		if (!Raster_DispatchPerspectiveTexturedSpan(
 		        state, topY, SlipBytes_ReadLEI32(leftPoint), SlipBytes_ReadLEI32(rightPoint),
-		        SlipBytes_ReadLE32(leftPoint + 0x18u), SlipBytes_ReadLE32(leftPoint + 0x1cu),
-		        SlipBytes_ReadLE32(rightPoint + 0x18u), SlipBytes_ReadLE32(rightPoint + 0x1cu), rasterSpanLeftDepth,
+		        SlipBytes_ReadLE32(leftPoint + offsetof(RasterTexturedPoint, scaledU)),
+		        SlipBytes_ReadLE32(leftPoint + offsetof(RasterTexturedPoint, scaledV)),
+		        SlipBytes_ReadLE32(rightPoint + offsetof(RasterTexturedPoint, scaledU)),
+		        SlipBytes_ReadLE32(rightPoint + offsetof(RasterTexturedPoint, scaledV)), rasterSpanLeftDepth,
 		        rasterSpanRightDepth, &visits[0].spanDispatch)) {
 			return 0;
 		}
@@ -4084,9 +4209,9 @@ int Raster_DrawMaskedPerspectiveTexturedPolygon(const RasterMaskedPerspectiveTex
 
 static int32_t Raster_PredictTexturedXAfterFractionStep(int32_t currentX, int32_t fixedStep, uint16_t fraction) {
 	const uint32_t fractionSum = (uint32_t)(uint16_t)fixedStep + (uint32_t)fraction;
-	const int32_t integerStep = (int16_t)(uint16_t)((uint32_t)fixedStep >> 16);
+	const int32_t integerStep = (int16_t)(uint16_t)((uint32_t)fixedStep >> RASTER_FRACTION_BITS);
 
-	return currentX + integerStep + (int32_t)(fractionSum >> 16);
+	return currentX + integerStep + (int32_t)(fractionSum >> RASTER_FRACTION_BITS);
 }
 
 static int Raster_ForwardCopy(uint8_t *source, uint8_t *destination, int32_t byteCount,
@@ -4112,19 +4237,19 @@ static int Raster_ForwardCopy(uint8_t *source, uint8_t *destination, int32_t byt
 
 	count = (uint32_t)byteCount;
 	remainingForAlignment = count;
-	if (remainingForAlignment >= 8u) {
-		uint32_t alignBytes = (uint32_t)((uintptr_t)source & 3u);
+	if (remainingForAlignment >= RASTER_COPY_MINIMUM_DWORD_BYTES) {
+		uint32_t alignBytes = (uint32_t)((uintptr_t)source & RASTER_COPY_ALIGNMENT_MASK);
 
 		if (alignBytes != 0u) {
-			alignBytes = (alignBytes ^ 3u) + 1u;
+			alignBytes = (alignBytes ^ RASTER_COPY_ALIGNMENT_MASK) + 1u;
 			if (alignBytes > remainingForAlignment) {
 				return 0;
 			}
 			remainingForAlignment -= alignBytes;
 			copy->alignByteCount = alignBytes;
 		}
-		copy->dwordCount = remainingForAlignment >> 2;
-		copy->tailByteCount = remainingForAlignment & 3u;
+		copy->dwordCount = remainingForAlignment / RASTER_COPY_DWORD_BYTES;
+		copy->tailByteCount = remainingForAlignment & RASTER_COPY_ALIGNMENT_MASK;
 	} else {
 		copy->tailByteCount = remainingForAlignment;
 	}
@@ -4142,7 +4267,7 @@ static int Raster_DrawAffineSpanCoreAt(const RasterOpaqueAffineTexturedPolygonSt
 
 	if (state == NULL || spanCore == NULL || scanY < 0 || (size_t)scanY >= state->screenRowCount ||
 	    state->screenRows == NULL || state->screenRows[scanY] == NULL || state->lockedPayload == NULL ||
-	    state->lockedPayloadBytes < 0x0au) {
+	    state->lockedPayloadBytes < SLIP_SPRITE_TRANSPARENT_COLOUR_END) {
 		return 0;
 	}
 	memset(&spanState, 0, sizeof(spanState));
@@ -4154,7 +4279,7 @@ static int Raster_DrawAffineSpanCoreAt(const RasterOpaqueAffineTexturedPolygonSt
 	spanState.startTexV = leftTexV;
 	spanState.endTexU = rightTexU;
 	spanState.endTexV = rightTexV;
-	spanState.transparentWord = SlipBytes_ReadLE16(state->lockedPayload + 0x08u);
+	spanState.transparentWord = SlipBytes_ReadLE16(state->lockedPayload + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 	spanState.textureRows = state->textureRows;
 	spanState.textureRowCount = state->textureRowCount;
 	spanState.textureRowBytes = state->textureRowBytes;
@@ -4204,11 +4329,11 @@ static int Raster_AdvanceOpaqueAffineEdges(const RasterOpaqueAffineTexturedPolyg
 	    spanRightTexV == NULL || leftTexUStep == NULL || leftTexVStep == NULL || rightTexUStep == NULL ||
 	    rightTexVStep == NULL || leftXStep == NULL || leftXFraction == NULL || leftRemaining == NULL ||
 	    rightXStep == NULL || rightXFraction == NULL || rightRemaining == NULL || oneRowFlag == NULL) {
-		return 0;
+		return RASTER_AFFINE_EDGE_FAILED;
 	}
 	*oneRowFlag = 0;
 	if (*leftRemaining == 1u || *rightRemaining == 1u) {
-		*oneRowFlag = 0xffffffffu;
+		*oneRowFlag = UINT32_MAX;
 	}
 
 	++*scanY;
@@ -4219,10 +4344,12 @@ static int Raster_AdvanceOpaqueAffineEdges(const RasterOpaqueAffineTexturedPolyg
 
 	leftStepLo = (uint16_t)*leftXStep;
 	*leftXFraction = Raster_AddU16WithCarry(*leftXFraction, leftStepLo, &leftCarry);
-	*leftX = (int16_t)((uint16_t)*leftX + (uint16_t)((uint32_t)*leftXStep >> 16) + (leftCarry ? 1u : 0u));
+	*leftX =
+	    (int16_t)((uint16_t)*leftX + (uint16_t)((uint32_t)*leftXStep >> RASTER_FRACTION_BITS) + (leftCarry ? 1u : 0u));
 	rightStepLo = (uint16_t)*rightXStep;
 	*rightXFraction = Raster_AddU16WithCarry(*rightXFraction, rightStepLo, &rightCarry);
-	*rightX = (int16_t)((uint16_t)*rightX + (uint16_t)((uint32_t)*rightXStep >> 16) + (rightCarry ? 1u : 0u));
+	*rightX = (int16_t)((uint16_t)*rightX + (uint16_t)((uint32_t)*rightXStep >> RASTER_FRACTION_BITS) +
+	                    (rightCarry ? 1u : 0u));
 
 	--*leftRemaining;
 	if (*leftRemaining == 0u) {
@@ -4230,10 +4357,10 @@ static int Raster_AdvanceOpaqueAffineEdges(const RasterOpaqueAffineTexturedPolyg
 
 		if (!Raster_StepLeftEdgeAffine(state->pointBuffer, state->pointBufferBase, pointBufferEnd,
 		                               state->pointBufferBytes, *leftPointOffset, *scanY, bottomY, &leftStep)) {
-			return 0;
+			return RASTER_AFFINE_EDGE_FAILED;
 		}
 		if (leftStep.carryOut) {
-			return 2;
+			return RASTER_AFFINE_EDGE_FINISHED;
 		}
 		*leftPointOffset = leftStep.pointOffsetOut;
 		*leftX = leftStep.currentX;
@@ -4252,10 +4379,10 @@ static int Raster_AdvanceOpaqueAffineEdges(const RasterOpaqueAffineTexturedPolyg
 
 		if (!Raster_StepRightEdgeAffine(state->pointBuffer, state->pointBufferBase, pointBufferEnd,
 		                                state->pointBufferBytes, *rightPointOffset, *scanY, bottomY, &rightStep)) {
-			return 0;
+			return RASTER_AFFINE_EDGE_FAILED;
 		}
 		if (rightStep.carryOut) {
-			return 2;
+			return RASTER_AFFINE_EDGE_FINISHED;
 		}
 		*rightPointOffset = rightStep.pointOffsetOut;
 		*rightX = rightStep.currentX;
@@ -4267,25 +4394,25 @@ static int Raster_AdvanceOpaqueAffineEdges(const RasterOpaqueAffineTexturedPolyg
 		*rightXFraction = rightStep.xFraction;
 		*rightRemaining = rightStep.remaining;
 	}
-	return 1;
+	return RASTER_AFFINE_EDGE_ADVANCED;
 }
 
 int Raster_DrawAffineTexturedPolygon(const uint8_t *payload, size_t payloadBytes, RasterTexturedPoint *points,
                                      uint32_t pointCount, uint32_t rowScroll, RasterAffineScanlineLoopVisit *visits,
                                      size_t visitCapacity, size_t *pixelsWritten) {
-	if (payload == NULL || payloadBytes < 0x10 || points == NULL || pointCount == 0 || pointCount > 64 ||
-	    visits == NULL || pixelsWritten == NULL)
+	if (payload == NULL || payloadBytes < SLIP_SPRITE_HEADER_BYTES || points == NULL || pointCount == 0 ||
+	    pointCount > RASTER_AFFINE_POLYGON_POINT_CAPACITY || visits == NULL || pixelsWritten == NULL)
 		return 0;
 	*pixelsWritten = 0;
-	RasterAffineTexturedEntryScanVisit entryVisits[64];
+	RasterAffineTexturedEntryScanVisit entryVisits[RASTER_AFFINE_POLYGON_POINT_CAPACITY];
 	RasterAffineTexturedEntrySetup entry;
 	uint8_t *const pointBytes = (uint8_t *)(void *)points;
 	const size_t pointBufferBytes = (size_t)pointCount * sizeof(*points);
 	if (!Raster_PrepareAffineTexturedEntry(0, payload, payloadBytes, pointBytes, 0, pointBufferBytes, pointCount,
-	                                       entryVisits, 64, &entry))
+	                                       entryVisits, RASTER_AFFINE_POLYGON_POINT_CAPACITY, &entry))
 		return 0;
-	const uint16_t width = SlipBytes_ReadLE16(payload);
-	const uint16_t height = SlipBytes_ReadLE16(payload + 2);
+	const uint16_t width = SlipBytes_ReadLE16(payload + SLIP_SPRITE_WIDTH_OFFSET);
+	const uint16_t height = SlipBytes_ReadLE16(payload + SLIP_SPRITE_HEIGHT_OFFSET);
 	const uint8_t **const rows = calloc(height, sizeof(*rows));
 	RasterTextureRowTable rowTable;
 	if (rows == NULL || !Raster_BuildTextureRowTable(payload, payloadBytes, rowScroll, rows, height, &rowTable)) {
@@ -4410,9 +4537,12 @@ int Raster_DrawOpaqueAffineTexturedPolygon(const RasterOpaqueAffineTexturedPolyg
 	result->pushad = true;
 	result->calledPrepareTextureUVExtents = true;
 	result->calledBuildTextureRowTable = true;
-	if (state->screenRows == NULL || state->lockedPayload == NULL || state->lockedPayloadBytes < 0x0au ||
-	    SlipBytes_ReadLE16(state->lockedPayload + 0x08u) != 0xffffu || state->pointBuffer == NULL ||
-	    state->pointCount == 0u || state->pointBufferBytes < (size_t)state->pointCount * 0x20u || visits == NULL ||
+	if (state->screenRows == NULL || state->lockedPayload == NULL ||
+	    state->lockedPayloadBytes < SLIP_SPRITE_TRANSPARENT_COLOUR_END ||
+	    SlipBytes_ReadLE16(state->lockedPayload + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET) !=
+	        SLIP_SPRITE_NO_TRANSPARENT_COLOUR ||
+	    state->pointBuffer == NULL || state->pointCount == 0u ||
+	    state->pointBufferBytes < (size_t)state->pointCount * sizeof(RasterTexturedPoint) || visits == NULL ||
 	    visitCapacity == 0u) {
 		return 0;
 	}
@@ -4543,13 +4673,13 @@ int Raster_DrawOpaqueAffineTexturedPolygon(const RasterOpaqueAffineTexturedPolyg
 			    &spanLeftTexU, &spanLeftTexV, &spanRightTexU, &spanRightTexV, &leftTexUStep, &leftTexVStep,
 			    &rightTexUStep, &rightTexVStep, &leftXStep, &leftXFraction, &leftRemaining, &rightXStep,
 			    &rightXFraction, &rightRemaining, &oneRowFlag);
-			if (advanceResult == 0) {
+			if (advanceResult == RASTER_AFFINE_EDGE_FAILED) {
 				result->failVisitIndexValid = true;
 				result->failVisitIndex = visitCount;
 				result->visitCount = visitCount + 1u;
 				return 0;
 			}
-			visit->carryFrom = advanceResult == 2;
+			visit->carryFrom = advanceResult == RASTER_AFFINE_EDGE_FINISHED;
 			if (visit->carryFrom) {
 				++visitCount;
 				result->popad = true;
@@ -4606,14 +4736,14 @@ int Raster_DrawOpaqueAffineTexturedPolygon(const RasterOpaqueAffineTexturedPolyg
 		}
 
 		if ((uint32_t)leftX < (uint32_t)previousLeftX) {
-			spanOverlapFlags |= 1u;
+			spanOverlapFlags |= RASTER_SPAN_EXTENDS_LEFT;
 		}
 		if ((uint32_t)rightX > (uint32_t)previousRightX) {
-			spanOverlapFlags |= 2u;
+			spanOverlapFlags |= RASTER_SPAN_EXTENDS_RIGHT;
 		}
 		visit->spanOverlapFlags = spanOverlapFlags;
 
-		if ((spanOverlapFlags & 2u) != 0u) {
+		if ((spanOverlapFlags & RASTER_SPAN_EXTENDS_RIGHT) != 0u) {
 			if ((int16_t)rightX > (int16_t)predictedRightX || (int16_t)leftX < (int16_t)predictedLeftX) {
 				if (!Raster_EmitAffineSpanRun(state, scanY, leftX, rightX, spanLeftTexU, spanLeftTexV, spanRightTexU,
 				                              spanRightTexV, &previousLeftX, &previousRightX, &currentRowRun,
@@ -4634,7 +4764,7 @@ int Raster_DrawOpaqueAffineTexturedPolygon(const RasterOpaqueAffineTexturedPolyg
 			runPixelCount -= previousRightX - rightX;
 		}
 
-		if ((spanOverlapFlags & 1u) != 0u) {
+		if ((spanOverlapFlags & RASTER_SPAN_EXTENDS_LEFT) != 0u) {
 			leftCopyCount = previousLeftX - leftX;
 			leftCopySource = (uintptr_t)state->screenRows[scanY + 1] + (uintptr_t)(uint32_t)leftX;
 			leftCopyDestination = (uintptr_t)state->screenRows[scanY] + (uintptr_t)(uint32_t)leftX;
@@ -4677,13 +4807,13 @@ int Raster_DrawOpaqueAffineTexturedPolygon(const RasterOpaqueAffineTexturedPolyg
 			    &spanLeftTexU, &spanLeftTexV, &spanRightTexU, &spanRightTexV, &leftTexUStep, &leftTexVStep,
 			    &rightTexUStep, &rightTexVStep, &leftXStep, &leftXFraction, &leftRemaining, &rightXStep,
 			    &rightXFraction, &rightRemaining, &oneRowFlag);
-			if (advanceResult == 0) {
+			if (advanceResult == RASTER_AFFINE_EDGE_FAILED) {
 				result->failVisitIndexValid = true;
 				result->failVisitIndex = visitCount;
 				result->visitCount = visitCount + 1u;
 				return 0;
 			}
-			visit->carryFrom = advanceResult == 2;
+			visit->carryFrom = advanceResult == RASTER_AFFINE_EDGE_FINISHED;
 			if (visit->carryFrom) {
 				++visitCount;
 				result->popad = true;
@@ -4698,7 +4828,7 @@ int Raster_DrawOpaqueAffineTexturedPolygon(const RasterOpaqueAffineTexturedPolyg
 				return 0;
 			}
 			++result->spanCount;
-			if ((spanOverlapFlags & 1u) != 0u) {
+			if ((spanOverlapFlags & RASTER_SPAN_EXTENDS_LEFT) != 0u) {
 				visit->copyLeftExtension = true;
 				if (!Raster_ForwardCopy((uint8_t *)leftCopySource, (uint8_t *)leftCopyDestination, leftCopyCount,
 				                        &visit->leftCopy)) {
@@ -4712,7 +4842,7 @@ int Raster_DrawOpaqueAffineTexturedPolygon(const RasterOpaqueAffineTexturedPolyg
 					result->rowCopyBytes += (size_t)leftCopyCount;
 				}
 			}
-			if ((spanOverlapFlags & 2u) != 0u) {
+			if ((spanOverlapFlags & RASTER_SPAN_EXTENDS_RIGHT) != 0u) {
 				visit->copyRightExtension = true;
 				if (!Raster_ForwardCopy((uint8_t *)rightCopySource, (uint8_t *)rightCopyDestination, rightCopyCount,
 				                        &visit->rightCopy)) {
@@ -4787,12 +4917,12 @@ static int Raster_OpaqueSetupAndDispatchPerspectiveSpan(
 	spanState.rightBaseDepth = rightBaseDepth;
 	spanState.rightBaseTexU = rightBaseTexU;
 	spanState.rightBaseTexV = rightBaseTexV;
-	spanState.leftPointDepth = SlipBytes_ReadLE32(leftPoint + 0x14u);
-	spanState.leftPointTexU = SlipBytes_ReadLE32(leftPoint + 0x18u);
-	spanState.leftPointTexV = SlipBytes_ReadLE32(leftPoint + 0x1cu);
-	spanState.rightPointDepth = SlipBytes_ReadLE32(rightPoint + 0x14u);
-	spanState.rightPointTexU = SlipBytes_ReadLE32(rightPoint + 0x18u);
-	spanState.rightPointTexV = SlipBytes_ReadLE32(rightPoint + 0x1cu);
+	spanState.leftPointDepth = SlipBytes_ReadLE32(leftPoint + offsetof(RasterTexturedPoint, depth));
+	spanState.leftPointTexU = SlipBytes_ReadLE32(leftPoint + offsetof(RasterTexturedPoint, scaledU));
+	spanState.leftPointTexV = SlipBytes_ReadLE32(leftPoint + offsetof(RasterTexturedPoint, scaledV));
+	spanState.rightPointDepth = SlipBytes_ReadLE32(rightPoint + offsetof(RasterTexturedPoint, depth));
+	spanState.rightPointTexU = SlipBytes_ReadLE32(rightPoint + offsetof(RasterTexturedPoint, scaledU));
+	spanState.rightPointTexV = SlipBytes_ReadLE32(rightPoint + offsetof(RasterTexturedPoint, scaledV));
 	spanState.currentRowPointer = (uintptr_t)state->screenRows[edgeState->scanY];
 	spanState.nextRowPointer = (uintptr_t)state->screenRows[edgeState->scanY + 1];
 
@@ -5025,13 +5155,13 @@ int Raster_DrawOpaquePerspectiveTexturedPolygon(const RasterOpaquePerspectiveTex
 			}
 
 			if ((uint32_t)edgeState.leftX < (uint32_t)previousLeftX) {
-				visit->spanOverlapFlags |= 1u;
+				visit->spanOverlapFlags |= RASTER_SPAN_EXTENDS_LEFT;
 			}
 			if ((uint32_t)edgeState.rightX > (uint32_t)previousRightX) {
-				visit->spanOverlapFlags |= 2u;
+				visit->spanOverlapFlags |= RASTER_SPAN_EXTENDS_RIGHT;
 			}
 
-			if ((visit->spanOverlapFlags & 2u) != 0u) {
+			if ((visit->spanOverlapFlags & RASTER_SPAN_EXTENDS_RIGHT) != 0u) {
 				if ((int16_t)edgeState.rightX > (int16_t)visit->predictedRightX ||
 				    (int16_t)edgeState.leftX < (int16_t)visit->predictedLeftX) {
 					visit->evenCall = true;
@@ -5054,7 +5184,7 @@ int Raster_DrawOpaquePerspectiveTexturedPolygon(const RasterOpaquePerspectiveTex
 				spanPixelCount -= previousRightX - edgeState.rightX;
 			}
 
-			if ((visit->spanOverlapFlags & 1u) != 0u) {
+			if ((visit->spanOverlapFlags & RASTER_SPAN_EXTENDS_LEFT) != 0u) {
 				visit->copyLeftExtension = true;
 			} else {
 				const int32_t leftDelta = edgeState.leftX - previousLeftX;
@@ -5101,12 +5231,12 @@ int Raster_DrawOpaquePerspectiveTexturedPolygon(const RasterOpaquePerspectiveTex
 				uintptr_t rightCopyDestination = 0;
 				int32_t rightCopyCount = 0;
 
-				if ((visit->spanOverlapFlags & 1u) != 0u) {
+				if ((visit->spanOverlapFlags & RASTER_SPAN_EXTENDS_LEFT) != 0u) {
 					leftCopySource = (uintptr_t)(state->screenRows[edgeState.scanY + 1]) + (uintptr_t)edgeState.leftX;
 					leftCopyDestination = (uintptr_t)(state->screenRows[edgeState.scanY]) + (uintptr_t)edgeState.leftX;
 					leftCopyCount = previousLeftX - edgeState.leftX;
 				}
-				if ((visit->spanOverlapFlags & 2u) != 0u) {
+				if ((visit->spanOverlapFlags & RASTER_SPAN_EXTENDS_RIGHT) != 0u) {
 					rightCopyCount = edgeState.rightX - previousRightX;
 					rightCopySource =
 					    (uintptr_t)(state->screenRows[edgeState.scanY + 1]) + (uintptr_t)(previousRightX + 1);
@@ -5196,7 +5326,7 @@ int Raster_DrawOpaquePerspectiveTexturedPolygon(const RasterOpaquePerspectiveTex
 				}
 				++result->spanDispatchCount;
 				result->pixelsWritten += visit->spanPixelsWritten;
-				if ((visit->spanOverlapFlags & 1u) != 0u) {
+				if ((visit->spanOverlapFlags & RASTER_SPAN_EXTENDS_LEFT) != 0u) {
 					if (!Raster_ForwardCopy((uint8_t *)leftCopySource, (uint8_t *)leftCopyDestination, leftCopyCount,
 					                        &visit->leftCopy)) {
 						result->failVisitIndexValid = true;
@@ -5209,7 +5339,7 @@ int Raster_DrawOpaquePerspectiveTexturedPolygon(const RasterOpaquePerspectiveTex
 						result->rowCopyBytes += (size_t)leftCopyCount;
 					}
 				}
-				if ((visit->spanOverlapFlags & 2u) != 0u) {
+				if ((visit->spanOverlapFlags & RASTER_SPAN_EXTENDS_RIGHT) != 0u) {
 					visit->copyRightExtension = true;
 					if (!Raster_ForwardCopy((uint8_t *)rightCopySource, (uint8_t *)rightCopyDestination, rightCopyCount,
 					                        &visit->rightCopy)) {

@@ -44,7 +44,7 @@ static void FillRectUnchecked(uint16_t color, int16_t x0, int16_t y0, int16_t x1
 	RasterSoftware_FillRectUnchecked(color, x0, y0, x1, y1);
 	RasterSurfaceBinding saved;
 	if (BeginCoverage(&saved)) {
-		RasterSoftware_FillRectUnchecked((color & 0x8000u) | 1u, x0, y0, x1, y1);
+		RasterSoftware_FillRectUnchecked((color & RASTER_RECTANGLE_OUTLINE_FLAG) | 1u, x0, y0, x1, y1);
 		Raster_RestoreScreen(&saved);
 	}
 }

@@ -3,6 +3,12 @@
 #include "track_view_render.h"
 #include "track_world.h"
 
+enum {
+	SLIP_SHAPE_EFFECT_SERVER_SLOT = SLIP_OBJECT_RELEASE_SERVER_ID,
+	SLIP_SHAPE_EFFECT_NOTIFICATION_BIT = SLIP_OBJECT_SERVER_EVENT_FREE,
+	SLIP_SHAPE_EFFECT_DRAW_PREFIX_MASK = 0xffff0000u
+};
+
 uint32_t SlipShapeEffects_initialized;
 static SlipView3DVec32 SlipShapeEffects_position;
 static const SlipView3DMatrix *SlipShapeEffects_matrix;
@@ -12,7 +18,7 @@ static uint16_t SlipShapeEffects_shape;
 void SlipShapeEffects_Initialize(void) {
 	if (SlipShapeEffects_initialized == 0) {
 		SlipShapeEffects_initialized = UINT32_MAX;
-		SlipObject_SetServer(1, SlipShapeEffects_Notify);
+		SlipObject_SetServer(SLIP_SHAPE_EFFECT_SERVER_SLOT, SlipShapeEffects_Notify);
 		SlipRuntime_RegisterExit(SlipShapeEffects_Cleanup);
 	}
 }
@@ -29,7 +35,7 @@ uint32_t SlipShapeEffects_Notify(uint32_t eventCode, uint32_t eventPayload, uint
 	(void)eventFlags;
 	(void)dispatchData;
 	(void)dispatchFrame;
-	if (object != 0 && (eventCode & 1u) != 0 && SlipShapeEffects_initialized != 0) {
+	if (object != 0 && (eventCode & SLIP_SHAPE_EFFECT_NOTIFICATION_BIT) != 0 && SlipShapeEffects_initialized != 0) {
 		SlipObjectDrawCallbackReadResult draw;
 		(void)SlipObject_GetSlotDrawCallback(SlipObject_table, (size_t)SlipObject_count * SLIP_OBJECT_DOS_STRIDE,
 		                                     object, &draw);
@@ -47,10 +53,10 @@ bool SlipShapeEffects_Create(SlipView3DVec32 position, const SlipView3DMatrix *m
 	SlipShapeEffects_matrix = matrix;
 	SlipShapeEffects_shape = shape;
 	SlipObjectSlotFill fill;
-	if (!SlipObject_SlotFill(SlipShapeEffects_matrix, (uint32_t)SlipShapeEffects_position.x,
-	                         (uint32_t)SlipShapeEffects_position.y, (uint32_t)SlipShapeEffects_position.z,
-	                         TrackView_DrawShapeEffect, (drawDataPrefix & 0xffff0000u) | SlipShapeEffects_shape, NULL,
-	                         &fill) ||
+	if (!SlipObject_SlotFill(
+	        SlipShapeEffects_matrix, (uint32_t)SlipShapeEffects_position.x, (uint32_t)SlipShapeEffects_position.y,
+	        (uint32_t)SlipShapeEffects_position.z, TrackView_DrawShapeEffect,
+	        (drawDataPrefix & SLIP_SHAPE_EFFECT_DRAW_PREFIX_MASK) | SlipShapeEffects_shape, NULL, &fill) ||
 	    fill.carryOut)
 		return false;
 	SlipShapeEffects_object = (uint16_t)fill.objectOffset;

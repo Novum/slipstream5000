@@ -5,6 +5,9 @@
 #include "race_player.h"
 #include "runtime.h"
 
+/* Each serialized player control contains steering, pitch, and action words. */
+enum { SLIP_RECORDING_CONTROL_BYTES = 6, SLIP_RECORDING_DEFAULT_CAPACITY_BYTES = 100000 };
+
 typedef struct SlipRaceRecordingStart {
 	SlipRandomState random;
 	SlipRaceRacerTable initialRacers;

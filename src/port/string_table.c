@@ -9,16 +9,16 @@ SlipStringTableState SlipStringTable_state = {.filename = "PAUSED  .ST0"};
 
 void SlipStringTable_SetLanguage(SlipStringTableState *state, uint8_t language) { state->language = language; }
 
-bool SlipStringTable_Load(SlipStringTableState *state, const char name[8], const SlipStringTableResources *resources,
-                          SlipStringTableSlot **slot) {
+bool SlipStringTable_Load(SlipStringTableState *state, const char name[SLIP_RESOURCE_BASE_NAME_BYTES],
+                          const SlipStringTableResources *resources, SlipStringTableSlot **slot) {
 
-	memcpy(state->filename, name, 8);
-	state->filename[11] = (char)(uint8_t)(state->language + '0');
+	memcpy(state->filename, name, SLIP_RESOURCE_BASE_NAME_BYTES);
+	state->filename[SLIP_RESOURCE_NAME_BYTES - 1] = (char)(uint8_t)(state->language + '0');
 	uint16_t resource;
 	if (!resources->load(resources->context, state->filename, &resource))
 		return false;
 
-	for (unsigned i = 0; i < 5; ++i) {
+	for (unsigned i = 0; i < SLIP_STRING_TABLE_SLOT_COUNT; ++i) {
 		if (state->slots[i].resource == 0) {
 			state->slots[i].resource = resource;
 			state->slots[i].locks = 0;
@@ -26,7 +26,7 @@ bool SlipStringTable_Load(SlipStringTableState *state, const char name[8], const
 			return true;
 		}
 	}
-	SlipRuntime_error = 7;
+	SlipRuntime_error = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
 	return false;
 }
 
@@ -52,8 +52,8 @@ const char *SlipStringTable_Get(SlipStringTableSlot *slot, uint32_t tag, const S
 		if (entryTag == UINT32_MAX)
 			SlipRuntime_Fatal("StrTabGet: String not found.");
 		if (entryTag == tag)
-			return (const char *)(entry + 6);
-		entry += SlipBytes_ReadLE16(entry + 4) + 6;
+			return (const char *)(entry + SLIP_STRING_TABLE_TEXT_OFFSET);
+		entry += SlipBytes_ReadLE16(entry + SLIP_STRING_TABLE_LENGTH_OFFSET) + SLIP_STRING_TABLE_TEXT_OFFSET;
 	}
 }
 
@@ -63,29 +63,30 @@ void SlipStringTable_Unlock(SlipStringTableSlot *slot, const SlipStringTableReso
 		resources->unlock(resources->context, slot->resource);
 }
 
-int SlipStringTable_FindText(const SlipResourcePayload *payload, const char tag[4], char *dst, size_t dstSize) {
+int SlipStringTable_FindText(const SlipResourcePayload *payload, const char tag[SLIP_STRING_TABLE_TAG_BYTES], char *dst,
+                             size_t dstSize) {
 	size_t pos = 0;
 
 	if (payload == NULL || payload->data == NULL || dst == NULL || dstSize == 0) {
 		return 0;
 	}
 
-	while (pos + 6 <= payload->size) {
+	while (pos + SLIP_STRING_TABLE_TEXT_OFFSET <= payload->size) {
 		uint16_t len;
 		size_t copyLen;
 
-		if (payload->data[pos + 0] == 0xff && payload->data[pos + 1] == 0xff && payload->data[pos + 2] == 0xff &&
-		    payload->data[pos + 3] == 0xff) {
+		if (payload->data[pos + 0] == UINT8_MAX && payload->data[pos + 1] == UINT8_MAX &&
+		    payload->data[pos + 2] == UINT8_MAX && payload->data[pos + 3] == UINT8_MAX) {
 			break;
 		}
 
-		len = SlipBytes_ReadLE16(payload->data + pos + 4);
-		pos += 6;
+		len = SlipBytes_ReadLE16(payload->data + pos + SLIP_STRING_TABLE_LENGTH_OFFSET);
+		pos += SLIP_STRING_TABLE_TEXT_OFFSET;
 		if (len == 0 || pos + len > payload->size) {
 			break;
 		}
 
-		if (memcmp(payload->data + pos - 6, tag, 4) == 0) {
+		if (memcmp(payload->data + pos - SLIP_STRING_TABLE_TEXT_OFFSET, tag, SLIP_STRING_TABLE_TAG_BYTES) == 0) {
 			copyLen = len;
 			if (payload->data[pos + copyLen - 1] == '\0') {
 				--copyLen;

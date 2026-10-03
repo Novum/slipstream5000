@@ -14,7 +14,9 @@
 
 enum { GAME_DATA_PATH_CAPACITY = 4096, FILE_DIALOG_POLL_INTERVAL_MS = 10 };
 
-static const char *const steamManifest = "steamapps/appmanifest_306350.acf";
+#define GAME_DATA_STEAM_APP_ID "306350"
+
+static const char *const steamManifest = "steamapps/appmanifest_" GAME_DATA_STEAM_APP_ID ".acf";
 static const char *const resourceFile = "SLIPSTRM.RES";
 static char resourcePath[GAME_DATA_PATH_CAPACITY];
 
@@ -159,7 +161,7 @@ static bool SlipGameData_TrySteamLibrary(const char *library, char *path, size_t
 			break;
 		}
 		if (depth == 1 && SDL_strcasecmp(key, "appid") == 0)
-			validApp = strcmp(value, "306350") == 0;
+			validApp = strcmp(value, GAME_DATA_STEAM_APP_ID) == 0;
 		if (depth == 1 && SDL_strcasecmp(key, "installdir") == 0)
 			SDL_strlcpy(installDirectory, value, sizeof(installDirectory));
 	}

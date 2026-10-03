@@ -1,5 +1,6 @@
 #include "race_effects.h"
 #include "cross_effects.h"
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "race.h"
 #include "race_collision.h"
@@ -9,6 +10,23 @@
 #include "shape_effects.h"
 #include "track_world.h"
 #include <string.h>
+
+enum {
+	SLIP_RACE_EXPLOSION_FRAME_DELAY_MS = 100,
+	SLIP_RACE_EXPLOSION_DAMPING_Q14 = SLIP_Q14_ONE / 8,
+	SLIP_RACE_COLLISION_DESCRIPTOR_TOKEN = 0x4f272,
+	SLIP_RACE_WRECK_DESCRIPTOR_TOKEN = 0x4f268,
+	SLIP_RACE_WRECK_EXPLOSION_INTERVAL_MS = 200,
+	SLIP_RACE_WRECK_EXPLOSION_RADIUS = 0x16e0,
+	SLIP_RACE_WRECK_EXPLOSION_DURATION_MS = 400,
+	SLIP_RACE_WRECK_BOUNCE_EXPLOSION_RANGE = 0x2250,
+	SLIP_RACE_CONTACT_SURFACE_OFFSET = 0x1e8,
+	SLIP_RACE_CONTACT_DEFLECTION_ANGLE = 0x100,
+	SLIP_RACE_CONTACT_NORMAL_SPEED = 0x45d3,
+	SLIP_RACE_CONTACT_FRAGMENT_RADIUS = 0xf4,
+	SLIP_RACE_SPARK_RADIUS = 0x3d0,
+	SLIP_RACE_SPARK_COUNT = 0x20
+};
 
 const SlipView3DMatrix SlipRaceEffects_creationTemplate = {
     {(int16_t)0x8360, (int16_t)0x9c3d, 0x0274, 0, (int16_t)0x850f, 0x0093, 0, 0x05c7, 0x749c}};
@@ -26,14 +44,18 @@ void SlipRaceEffects_EmitWorldSmoke(SlipView3DVec32 position, int32_t lifetime,
 	                              descriptor);
 }
 
-uint16_t SlipRaceEffects_explosionHandles[6];
-uint16_t SlipRaceEffects_finalExplosionHandles[6];
-static const SlipAnimatedFrames initialExplosionFrames = {6, 100, SlipRaceEffects_explosionHandles};
-static const SlipAnimatedFrames finalExplosionFrames = {6, 100, SlipRaceEffects_finalExplosionHandles};
-static const SlipAnimatedDescriptor collisionDescriptor = {&initialExplosionFrames, &finalExplosionFrames, 0x800,
-                                                           0x4f272};
+uint16_t SlipRaceEffects_explosionHandles[SLIP_RACE_EXPLOSION_FRAME_COUNT];
+uint16_t SlipRaceEffects_finalExplosionHandles[SLIP_RACE_EXPLOSION_FRAME_COUNT];
+static const SlipAnimatedFrames initialExplosionFrames = {
+    SLIP_RACE_EXPLOSION_FRAME_COUNT, SLIP_RACE_EXPLOSION_FRAME_DELAY_MS, SlipRaceEffects_explosionHandles};
+static const SlipAnimatedFrames finalExplosionFrames = {
+    SLIP_RACE_EXPLOSION_FRAME_COUNT, SLIP_RACE_EXPLOSION_FRAME_DELAY_MS, SlipRaceEffects_finalExplosionHandles};
+static const SlipAnimatedDescriptor collisionDescriptor = {&initialExplosionFrames, &finalExplosionFrames,
+                                                           SLIP_RACE_EXPLOSION_DAMPING_Q14,
+                                                           SLIP_RACE_COLLISION_DESCRIPTOR_TOKEN};
 
-static const SlipAnimatedDescriptor wreckDescriptor = {&initialExplosionFrames, &finalExplosionFrames, 0x800, 0x4f268};
+static const SlipAnimatedDescriptor wreckDescriptor = {
+    &initialExplosionFrames, &finalExplosionFrames, SLIP_RACE_EXPLOSION_DAMPING_Q14, SLIP_RACE_WRECK_DESCRIPTOR_TOKEN};
 
 uint32_t SlipRaceEffects_WreckEvent(uint32_t eventCode, uint32_t eventPayload, uint32_t eventValue, uint32_t eventFlags,
                                     uint16_t object, uintptr_t dispatchData, uint32_t dispatchFrame) {
@@ -49,7 +71,8 @@ uint32_t SlipRaceEffects_WreckEvent(uint32_t eventCode, uint32_t eventPayload, u
 		state->remainingLifetime = (uint16_t)(state->remainingLifetime - elapsed);
 		if (state->maximumSpeed != 0) {
 			const uint16_t step = (uint16_t)SlipFrameTimer_Step();
-			const int16_t increment = (int16_t)(uint16_t)(((uint32_t)(uint16_t)state->maximumSpeed * step) >> 14);
+			const int16_t increment =
+			    (int16_t)(uint16_t)(((uint32_t)(uint16_t)state->maximumSpeed * step) >> SLIP_Q14_FRACTION_BITS);
 			int32_t speed =
 			    (int32_t)((uint32_t)SlipObject_Speed(SlipObject_table, object) + (uint32_t)(int32_t)increment);
 			if (speed > state->maximumSpeed)
@@ -59,13 +82,13 @@ uint32_t SlipRaceEffects_WreckEvent(uint32_t eventCode, uint32_t eventPayload, u
 		state->explosionCountdown =
 		    (int32_t)((uint32_t)state->explosionCountdown - SlipFrameTimer_Values().deltaMilliseconds);
 		if (state->explosionCountdown < 0) {
-			state->explosionCountdown = 200;
+			state->explosionCountdown = SLIP_RACE_WRECK_EXPLOSION_INTERVAL_MS;
 			static SlipView3DVec32 displacement;
 			const int16_t range = (int16_t)state->explosionRange;
-			displacement.x = ((int32_t)(int16_t)SlipRandom_Next() * range) >> 16;
+			displacement.x = ((int32_t)(int16_t)SlipRandom_Next() * range) >> SLIP_RANDOM_SAMPLE_BITS;
 
-			displacement.y = ((int32_t)(int16_t)SlipRandom_Next() * range) >> 16;
-			displacement.z = ((int32_t)(int16_t)SlipRandom_Next() * range) >> 16;
+			displacement.y = ((int32_t)(int16_t)SlipRandom_Next() * range) >> SLIP_RANDOM_SAMPLE_BITS;
+			displacement.z = ((int32_t)(int16_t)SlipRandom_Next() * range) >> SLIP_RANDOM_SAMPLE_BITS;
 			SlipObjectPosition position;
 			(void)SlipObject_Position(SlipObject_table, (size_t)SlipObject_count * SLIP_OBJECT_DOS_STRIDE, object,
 			                          &position);
@@ -73,13 +96,14 @@ uint32_t SlipRaceEffects_WreckEvent(uint32_t eventCode, uint32_t eventPayload, u
 			                             (int32_t)(position.positionY + (uint32_t)displacement.y),
 			                             (int32_t)(position.positionZ + (uint32_t)displacement.z)};
 			uint16_t created;
-			(void)SlipAnimatedEffects_Create(explosion, 0x16e0, 400, 0, &wreckDescriptor, &created);
+			(void)SlipAnimatedEffects_Create(explosion, SLIP_RACE_WRECK_EXPLOSION_RADIUS,
+			                                 SLIP_RACE_WRECK_EXPLOSION_DURATION_MS, 0, &wreckDescriptor, &created);
 		}
 		return 0;
 	}
 	if ((uint16_t)eventCode == SLIP_OBJECT_EVENT_COLLISION_BOUNCE) {
 		(void)SlipObject_Stop(object, eventCode, eventPayload, eventValue, eventFlags, dispatchData, dispatchFrame);
-		state->explosionRange = 0x2250;
+		state->explosionRange = SLIP_RACE_WRECK_BOUNCE_EXPLOSION_RANGE;
 		state->maximumSpeed = 0;
 		return 0;
 	}
@@ -125,18 +149,19 @@ void SlipRaceEffects_ContactFragments(SlipRacePlayerHostBindings *context, uint3
 	material = contact->material;
 	emission.direction = (SlipView3DVec16){contact->normalX, contact->normalY, contact->normalZ};
 	position = contact->contactPosition;
-	SlipView3DVec32 offset =
-	    SlipView3D_ScaleVector(emission.direction.x, emission.direction.y, emission.direction.z, 0x1e8);
+	SlipView3DVec32 offset = SlipView3D_ScaleVector(emission.direction.x, emission.direction.y, emission.direction.z,
+	                                                SLIP_RACE_CONTACT_SURFACE_OFFSET);
 	position.x = (int32_t)((uint32_t)position.x + (uint32_t)offset.x);
 	position.y = (int32_t)((uint32_t)position.y + (uint32_t)offset.y);
 	position.z = (int32_t)((uint32_t)position.z + (uint32_t)offset.z);
-	SlipView3DVec32 reflected = SlipRacePlayer_CollisionVector(
-	    context, (uint16_t)emission.direction.x, (uint16_t)emission.direction.y, (uint16_t)emission.direction.z, 0x100);
+	SlipView3DVec32 reflected =
+	    SlipRacePlayer_CollisionVector(context, (uint16_t)emission.direction.x, (uint16_t)emission.direction.y,
+	                                   (uint16_t)emission.direction.z, SLIP_RACE_CONTACT_DEFLECTION_ANGLE);
 	const int32_t speed = SlipObject_Speed(context->objectTable, object);
 	SlipView3DVec32 velocity =
 	    SlipView3D_ScaleVector((int16_t)reflected.x, (int16_t)reflected.y, (int16_t)reflected.z, speed);
-	SlipView3DVec32 normalVelocity =
-	    SlipView3D_ScaleVector(emission.direction.x, emission.direction.y, emission.direction.z, 0x45d3);
+	SlipView3DVec32 normalVelocity = SlipView3D_ScaleVector(emission.direction.x, emission.direction.y,
+	                                                        emission.direction.z, SLIP_RACE_CONTACT_NORMAL_SPEED);
 	velocity.x = (int32_t)((uint32_t)velocity.x + (uint32_t)normalVelocity.x);
 	velocity.y = (int32_t)((uint32_t)velocity.y + (uint32_t)normalVelocity.y);
 	velocity.z = (int32_t)((uint32_t)velocity.z + (uint32_t)normalVelocity.z);
@@ -145,7 +170,7 @@ void SlipRaceEffects_ContactFragments(SlipRacePlayerHostBindings *context, uint3
 	emission.direction =
 	    (SlipView3DVec16){(int16_t)normalized.unitXQ14, (int16_t)normalized.unitYQ14, (int16_t)normalized.unitZQ14};
 	emission.speed = SlipView3D_VectorLength(velocity.x, velocity.y, velocity.z);
-	emission.radius = 0xf4;
+	emission.radius = SLIP_RACE_CONTACT_FRAGMENT_RADIUS;
 	SlipCrossEffects_Create(position, savedCount, &emission, material, SlipRaceSession_UpdateCrossEffect,
 	                        context->maths, context->materialTable, context->materialTableBytes);
 }
@@ -186,18 +211,19 @@ void SlipRaceEffects_SparkSplash(SlipRacePlayerHostBindings *context, uint32_t c
 	material = contact->material;
 	emission.direction = (SlipView3DVec16){contact->normalX, contact->normalY, contact->normalZ};
 	position = contact->contactPosition;
-	SlipView3DVec32 offset =
-	    SlipView3D_ScaleVector(emission.direction.x, emission.direction.y, emission.direction.z, 0x1e8);
+	SlipView3DVec32 offset = SlipView3D_ScaleVector(emission.direction.x, emission.direction.y, emission.direction.z,
+	                                                SLIP_RACE_CONTACT_SURFACE_OFFSET);
 	position.x = (int32_t)((uint32_t)position.x + (uint32_t)offset.x);
 	position.y = (int32_t)((uint32_t)position.y + (uint32_t)offset.y);
 	position.z = (int32_t)((uint32_t)position.z + (uint32_t)offset.z);
-	SlipView3DVec32 reflected = SlipRacePlayer_CollisionVector(
-	    context, (uint16_t)emission.direction.x, (uint16_t)emission.direction.y, (uint16_t)emission.direction.z, 0x100);
+	SlipView3DVec32 reflected =
+	    SlipRacePlayer_CollisionVector(context, (uint16_t)emission.direction.x, (uint16_t)emission.direction.y,
+	                                   (uint16_t)emission.direction.z, SLIP_RACE_CONTACT_DEFLECTION_ANGLE);
 	const int32_t speed = SlipObject_Speed(context->objectTable, object);
 	SlipView3DVec32 velocity =
 	    SlipView3D_ScaleVector((int16_t)reflected.x, (int16_t)reflected.y, (int16_t)reflected.z, speed);
-	SlipView3DVec32 normalVelocity =
-	    SlipView3D_ScaleVector(emission.direction.x, emission.direction.y, emission.direction.z, 0x45d3);
+	SlipView3DVec32 normalVelocity = SlipView3D_ScaleVector(emission.direction.x, emission.direction.y,
+	                                                        emission.direction.z, SLIP_RACE_CONTACT_NORMAL_SPEED);
 	velocity.x = (int32_t)((uint32_t)velocity.x + (uint32_t)normalVelocity.x);
 	velocity.y = (int32_t)((uint32_t)velocity.y + (uint32_t)normalVelocity.y);
 	velocity.z = (int32_t)((uint32_t)velocity.z + (uint32_t)normalVelocity.z);
@@ -212,9 +238,10 @@ void SlipRaceEffects_SparkSplash(SlipRacePlayerHostBindings *context, uint32_t c
 		SlipRuntime_Fatal("Contact material lookup translation failed (0004fe90)");
 	}
 	if (memcmp(name, "WATE", 4) != 0) {
-		emission.radius = 0x3d0;
-		SlipCrossEffects_Create(position, 0x20, &emission, sparkMaterial, SlipRaceSession_UpdateCrossEffect,
-		                        context->maths, context->materialTable, context->materialTableBytes);
+		emission.radius = SLIP_RACE_SPARK_RADIUS;
+		SlipCrossEffects_Create(position, SLIP_RACE_SPARK_COUNT, &emission, sparkMaterial,
+		                        SlipRaceSession_UpdateCrossEffect, context->maths, context->materialTable,
+		                        context->materialTableBytes);
 	} else {
 		emission.radius = 1;
 		SlipCrossEffects_Create(position, savedCount, &emission, splashMaterial, SlipRaceSession_UpdateCrossEffect,

@@ -1,6 +1,8 @@
 #ifndef SLIPSTREAM5000_DRAW3D_H
 #define SLIPSTREAM5000_DRAW3D_H
 
+#include "resource.h"
+
 typedef void (*SlipDraw3DMaterialCallback)(void);
 void SlipDraw3D_RegisterMaterialCallback(SlipDraw3DMaterialCallback callback);
 void SlipDraw3D_NotifyMaterials(void);
@@ -13,6 +15,7 @@ extern uint32_t SlipDraw3D_materialCallbackCount;
 void SlipDraw3D_BindPointBuffer(uint8_t *points);
 uint8_t *SlipDraw3D_PointBuffer(void);
 
+#include "material_format.h"
 #include "raster/raster.h"
 #include "view3d.h"
 
@@ -36,26 +39,99 @@ void SlipDraw3D_NormalizeLighting(void);
 void SlipDraw3D_SetAmbientLight(uint16_t ambientLight);
 void SlipDraw3D_SetLightVector(int32_t lightX, int32_t lightY, int32_t lightZ, uint16_t directLight);
 
+/* Projection modes, scale formats, and legacy viewport defaults. */
+enum {
+	SLIP_DRAW3D_PROJECTION_PERSPECTIVE = 0,
+	SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC = 1,
+	SLIP_DRAW3D_DEFAULT_NEAR_DEPTH = 64,
+	SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH_SHIFT = 8,
+	SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH = 1 << SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH_SHIFT,
+	SLIP_DRAW3D_SCALE_FRACTION_BITS = 16,
+	SLIP_DRAW3D_SCALE_ONE_Q16 = 1 << SLIP_DRAW3D_SCALE_FRACTION_BITS,
+	SLIP_DRAW3D_ORTHOGRAPHIC_RECIPROCAL_FRACTION_BITS = 30,
+	SLIP_DRAW3D_ORTHOGRAPHIC_RECIPROCAL_ONE_Q30 = 1u << SLIP_DRAW3D_ORTHOGRAPHIC_RECIPROCAL_FRACTION_BITS,
+	SLIP_DRAW3D_ORTHOGRAPHIC_SCALE_MAXIMUM = 1 << 20,
+	SLIP_DRAW3D_FOCAL_LENGTH_MINIMUM = 64,
+	SLIP_DRAW3D_FOCAL_LENGTH_MAXIMUM = 16384,
+	SLIP_DRAW3D_SHORT_COORDINATE_RADIUS_LIMIT = 16384,
+	SLIP_DRAW3D_SQUARE_PIXEL_SCALE_NUMERATOR = 5,
+	SLIP_DRAW3D_SQUARE_PIXEL_SCALE_DENOMINATOR = 6
+};
+
 enum {
 	SLIP_DRAW3D_VERTEX_RECORD_SIZE = 0x40,
+	SLIP_DRAW3D_VERTEX_BUFFER_GROWTH_RESERVE = 64,
+	SLIP_DRAW3D_ACTIVE_BOUNDS_MAXIMUM_INITIAL = -28672,
+	SLIP_DRAW3D_POST_PLANE_MINIMUM_LIGHT_DOT_Q14 = 512,
 	SLIP_DRAW3D_DRAW_RECORD_SIZE = 0x38,
 	SLIP_DRAW3D_LINKED_DRAW_RECORD_SIZE = 0x3c,
 	SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT = 0x40,
-	SLIP_DRAW3D_RECORD_POOL_TOTAL_COUNT = 0x41,
-	SLIP_DRAW3D_RECORD_POOL_BYTES = 0x41 * 0x3c,
+	SLIP_DRAW3D_RECORD_POOL_TOTAL_COUNT = SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT + 1,
+	SLIP_DRAW3D_RECORD_POOL_BYTES = SLIP_DRAW3D_RECORD_POOL_TOTAL_COUNT * SLIP_DRAW3D_LINKED_DRAW_RECORD_SIZE,
 	SLIP_DRAW3D_LIST_NODE_SIZE = 0x14,
 	SLIP_DRAW3D_LIST_MAX_FRAMES = 16,
 	SLIP_DRAW3D_CLIP_MASK = 0x21f8,
 	SLIP_DRAW3D_MATERIAL_KEY_BYTES = 0x10,
+	SLIP_DRAW3D_MATERIAL_INDEX_MASK = 0x7fff,
+	SLIP_DRAW3D_SPECULAR_SQUARING_STEPS = 5,
 	SLIP_DRAW3D_RAW_MATERIAL_RECORD_SIZE = 0x2e,
 	SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE = 0x54,
+	SLIP_DRAW3D_TEXTURE_HANDLE_BYTES = 4,
+	SLIP_DRAW3D_MATERIAL_FRAME_COUNT = 4,
 	SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET = 0x00,
 	SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET = 0x0c,
 	SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET = 0x14,
 	SLIP_DRAW3D_VERTEX_RECORD_DEPTH_OFFSET = 0x18,
+	/* World and screen positions, flags, and depth shared by vertex and draw records. */
+	SLIP_DRAW3D_VERTEX_DRAW_PREFIX_BYTES = SLIP_DRAW3D_VERTEX_RECORD_DEPTH_OFFSET + sizeof(uint32_t),
+	SLIP_DRAW3D_VERTEX_DRAW_PREFIX_DWORDS = SLIP_DRAW3D_VERTEX_DRAW_PREFIX_BYTES / sizeof(uint32_t),
 	SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET = 0x24,
+	SLIP_DRAW3D_DRAW_RECORD_SOURCE_END = SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET + sizeof(SlipView3DVec16),
+	SLIP_DRAW3D_VERTEX_RECORD_SOURCE_END = SLIP_DRAW3D_DRAW_RECORD_SOURCE_END + sizeof(uint16_t),
+	SLIP_DRAW3D_DRAW_RECORD_TEXTURE_OFFSET = 0x24,
 	SLIP_DRAW3D_RECORD_NEXT_OFFSET = 0x34,
 	SLIP_DRAW3D_RECORD_PREV_OFFSET = 0x38
+};
+
+/* Scratch fields used while clipping projected linked draw records. */
+enum {
+	SLIP_DRAW3D_PLANE_DISTANCE_OFFSET = 0x1c,
+	SLIP_DRAW3D_EDGE_NORMAL_X_OFFSET = 0x2c,
+	SLIP_DRAW3D_EDGE_NORMAL_Y_OFFSET = 0x30
+};
+
+/* Serialized background strips: shade, centre offset, then rectangle bounds. */
+enum {
+	SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES = 2,
+	SLIP_BACKGROUND_STRIP_BYTES = 12,
+	SLIP_BACKGROUND_STRIP_SHADE_OFFSET = 0,
+	SLIP_BACKGROUND_STRIP_CENTRE_OFFSET = 2,
+	SLIP_BACKGROUND_STRIP_LEFT_OFFSET = 4,
+	SLIP_BACKGROUND_STRIP_TOP_OFFSET = 6,
+	SLIP_BACKGROUND_STRIP_RIGHT_OFFSET = 8,
+	SLIP_BACKGROUND_STRIP_BOTTOM_OFFSET = 10,
+	SLIP_BACKGROUND_STRIP_INITIAL_CENTRE_Q14 = 8192,
+	SLIP_BACKGROUND_STRIP_FINAL_CENTRE_Q14 = -8192,
+	SLIP_BACKGROUND_STRIP_ANGLE_SPAN = 0x2000,
+	SLIP_BACKGROUND_STRIP_CURVATURE_DIVISOR = 8192,
+	SLIP_BACKGROUND_FIXED_FILL_TILT_BIAS_Q14 = 7936,
+	SLIP_BACKGROUND_MATERIAL_FILL_TILT_MAXIMUM_Q14 = -12288,
+	SLIP_BACKGROUND_TILT_CENTRE_BIAS_Q14 = 192,
+	SLIP_BACKGROUND_STRIP_DIAGNOSTIC_CAPACITY = 16
+};
+
+/* DOS data identities retained in diagnostic results and pointer-table mappings. */
+enum {
+	SLIP_DRAW3D_VERTEX_ALLOCATION_ERROR_MESSAGE_DOS_OFFSET = 0x1adb6u,
+	SLIP_DRAW3D_VERTEX_GROW_ERROR_MESSAGE_DOS_OFFSET = 0x1de1fu,
+	SLIP_DRAW3D_TEXTURED_RING_STATUS_FAILURE_DOS_STAGE = 0x1995bu,
+	SLIP_DRAW3D_TEXTURED_RING_BUILD_FAILURE_DOS_STAGE = 0x1c753u,
+	SLIP_DRAW3D_TEXTURED_RING_CLIP_FAILURE_DOS_STAGE = 0x1bc7fu,
+	SLIP_BACKGROUND_FIXED_STRIP_TABLE_DOS_ADDRESS = 0x18260u,
+	SLIP_BACKGROUND_FIXED_STRIP_FIRST_DOS_ADDRESS =
+	    SLIP_BACKGROUND_FIXED_STRIP_TABLE_DOS_ADDRESS + SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES,
+	SLIP_BACKGROUND_MATERIAL_STRIP_TABLE_DOS_ADDRESS = 0x18562u,
+	SLIP_BACKGROUND_STRIP_CORNER_POINTER_TABLE_DOS_ADDRESS = 0x1da30u
 };
 
 typedef struct SlipDraw3DVec32 {
@@ -77,7 +153,7 @@ typedef union SlipDraw3DVertexRecord {
 		int16_t sourceY;
 		int16_t sourceZ;
 		uint16_t sourceFollowingWord;
-		uint8_t unusedTail[SLIP_DRAW3D_VERTEX_RECORD_SIZE - 0x2c];
+		uint8_t unusedTail[SLIP_DRAW3D_VERTEX_RECORD_SIZE - SLIP_DRAW3D_VERTEX_RECORD_SOURCE_END];
 	};
 
 	uint8_t bytes[SLIP_DRAW3D_VERTEX_RECORD_SIZE];
@@ -85,7 +161,7 @@ typedef union SlipDraw3DVertexRecord {
 
 typedef union SlipDraw3DDrawRecord {
 	struct {
-		uint8_t beforeTexture[0x24];
+		uint8_t beforeTexture[SLIP_DRAW3D_DRAW_RECORD_TEXTURE_OFFSET];
 		uint32_t textureU;
 		uint32_t textureV;
 	};
@@ -102,7 +178,7 @@ typedef union SlipDraw3DDrawRecord {
 		int16_t sourceX;
 		int16_t sourceY;
 		int16_t sourceZ;
-		uint8_t unusedSourceTail[SLIP_DRAW3D_DRAW_RECORD_SIZE - 0x2a];
+		uint8_t unusedSourceTail[SLIP_DRAW3D_DRAW_RECORD_SIZE - SLIP_DRAW3D_DRAW_RECORD_SOURCE_END];
 	};
 
 	uint8_t bytes[SLIP_DRAW3D_DRAW_RECORD_SIZE];
@@ -274,22 +350,30 @@ typedef enum SlipDraw3DLightingMaterialBranch {
 } SlipDraw3DLightingMaterialBranch;
 
 typedef struct SlipDraw3DMaterialRecord {
-	char name[16];
+	char name[SLIP_MAT_NAME_BYTES];
 	uint32_t rampStart, rampEnd;
 	int16_t textureTransparency, skipFlatPolygon;
 	uint32_t fixedShade, ambientCoefficient, diffuseCoefficient, specularCoefficient;
 	uint32_t ditherBits, vertexShading;
-	char textureName[12];
-	uint32_t textureHandles[4];
+	char textureName[SLIP_MAT_TEXTURE_NAME_BYTES];
+	uint32_t textureHandles[SLIP_DRAW3D_MATERIAL_FRAME_COUNT];
 	uint32_t importedMaterialByte;
 } SlipDraw3DMaterialRecord;
 
-typedef char SlipDraw3DMaterialRecordSizeCheck[sizeof(SlipDraw3DMaterialRecord) == 0x54 ? 1 : -1];
+typedef char SlipDraw3DMaterialRecordSizeCheck
+    [sizeof(SlipDraw3DMaterialRecord) == SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE ? 1 : -1];
 
 typedef struct SlipDraw3DMaterialTable {
 	uint32_t count;
 	SlipDraw3DMaterialRecord records[];
 } SlipDraw3DMaterialTable;
+
+enum {
+	SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES = offsetof(SlipDraw3DMaterialTable, records),
+	SLIP_DRAW3D_MATERIAL_RAMP_START_OFFSET = offsetof(SlipDraw3DMaterialRecord, rampStart),
+	SLIP_DRAW3D_MATERIAL_RAMP_END_OFFSET = offsetof(SlipDraw3DMaterialRecord, rampEnd),
+	SLIP_DRAW3D_MATERIAL_RAMP_END_FIRST_BYTE_END = SLIP_DRAW3D_MATERIAL_RAMP_END_OFFSET + sizeof(uint8_t)
+};
 
 typedef struct SlipDraw3DVertexLighting {
 	SlipDraw3DVec32 light, origin;
@@ -641,7 +725,8 @@ typedef struct SlipDraw3DMaterialGate {
 	SlipDraw3DMaterialGateBranch branch;
 } SlipDraw3DMaterialGate;
 
-typedef int (*SlipDraw3DResourceFindNameRecord)(void *user, const char name[13], uint32_t *resourceHandle);
+typedef int (*SlipDraw3DResourceFindNameRecord)(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES],
+                                                uint32_t *resourceHandle);
 
 typedef struct SlipDraw3DMaterialFrameSlots {
 	uint32_t materialTableCount;
@@ -2079,9 +2164,9 @@ typedef struct SlipDraw3DBackgroundStripBuild {
 	uint16_t count;
 	uint16_t projectionRevisionAfterBuild;
 	uint16_t diagnosticCount;
-	uint16_t diagnosticAngles[16];
-	uint16_t diagnosticTangents[16];
-	uint16_t diagnosticStripOffsets[16];
+	uint16_t diagnosticAngles[SLIP_BACKGROUND_STRIP_DIAGNOSTIC_CAPACITY];
+	uint16_t diagnosticTangents[SLIP_BACKGROUND_STRIP_DIAGNOSTIC_CAPACITY];
+	uint16_t diagnosticStripOffsets[SLIP_BACKGROUND_STRIP_DIAGNOSTIC_CAPACITY];
 	bool returned;
 } SlipDraw3DBackgroundStripBuild;
 

@@ -3,28 +3,32 @@
 #include "runtime.h"
 #include <string.h>
 
+/* byteSize accounts for two serialized words followed by the terminated name.
+ * Native entries are stored separately using sizeof(SlipResourceNameEntry). */
+enum { SLIP_RESOURCE_NAME_TABLE_GROWTH_BYTES = 20000 };
+
 SlipResourceNameEntry *SlipResource_nameTable;
 uint32_t SlipResource_nameTableUsedBytes;
 uint32_t SlipResource_nameTableCapacity;
 SlipResourceNameEntry *SlipResource_nameTableNext;
 SlipResourceBlock *SlipResource_nameTableBlock;
-char SlipResource_validatedName[13];
-char SlipResource_searchName[13];
+char SlipResource_validatedName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
+char SlipResource_searchName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 const char *SlipResource_searchNameStart;
 uint32_t SlipResource_searchNameLength;
 
-bool SlipResource_ValidateName(const char name[12], const SlipResourceNameCalls *calls) {
-	for (unsigned i = 0; i < 12; ++i)
+bool SlipResource_ValidateName(const char name[SLIP_RESOURCE_NAME_BYTES], const SlipResourceNameCalls *calls) {
+	for (unsigned i = 0; i < SLIP_RESOURCE_NAME_BYTES; ++i)
 		SlipResource_validatedName[i] = (char)SlipResource_Uppercase((uint8_t)name[i]);
 	uint32_t size;
 	bool found = calls->fileSize(calls->context, SlipResource_validatedName, &size);
 	if (!found)
-		SlipRuntime_error = 2;
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_FILE_UNAVAILABLE;
 	return found;
 }
 
-bool SlipResource_FindName(const char name[12], uint16_t *handle) {
-	for (unsigned i = 0; i < 12; ++i)
+bool SlipResource_FindName(const char name[SLIP_RESOURCE_NAME_BYTES], uint16_t *handle) {
+	for (unsigned i = 0; i < SLIP_RESOURCE_NAME_BYTES; ++i)
 		SlipResource_searchName[i] = (char)SlipResource_Uppercase((uint8_t)name[i]);
 	if (SlipResource_nameTableUsedBytes == 0)
 		return false;
@@ -38,7 +42,8 @@ bool SlipResource_FindName(const char name[12], uint16_t *handle) {
 	uint32_t offset = 0;
 	SlipResourceNameEntry *entry = SlipResource_nameTable;
 	do {
-		if ((uint16_t)(entry->byteSize - 4u) == (uint16_t)SlipResource_searchNameLength &&
+		if ((uint16_t)(entry->byteSize - SLIP_RESOURCE_NAME_ENTRY_HEADER_BYTES) ==
+		        (uint16_t)SlipResource_searchNameLength &&
 		    memcmp(entry->name, SlipResource_searchNameStart, SlipResource_searchNameLength) == 0) {
 			*handle = entry->handle;
 			return true;
@@ -49,7 +54,8 @@ bool SlipResource_FindName(const char name[12], uint16_t *handle) {
 	return false;
 }
 
-bool SlipResource_FindOrCreateName(const char name[12], uint16_t *handle, const SlipResourceNameCalls *calls) {
+bool SlipResource_FindOrCreateName(const char name[SLIP_RESOURCE_NAME_BYTES], uint16_t *handle,
+                                   const SlipResourceNameCalls *calls) {
 	if (!SlipResource_ValidateName(name, calls))
 		return false;
 	if (!SlipResource_FindName(name, handle))
@@ -57,16 +63,16 @@ bool SlipResource_FindOrCreateName(const char name[12], uint16_t *handle, const 
 	return true;
 }
 
-void SlipResource_AddName(const char name[13], uint16_t *handle, const SlipResourceNameAllocationCalls *storage,
-                          const SlipResourceHandleCalls *handles) {
+void SlipResource_AddName(const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint16_t *handle,
+                          const SlipResourceNameAllocationCalls *storage, const SlipResourceHandleCalls *handles) {
 	const char *character = name;
 	uint32_t length = 0;
 	do {
 		++length;
 	} while (*character++ != 0);
-	const uint32_t entryBytes = length + 4u;
+	const uint32_t entryBytes = length + SLIP_RESOURCE_NAME_ENTRY_HEADER_BYTES;
 	if (SlipResource_nameTableUsedBytes + entryBytes >= SlipResource_nameTableCapacity) {
-		SlipResource_nameTableCapacity += 20000u;
+		SlipResource_nameTableCapacity += SLIP_RESOURCE_NAME_TABLE_GROWTH_BYTES;
 		SlipResourceNameEntry *const oldEntries = SlipResource_nameTable;
 		SlipResourceBlock *const oldBlock = SlipResource_nameTableBlock;
 		const size_t count = (size_t)(SlipResource_nameTableNext - oldEntries);

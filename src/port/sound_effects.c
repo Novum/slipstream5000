@@ -4,27 +4,41 @@
 #include "draw3d.h"
 #include "frame_timer.h"
 #include "game_errors.h"
+#include "race.h"
 #include "resource_host.h"
 #include "runtime.h"
 
 #include <stdio.h>
 #include <string.h>
 
+enum {
+	SLIP_SOUND_TRACK_CODE_BYTES = 4,
+	SLIP_SOUND_SET_COUNT = 3,
+	SLIP_SOUND_INITIAL_QUEUE_CONTINUATION = 4,
+	SLIP_SOUND_MAXIMUM_DISTANCE = 73200,
+	SLIP_SOUND_FLYBY_VOLUME = 16384,
+	SLIP_SOUND_FLYBY_SAMPLE_INDEX = 2,
+	SLIP_SOUND_TRACK_CHANGE_SAMPLE_INDEX = 23,
+	SLIP_SOUND_AMBIENT_SAMPLE_BASE_INDEX = 8,
+	SLIP_SOUND_ENGINE_SPEED_RATE_SHIFT = 2,
+	SLIP_SOUND_AMBIENT_FADE_STEP_SHIFT = 1
+};
+
 static bool SlipSoundEffects_installed;
 uint32_t SlipSoundEffects_externalSoundFiles;
 
 void SlipSoundEffects_Install(void) { SlipSoundEffects_installed = true; }
 
-static const char *const SlipSoundEffects_fixedNames[24] = {
+static const char *const SlipSoundEffects_fixedNames[SLIP_SOUND_EFFECT_RESOURCE_COUNT] = {
     "LOW.SMP",     "HIGH.SMP",     "JETPASS1.SMP", "SCRAPE2.SMP",  "SCRAPE1.SMP",  "CRASH.SMP",
     "BLASTER.SMP", "MISSILE.SMP",  "BONUSCOL.SMP", "PITSLP.SMP",   "CROWDLP.SMP",  "MINEDROP.SMP",
     NULL,          "WATERHIT.SMP", "EXPLOSN.SMP",  "LASERHIT.SMP", "DISRUPTR.SMP", "ENGSTART.SMP",
     NULL,          "BOMBER.SMP",   "SCRAMBLE.SMP", "HYPERNEU.SMP", "AMBLER.SMP",   "WOOSH.SMP"};
 
-static const char SlipSoundEffects_lowTrackCodes[10][5] = {"EM01", "EF12", "EM09", "EF08", "EF10",
-                                                           "EF06", "EM03", "EM05", "EM07", "EM11"};
-static const char SlipSoundEffects_highTrackCodes[10][5] = {"EM02", "EF13", "EM10", "EF09", "EF11",
-                                                            "EF07", "EM04", "EM06", "EM08", "EM12"};
+static const char SlipSoundEffects_lowTrackCodes[SLIP_RACE_TRACK_COUNT][SLIP_SOUND_TRACK_CODE_BYTES + 1] = {
+    "EM01", "EF12", "EM09", "EF08", "EF10", "EF06", "EM03", "EM05", "EM07", "EM11"};
+static const char SlipSoundEffects_highTrackCodes[SLIP_RACE_TRACK_COUNT][SLIP_SOUND_TRACK_CODE_BYTES + 1] = {
+    "EM02", "EF13", "EM10", "EF09", "EF11", "EF07", "EM04", "EM06", "EM08", "EM12"};
 
 static bool SlipSoundEffects_Lock(SlipSoundEffectsState *state) {
 	return state->lockSound == NULL || state->lockSound(state->context);
@@ -52,8 +66,8 @@ bool SlipSoundEffects_Initialize(SlipSoundEffectsState *state, const char *const
                                  uint16_t track, uint16_t soundSet, SlipGameSoundState *gameSound,
                                  SlipSoundEffectObjectPosition objectPosition, SlipSoundEffectTrackLight trackLight,
                                  SlipSoundEffectLock lockSound, SlipSoundEffectUnlock unlockSound, void *context) {
-	char lowName[13];
-	char highName[13];
+	char lowName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
+	char highName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 	uint16_t trackIndex;
 	uint32_t i;
 
@@ -62,7 +76,7 @@ bool SlipSoundEffects_Initialize(SlipSoundEffectsState *state, const char *const
 	state->initialized = false;
 	if (!SlipSoundEffects_installed)
 		return true;
-	if (track == 0u || track > 10u || soundSet >= 3u || gameSound == NULL)
+	if (track == 0u || track > SLIP_RACE_TRACK_COUNT || soundSet >= SLIP_SOUND_SET_COUNT || gameSound == NULL)
 		return false;
 	SlipArchive *savedPrimaryArchive = NULL;
 	if (SlipSoundEffects_externalSoundFiles != 0) {
@@ -122,7 +136,7 @@ void SlipSoundEffects_Shutdown(SlipSoundEffectsState *state) {
 	if (state == NULL || !state->initialized)
 		return;
 	if (SlipSoundEffects_Lock(state)) {
-		for (i = 0; i < 2u; ++i) {
+		for (i = 0; i < SLIP_SOUND_ENGINE_COUNT; ++i) {
 			if (state->engines[i].object != 0u && state->engines[i].loopHandle != 0u)
 				SlipGameSound_Stop(state->gameSound, state->engines[i].loopHandle);
 		}
@@ -140,7 +154,7 @@ void SlipSoundEffects_Shutdown(SlipSoundEffectsState *state) {
 void SlipSoundEffects_BeginFrame(SlipSoundEffectsState *state) {
 	uint32_t i;
 	if (state != NULL && state->initialized) {
-		for (i = 0; i < 2u; ++i)
+		for (i = 0; i < SLIP_SOUND_ENGINE_COUNT; ++i)
 			state->engines[i].frameSubmissionCount = 0;
 		memset(state->requests, 0, sizeof(state->requests));
 	}
@@ -162,23 +176,23 @@ static void SlipSoundEffects_UpdateAmbient(SlipSoundEffectsState *state) {
 			if (state->ambientHandle != 0u)
 				SlipGameSound_Stop(state->gameSound, state->ambientHandle);
 			state->ambientCurrent = state->ambientRequested;
-			sample = &state->samplePayloads[state->ambientCurrent + 8u];
+			sample = &state->samplePayloads[state->ambientCurrent + SLIP_SOUND_AMBIENT_SAMPLE_BASE_INDEX];
 			state->ambientHandle =
 			    SlipGameSound_PlayLoopingFullVolume(state->gameSound, sample->data, (uint32_t)sample->size);
 		}
 		ambientVolume = state->ambientVolume;
-		if (ambientVolume != 0x7fffu) {
-			volumeStep = SlipFrameTimer_Step() << 1;
+		if (ambientVolume != INT16_MAX) {
+			volumeStep = SlipFrameTimer_Step() << SLIP_SOUND_AMBIENT_FADE_STEP_SHIFT;
 			ambientVolume += volumeStep;
-			if ((int32_t)ambientVolume > 0x7fff)
-				ambientVolume = 0x7fffu;
+			if ((int32_t)ambientVolume > INT16_MAX)
+				ambientVolume = INT16_MAX;
 			state->ambientVolume = ambientVolume;
 			SlipGameSound_SetVolume(state->gameSound, state->ambientHandle, (int32_t)ambientVolume);
 		}
 	} else if (state->ambientCurrent != 0u) {
 		if (state->ambientHandle != 0u) {
 			ambientVolume = state->ambientVolume;
-			volumeStep = SlipFrameTimer_Step() << 1;
+			volumeStep = SlipFrameTimer_Step() << SLIP_SOUND_AMBIENT_FADE_STEP_SHIFT;
 			ambientVolume = ambientVolume < volumeStep ? 0u : ambientVolume - volumeStep;
 			state->ambientVolume = ambientVolume;
 			if (ambientVolume != 0u) {
@@ -211,12 +225,12 @@ void SlipSoundEffects_AddEngine(SlipSoundEffectsState *state, uint16_t trackChan
 	uint16_t light;
 	if (state == NULL || !state->initialized)
 		return;
-	for (i = 0; i < 2u; ++i) {
+	for (i = 0; i < SLIP_SOUND_ENGINE_COUNT; ++i) {
 		if (state->engines[i].object == object)
 			break;
 	}
-	if (i == 2u) {
-		for (i = 0; i < 2u; ++i) {
+	if (i == SLIP_SOUND_ENGINE_COUNT) {
+		for (i = 0; i < SLIP_SOUND_ENGINE_COUNT; ++i) {
 			if (state->engines[i].object == 0u) {
 				state->engines[i].object = object;
 				state->engines[i].trackLight = UINT32_MAX;
@@ -225,7 +239,7 @@ void SlipSoundEffects_AddEngine(SlipSoundEffectsState *state, uint16_t trackChan
 			}
 		}
 	}
-	if (i == 2u) {
+	if (i == SLIP_SOUND_ENGINE_COUNT) {
 		SlipRuntime_Fatal("FxAddEngine: Too many engines this frame!");
 		return;
 	}
@@ -240,8 +254,8 @@ void SlipSoundEffects_AddEngine(SlipSoundEffectsState *state, uint16_t trackChan
 		state->engines[i].trackLight = light;
 	} else if (state->engines[i].trackLight != light) {
 		state->engines[i].trackLight = light;
-		if (trackChangeMode != 2u)
-			SlipSoundEffects_PlayResource(state, 23u);
+		if (trackChangeMode != SLIP_SOUND_TRACK_CHANGE_SUPPRESS)
+			SlipSoundEffects_PlayResource(state, SLIP_SOUND_TRACK_CHANGE_SAMPLE_INDEX);
 	}
 }
 
@@ -252,7 +266,7 @@ void SlipSoundEffects_Queue(SlipSoundEffectsState *state, int32_t positionX, int
 		return;
 	for (i = 0; i < SLIP_SOUND_EFFECT_QUEUE_COUNT; ++i) {
 		SlipSoundEffectRequest *const request = &state->requests[i];
-		if (request->effect == 0u) {
+		if (request->effect == SLIP_SOUND_EFFECT_NONE) {
 			request->effect = effect;
 			request->positionMode = positionMode;
 			request->object = object;
@@ -281,10 +295,10 @@ void SlipSoundEffects_PlayLow(SlipSoundEffectsState *state) {
 }
 
 void SlipSoundEffects_PlayFlyby(SlipSoundEffectsState *state) {
-	const SlipResourcePayload *const sample = &state->samplePayloads[2];
+	const SlipResourcePayload *const sample = &state->samplePayloads[SLIP_SOUND_FLYBY_SAMPLE_INDEX];
 	if (!state->initialized || !SlipSoundEffects_Lock(state))
 		return;
-	(void)SlipGameSound_PlayPositioned(state->gameSound, sample->data, (uint32_t)sample->size, 0x4000);
+	(void)SlipGameSound_PlayPositioned(state->gameSound, sample->data, (uint32_t)sample->size, SLIP_SOUND_FLYBY_VOLUME);
 	SlipSoundEffects_Unlock(state);
 }
 
@@ -297,16 +311,18 @@ static void SlipSoundEffects_Play(SlipSoundEffectsState *state, const SlipSoundE
                                   uint32_t distance) {
 	const SlipResourcePayload *sample;
 
-	static const uint8_t resourceIndices[16] = {5, 3, 4, 6, 7, 8, 11, 13, 14, 15, 16, 17, 19, 20, 21, 22};
-	if (request->effect == 0u || request->effect > 16u)
+	static const uint8_t resourceIndices[SLIP_SOUND_EFFECT_COUNT] = {5,  3,  4,  6,  7,  8,  11, 13,
+	                                                                 14, 15, 16, 17, 19, 20, 21, 22};
+	if (request->effect == SLIP_SOUND_EFFECT_NONE || request->effect > SLIP_SOUND_EFFECT_COUNT)
 		return;
 	sample = &state->samplePayloads[resourceIndices[request->effect - 1u]];
 	if (!SlipSoundEffects_Lock(state))
 		return;
 	if (distance == 0u) {
 		(void)SlipGameSound_Play(state->gameSound, sample->data, (uint32_t)sample->size);
-	} else if (distance != 0x11df0u) {
-		const uint32_t volume = (uint32_t)(((uint64_t)0x7fffu * (0x11df0u - distance)) / 0x11df0u);
+	} else if (distance != SLIP_SOUND_MAXIMUM_DISTANCE) {
+		const uint32_t volume =
+		    (uint32_t)(((uint64_t)INT16_MAX * (SLIP_SOUND_MAXIMUM_DISTANCE - distance)) / SLIP_SOUND_MAXIMUM_DISTANCE);
 		(void)SlipGameSound_PlayPositioned(state->gameSound, sample->data, (uint32_t)sample->size, (int32_t)volume);
 	}
 	SlipSoundEffects_Unlock(state);
@@ -317,10 +333,10 @@ void SlipSoundEffects_EndFrame(SlipSoundEffectsState *state, uint32_t listenerMo
                                uint16_t secondListenerObject) {
 	uint32_t i;
 
-	uint32_t queueContinuation = 4u;
+	uint32_t queueContinuation = SLIP_SOUND_INITIAL_QUEUE_CONTINUATION;
 	if (state == NULL || !state->initialized)
 		return;
-	for (i = 0; i < 2u; ++i) {
+	for (i = 0; i < SLIP_SOUND_ENGINE_COUNT; ++i) {
 		if (state->engines[i].object != 0u && state->engines[i].frameSubmissionCount == 0u) {
 			if (state->engines[i].loopHandle != 0u && SlipSoundEffects_Lock(state)) {
 				SlipGameSound_Stop(state->gameSound, state->engines[i].loopHandle);
@@ -330,7 +346,7 @@ void SlipSoundEffects_EndFrame(SlipSoundEffectsState *state, uint32_t listenerMo
 		}
 	}
 	if (state->engineLoopsEnabled != 0u) {
-		for (i = 0; i < 2u; ++i) {
+		for (i = 0; i < SLIP_SOUND_ENGINE_COUNT; ++i) {
 			if (state->engines[i].object != 0u && SlipSoundEffects_Lock(state)) {
 				if (state->engines[i].loopHandle == 0u) {
 					const SlipResourcePayload *const sample = &state->samplePayloads[0];
@@ -338,7 +354,8 @@ void SlipSoundEffects_EndFrame(SlipSoundEffectsState *state, uint32_t listenerMo
 					    SlipGameSound_PlayLooping(state->gameSound, sample->data, (uint32_t)sample->size);
 				}
 				SlipGameSound_SetRate(state->gameSound, state->engines[i].loopHandle,
-				                      (uint32_t)(state->engines[i].speed >> 2) + 0x10000u);
+				                      (uint32_t)(state->engines[i].speed >> SLIP_SOUND_ENGINE_SPEED_RATE_SHIFT) +
+				                          HMI_DIGITAL_RATE_ONE_Q16);
 				SlipSoundEffects_Unlock(state);
 			}
 		}
@@ -349,14 +366,15 @@ void SlipSoundEffects_EndFrame(SlipSoundEffectsState *state, uint32_t listenerMo
 		SlipDraw3DApproxAbsVectorLength approximate;
 		uint32_t distance = 0u;
 
-		if (request->effect == 0u)
+		if (request->effect == SLIP_SOUND_EFFECT_NONE)
 			continue;
 
-		bool spatial = request->positionMode != 0u &&
-		               !(request->positionMode != 2u && listenerMode == 1u &&
-		                 (request->object == listenerObject || request->object == secondListenerObject));
+		bool spatial =
+		    request->positionMode != SLIP_SOUND_POSITION_NONE &&
+		    !(request->positionMode != SLIP_SOUND_POSITION_COORDINATES && listenerMode == SLIP_SOUND_LISTENER_OBJECT &&
+		      (request->object == listenerObject || request->object == secondListenerObject));
 		if (spatial) {
-			if (request->positionMode == 2u) {
+			if (request->positionMode == SLIP_SOUND_POSITION_COORDINATES) {
 				sourceX = request->positionX;
 				sourceY = request->positionY;
 				sourceZ = request->positionZ;
@@ -365,7 +383,7 @@ void SlipSoundEffects_EndFrame(SlipSoundEffectsState *state, uint32_t listenerMo
 				    !state->objectPosition(state->context, request->object, &sourceX, &sourceY, &sourceZ))
 					continue;
 			}
-			if (listenerMode == 1u) {
+			if (listenerMode == SLIP_SOUND_LISTENER_OBJECT) {
 				if (state->objectPosition == NULL ||
 				    !state->objectPosition(state->context, listenerObject, &listenerX, &listenerY, &listenerZ))
 					continue;
@@ -377,7 +395,7 @@ void SlipSoundEffects_EndFrame(SlipSoundEffectsState *state, uint32_t listenerMo
 
 			queueContinuation = approximate.otherQuarter;
 		}
-		if ((int32_t)distance <= 0x11df0) {
+		if ((int32_t)distance <= SLIP_SOUND_MAXIMUM_DISTANCE) {
 			SlipSoundEffects_Play(state, request, distance);
 			--queueContinuation;
 		}

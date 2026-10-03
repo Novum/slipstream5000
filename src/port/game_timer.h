@@ -1,6 +1,8 @@
 #ifndef SLIPSTREAM5000_GAME_TIMER_H
 #define SLIPSTREAM5000_GAME_TIMER_H
 #include <stdint.h>
+
+enum { SLIP_GAME_TIMER_SLOT_COUNT = 5 };
 typedef struct SlipGameTimerState SlipGameTimerState;
 typedef void (*SlipGameTimerCallback)(SlipGameTimerState *);
 
@@ -23,7 +25,7 @@ struct SlipGameTimerState {
 		SlipGameTimerCallback callback;
 		uint32_t countdown;
 		uint16_t rate, divisor;
-	} slots[5];
+	} slots[SLIP_GAME_TIMER_SLOT_COUNT];
 };
 
 uint32_t SlipGameTimer_Register(SlipGameTimerState *, uint16_t, SlipGameTimerCallback);

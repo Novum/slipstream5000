@@ -5,6 +5,12 @@
 #include "game_timer.h"
 #include "hmi_music.h"
 
+enum {
+	SLIP_RACE_MUSIC_SONG_COUNT = 4,
+	SLIP_RACE_MUSIC_MEMORY_SENSITIVE_SELECTION = 1,
+	SLIP_RACE_MUSIC_MINIMUM_FREE_BYTES = 0x80000
+};
+
 struct SlipRaceRacerTable;
 
 typedef struct SlipRaceMusicState {
@@ -16,7 +22,7 @@ typedef struct SlipRaceMusicState {
 	uint32_t selection;
 } SlipRaceMusicState;
 
-extern const char *const SlipRaceMusic_names[4];
+extern const char *const SlipRaceMusic_names[SLIP_RACE_MUSIC_SONG_COUNT];
 void SlipGameMusic_MenuBranch(SlipGameSoundState *game, uint32_t handle, uint32_t selection);
 
 const char *SlipResultMusic_Select(const struct SlipRaceRacerTable *racers);

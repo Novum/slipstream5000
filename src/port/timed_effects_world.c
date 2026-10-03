@@ -1,3 +1,4 @@
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "resource_host.h"
 #include "runtime.h"
@@ -5,6 +6,16 @@
 #include "track_view_render.h"
 #include "track_world.h"
 #include <stdlib.h>
+
+enum {
+	SLIP_TIMED_EFFECT_FRAME_SELECTION_ATTEMPTS = 4,
+	SLIP_TIMED_EFFECT_DISPLACEMENT_SIGN_BIT = 2,
+	SLIP_TIMED_EFFECT_HOLD_EXTENT_VARIATION_SHIFT = 4,
+	SLIP_TIMED_EFFECT_INITIAL_EXTENT_VARIATION_SHIFT = 5,
+	SLIP_TIMED_EFFECT_SPACING_FACTOR_Q14 = 0x3f00,
+	SLIP_TIMED_EFFECT_MILLISECONDS_PER_SECOND = 1000,
+	SLIP_TIMED_EFFECT_SERVER_SLOT = SLIP_OBJECT_RELEASE_SERVER_ID
+};
 
 bool SlipTimedEffects_SelectOldest(const SlipObject *objects, size_t objectBytes, uint16_t *selected) {
 	uint32_t greatestAge = 0;
@@ -61,15 +72,15 @@ bool SlipTimedEffects_Position(const SlipTimedEffect *entry, const SlipObject *o
 void SlipTimedEffects_Displace(SlipTimedEffect *entry, uint32_t verticalDisplacementRange) {
 	const uint32_t range = entry->descriptor->displacementRange;
 	if (range != 0) {
-		uint32_t random = SlipRandom_Next() & 0x3fffu;
-		uint32_t displacement = (uint32_t)(((uint64_t)random * range) >> 14);
-		if ((SlipRandom_Next() & 2u) != 0) {
+		uint32_t random = SlipRandom_Next() & (SLIP_Q14_ONE - 1);
+		uint32_t displacement = (uint32_t)(((uint64_t)random * range) >> SLIP_Q14_FRACTION_BITS);
+		if ((SlipRandom_Next() & SLIP_TIMED_EFFECT_DISPLACEMENT_SIGN_BIT) != 0) {
 			displacement = 0u - displacement;
 		}
 		entry->displacementX = (int32_t)displacement;
-		random = SlipRandom_Next() & 0x3fffu;
-		displacement = (uint32_t)(((uint64_t)random * verticalDisplacementRange) >> 14);
-		if ((SlipRandom_Next() & 2u) != 0) {
+		random = SlipRandom_Next() & (SLIP_Q14_ONE - 1);
+		displacement = (uint32_t)(((uint64_t)random * verticalDisplacementRange) >> SLIP_Q14_FRACTION_BITS);
+		if ((SlipRandom_Next() & SLIP_TIMED_EFFECT_DISPLACEMENT_SIGN_BIT) != 0) {
 			displacement = 0u - displacement;
 		}
 		entry->displacementY = (int32_t)displacement;
@@ -78,10 +89,11 @@ void SlipTimedEffects_Displace(SlipTimedEffect *entry, uint32_t verticalDisplace
 
 uint16_t SlipTimedEffects_SelectFrame(const SlipTimedEffectFrames *frames, uint16_t previous) {
 	uint16_t selected = previous;
-	for (unsigned attempt = 0; attempt < 4; ++attempt) {
+	for (unsigned attempt = 0; attempt < SLIP_TIMED_EFFECT_FRAME_SELECTION_ATTEMPTS; ++attempt) {
 		const uint32_t product = (uint32_t)(uint16_t)SlipRandom_Next() * frames->count;
-		const uint16_t offset = (uint16_t)((product >> 16) << 1);
-		selected = frames->handles[offset / 2u];
+		const uint16_t offset =
+		    (uint16_t)((product >> SLIP_RANDOM_SAMPLE_BITS) << SLIP_TIMED_EFFECT_FRAME_OFFSET_SHIFT);
+		selected = frames->handles[offset / SLIP_TIMED_EFFECT_FRAME_HANDLE_BYTES];
 		if (selected != previous) {
 			break;
 		}
@@ -93,10 +105,11 @@ bool SlipTimedEffects_UpdateFrame(SlipTimedEffectObjectState *state, int32_t ste
                                   size_t objectBytes, uint16_t object, uint32_t descriptorAddress,
                                   uint32_t finalFramesAddress, uint32_t *frameSelectionValue) {
 	uint16_t selected;
-	if (state->phase != 2) {
+	if (state->phase != SLIP_TIMED_EFFECT_FINAL_PHASE) {
 		const SlipTimedEffectFrames *const frames = state->descriptor->initialFrames;
 		state->frameCountdown = (int16_t)((uint16_t)state->frameCountdown - (uint16_t)step);
-		*frameSelectionValue = (*frameSelectionValue & 0xffff0000u) | (uint16_t)state->frameCountdown;
+		*frameSelectionValue =
+		    (*frameSelectionValue & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | (uint16_t)state->frameCountdown;
 		if (state->frameCountdown >= 0) {
 			return true;
 		}
@@ -112,30 +125,38 @@ bool SlipTimedEffects_UpdateFrame(SlipTimedEffectObjectState *state, int32_t ste
 	} else {
 		const SlipTimedEffectFrames *const frames = state->descriptor->finalFrames;
 		const uint64_t product = (uint64_t)frames->count * SlipTimedEffects_fraction;
-		const uint16_t offset = (uint16_t)(product >> 15) & 0xfffeu;
-		selected = frames->handles[offset / 2u];
-		*frameSelectionValue = ((uint32_t)(product >> 15) & 0xffff0000u) | selected;
+		const uint16_t offset =
+		    (uint16_t)(product >> (SLIP_TIMED_EFFECT_FRACTION_BITS - SLIP_TIMED_EFFECT_FRAME_OFFSET_SHIFT)) &
+		    SLIP_TIMED_EFFECT_FRAME_OFFSET_MASK;
+		selected = frames->handles[offset / SLIP_TIMED_EFFECT_FRAME_HANDLE_BYTES];
+		*frameSelectionValue =
+		    ((uint32_t)(product >> (SLIP_TIMED_EFFECT_FRACTION_BITS - SLIP_TIMED_EFFECT_FRAME_OFFSET_SHIFT)) &
+		     SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) |
+		    selected;
 	}
 	SlipObjectSlotDataWriteResult write;
 
-	const uint32_t address = state->phase == 2 ? finalFramesAddress : descriptorAddress;
-	return SlipObject_SetDrawData(objects, objectBytes, object, (address & 0xffff0000u) | selected, &write);
+	const uint32_t address = state->phase == SLIP_TIMED_EFFECT_FINAL_PHASE ? finalFramesAddress : descriptorAddress;
+	return SlipObject_SetDrawData(objects, objectBytes, object,
+	                              (address & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | selected, &write);
 }
 
 uint32_t SlipTimedEffects_speedLimit;
 
 bool SlipTimedEffects_UpdateSpeed(const SlipTimedEffectObjectState *state, int32_t step,
                                   uint32_t *speedCalculationValue, SlipObject *objects, uint16_t object) {
-	*speedCalculationValue = (*speedCalculationValue & 0xffff0000u) | state->speedLimit;
+	*speedCalculationValue = (*speedCalculationValue & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | state->speedLimit;
 	if (state->speedLimit != 0) {
-		SlipTimedEffects_speedLimit = (SlipTimedEffects_speedLimit & 0xffff0000u) | state->speedLimit;
-		const uint32_t dividend = (uint32_t)(uint16_t)step << 14;
-		const uint32_t quotient = dividend / 1000u;
+		SlipTimedEffects_speedLimit =
+		    (SlipTimedEffects_speedLimit & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | state->speedLimit;
+		const uint32_t dividend = (uint32_t)(uint16_t)step << SLIP_Q14_FRACTION_BITS;
+		const uint32_t quotient = dividend / SLIP_TIMED_EFFECT_MILLISECONDS_PER_SECOND;
 		if (quotient > UINT16_MAX) {
 			return false;
 		}
-		const uint32_t factor = (*speedCalculationValue & 0xffff0000u) | quotient;
-		const uint32_t increment = (uint32_t)(((uint64_t)factor * SlipTimedEffects_speedLimit) >> 14);
+		const uint32_t factor = (*speedCalculationValue & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | quotient;
+		const uint32_t increment =
+		    (uint32_t)(((uint64_t)factor * SlipTimedEffects_speedLimit) >> SLIP_Q14_FRACTION_BITS);
 		*speedCalculationValue = increment;
 		uint32_t speed = (uint32_t)SlipObject_Speed(objects, object) + increment;
 		if ((int32_t)speed >= (int32_t)SlipTimedEffects_speedLimit) {
@@ -209,20 +230,19 @@ bool SlipTimedEffects_Initialize(uint16_t count, uint16_t drawMode, uint16_t obj
 	if (count == 0 || count >= UINT16_MAX - 1u)
 		SlipRuntime_Fatal("DOS timed emitter allocation/reset overflow (000274e3/000278b5)");
 
-	enum { DOS_EMITTER_BYTES = 0x30, EMITTER_SENTINELS = 2 };
-
-	const uint32_t resourceBytes = (uint32_t)(uint16_t)(count + EMITTER_SENTINELS) * DOS_EMITTER_BYTES;
+	const uint32_t resourceBytes =
+	    (uint32_t)(uint16_t)(count + SLIP_TIMED_EMITTER_SENTINELS) * SLIP_TIMED_EMITTER_DOS_BYTES;
 	if (!SlipResourceHost_Allocate(NULL, resourceBytes, 0, &emitterResource))
 		return false;
 	(void)SlipResourceHost_LockReserved(NULL, emitterResource);
-	emitterStorage = malloc((size_t)(uint16_t)(count + 2u) * sizeof(*emitterStorage));
+	emitterStorage = malloc((size_t)(uint16_t)(count + SLIP_TIMED_EMITTER_SENTINELS) * sizeof(*emitterStorage));
 	if (emitterStorage == NULL)
 		SlipRuntime_Fatal("Cannot allocate native timed emitter records");
 	SlipTimedEffects_active = emitterStorage;
 	SlipTimedEffects_free = emitterStorage + 1;
 	SlipTimedEffects_Reset();
 	SlipTimedEffects_objectCount = 0;
-	SlipObject_SetServer(1, SlipTimedEffects_Notify);
+	SlipObject_SetServer(SLIP_TIMED_EFFECT_SERVER_SLOT, SlipTimedEffects_Notify);
 	SlipRuntime_RegisterExit(SlipTimedEffects_Cleanup);
 	return true;
 }
@@ -245,7 +265,7 @@ uint32_t SlipTimedEffects_Notify(uint32_t eventCode, uint32_t eventPayload, uint
 	(void)eventFlags;
 	(void)dispatchData;
 	(void)dispatchFrame;
-	if (object == 0 || (eventCode & 1u) == 0 || SlipTimedEffects_initialized == 0)
+	if (object == 0 || (eventCode & SLIP_OBJECT_SERVER_EVENT_FREE) == 0 || SlipTimedEffects_initialized == 0)
 		return eventCode;
 	SlipTimedEffects_RemoveParent(object);
 	SlipTimedEffect *entry = SlipTimedEffects_active->next;
@@ -287,29 +307,33 @@ bool SlipTimedEffects_CreateObject(const SlipTimedEffect *emitter, SlipView3DVec
 	SlipTimedEffectObjectState *const state = SlipObject_TimedEffectState(object);
 	state->speedLimit = emitter->speedLimit;
 	const SlipTimedEffectDescriptor *const descriptor = emitter->descriptor;
-	int32_t factor = ((int16_t)SlipRandom_Next() >> 4) + 0x4000;
-	state->holdExtent = (int32_t)((uint64_t)((int64_t)factor * descriptor->holdExtent) >> 14);
-	factor = ((int16_t)SlipRandom_Next() >> 5) + 0x4000;
-	state->initialExtent = (int32_t)((uint64_t)((int64_t)factor * descriptor->initialExtent) >> 14);
+	int32_t factor = ((int16_t)SlipRandom_Next() >> SLIP_TIMED_EFFECT_HOLD_EXTENT_VARIATION_SHIFT) + SLIP_Q14_ONE;
+	state->holdExtent = (int32_t)((uint64_t)((int64_t)factor * descriptor->holdExtent) >> SLIP_Q14_FRACTION_BITS);
+	factor = ((int16_t)SlipRandom_Next() >> SLIP_TIMED_EFFECT_INITIAL_EXTENT_VARIATION_SHIFT) + SLIP_Q14_ONE;
+	state->initialExtent = (int32_t)((uint64_t)((int64_t)factor * descriptor->initialExtent) >> SLIP_Q14_FRACTION_BITS);
 	SlipObjectExtentWriteResult scalarWrite;
 	(void)SlipObject_SetDrawExtent(SlipObject_table, objectBytes, object, (uint32_t)state->initialExtent, &scalarWrite);
 	state->descriptor = descriptor;
 	const uint16_t random = (uint16_t)SlipRandom_Next();
 	const SlipTimedEffectFrames *const frames = descriptor->initialFrames;
-	const uint16_t frameOffset = (uint16_t)((((uint32_t)random * frames->count) >> 16) << 1);
+	const uint16_t frameOffset = (uint16_t)((((uint32_t)random * frames->count) >> SLIP_RANDOM_SAMPLE_BITS)
+	                                        << SLIP_TIMED_EFFECT_FRAME_OFFSET_SHIFT);
 	SlipObjectSlotDataWriteResult frameWrite;
 	(void)SlipObject_SetDrawData(SlipObject_table, objectBytes, object,
-	                             (emitterDosAddress & 0xffff0000u) | frames->handles[frameOffset / 2u], &frameWrite);
+	                             (emitterDosAddress & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) |
+	                                 frames->handles[frameOffset / SLIP_TIMED_EFFECT_FRAME_HANDLE_BYTES],
+	                             &frameWrite);
 	state->age = 0;
 	state->frameCountdown = 0;
-	state->phase = 0;
+	state->phase = SLIP_TIMED_EFFECT_GROWTH_PHASE;
 	SlipObject_SetSpeed(SlipObject_table, object, 0);
-	SlipObject_SetDirectionQ14(SlipObject_table, object, 0, 0x4000, 0);
+	SlipObject_SetDirectionQ14(SlipObject_table, object, 0, SLIP_Q14_ONE, 0);
 
-	*displacementScale = ((descriptor->initialFramesDosAddress + frameOffset) & 0xffff0000u) | 0x4000u;
+	*displacementScale =
+	    ((descriptor->initialFramesDosAddress + frameOffset) & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | SLIP_Q14_ONE;
 	if (SlipTimedEffects_attach != NULL) {
-		*displacementScale =
-		    SlipTimedEffects_attach(object, state->holdExtent, emitter, (uint32_t)position.z & 0xffff0000u);
+		*displacementScale = SlipTimedEffects_attach(object, state->holdExtent, emitter,
+		                                             (uint32_t)position.z & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK);
 		if (!SlipObject_IsLive(object))
 			return false;
 	}
@@ -331,7 +355,8 @@ void SlipTimedEffects_Tick(const SlipView3DMatrix *creationTemplate, uint32_t em
 			entry = previous;
 			continue;
 		}
-		const uint32_t entryAddress = emitterPoolDosAddress + (uint32_t)(entry - SlipTimedEffects_active) * 0x30u;
+		const uint32_t entryAddress =
+		    emitterPoolDosAddress + (uint32_t)(entry - SlipTimedEffects_active) * SLIP_TIMED_EMITTER_DOS_BYTES;
 		const SlipTimedEffectDescriptor *const descriptor = entry->descriptor;
 		bool emit = true;
 		if (descriptor->emissionPeriod != -1) {
@@ -351,28 +376,34 @@ void SlipTimedEffects_Tick(const SlipView3DMatrix *creationTemplate, uint32_t em
 				                              (int32_t)(preceding.positionZ - (uint32_t)origin.z)};
 				const uint32_t distance = SlipView3D_ApproximateLength(difference.x, difference.y, difference.z);
 				displacementScale = distance;
-				const uint32_t spacing =
-				    (uint32_t)(((uint64_t)((uint32_t)descriptor->initialExtent << 1) * 0x3f00u) >> 14);
+				const uint32_t spacing = (uint32_t)(((uint64_t)((uint32_t)descriptor->initialExtent << 1) *
+				                                     SLIP_TIMED_EFFECT_SPACING_FACTOR_Q14) >>
+				                                    SLIP_Q14_FRACTION_BITS);
 				emit = (int32_t)distance >= (int32_t)spacing;
 				if (emit) {
 					if (spacing == 0)
 						SlipRuntime_Fatal("DOS timed emitter division by zero (000276bc)");
 					uint32_t quotient = distance / spacing;
 					if ((int16_t)quotient > (int16_t)SlipTimedEffects_interpolationLimit)
-						quotient = (quotient & 0xffff0000u) | SlipTimedEffects_interpolationLimit;
+						quotient =
+						    (quotient & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | SlipTimedEffects_interpolationLimit;
 					uint16_t remaining = (uint16_t)quotient;
 					const uint16_t divisor = (uint16_t)(quotient + 1u);
 					if (divisor == 0)
 						SlipRuntime_Fatal("DOS timed emitter division by zero (000276e0)");
-					const uint32_t weightStep = 0x4000u / divisor;
-					uint32_t weight = ((quotient + 1u) & 0xffff0000u) | (uint16_t)(0x4000u - weightStep);
+					const uint32_t weightStep = SLIP_Q14_ONE / divisor;
+					uint32_t weight = ((quotient + 1u) & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) |
+					                  (uint16_t)(SLIP_Q14_ONE - weightStep);
 					const uint32_t precedingAge = SlipObject_TimedEffectState(entry->precedingObject)->age;
 					do {
 						const uint32_t fraction = (uint16_t)weight;
 						SlipView3DVec32 position = {
-						    (int32_t)((uint32_t)origin.x + (uint32_t)(((int64_t)difference.x * fraction) >> 14)),
-						    (int32_t)((uint32_t)origin.y + (uint32_t)(((int64_t)difference.y * fraction) >> 14)),
-						    (int32_t)((uint32_t)origin.z + (uint32_t)(((int64_t)difference.z * fraction) >> 14))};
+						    (int32_t)((uint32_t)origin.x +
+						              (uint32_t)(((int64_t)difference.x * fraction) >> SLIP_Q14_FRACTION_BITS)),
+						    (int32_t)((uint32_t)origin.y +
+						              (uint32_t)(((int64_t)difference.y * fraction) >> SLIP_Q14_FRACTION_BITS)),
+						    (int32_t)((uint32_t)origin.z +
+						              (uint32_t)(((int64_t)difference.z * fraction) >> SLIP_Q14_FRACTION_BITS))};
 						uint16_t created;
 						if (!SlipTimedEffects_CreateObject(entry, position, creationTemplate, entryAddress, &created,
 						                                   &displacementScale)) {
@@ -381,8 +412,9 @@ void SlipTimedEffects_Tick(const SlipView3DMatrix *creationTemplate, uint32_t em
 							break;
 						}
 						entry->currentObject = created;
-						const uint32_t age = (uint32_t)(((uint64_t)weight * precedingAge) >> 14);
-						SlipTimedEffects_UpdateObject(created, age, (uint32_t)position.z & 0xffff0000u,
+						const uint32_t age = (uint32_t)(((uint64_t)weight * precedingAge) >> SLIP_Q14_FRACTION_BITS);
+						SlipTimedEffects_UpdateObject(created, age,
+						                              (uint32_t)position.z & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK,
 						                              descriptor->dosAddress);
 						displacementScale = weight;
 						if (!SlipObject_IsLive(created))
@@ -425,12 +457,14 @@ void SlipTimedEffects_Tick(const SlipView3DMatrix *creationTemplate, uint32_t em
 			if (descriptor->attachedFrames != NULL) {
 				SlipObjectSlotDataReadResult current;
 				(void)SlipObject_GetDrawData(SlipObject_table, objectBytes, entry->currentObject, &current);
-				displacementScale = (displacementScale & 0xffff0000u) | (uint16_t)current.drawData;
+				displacementScale =
+				    (displacementScale & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | (uint16_t)current.drawData;
 				const uint16_t selected =
 				    SlipTimedEffects_SelectFrame(descriptor->attachedFrames, (uint16_t)current.drawData);
 				SlipObjectSlotDataWriteResult frameWrite;
 				(void)SlipObject_SetDrawData(SlipObject_table, objectBytes, entry->currentObject,
-				                             (entryAddress & 0xffff0000u) | selected, &frameWrite);
+				                             (entryAddress & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | selected,
+				                             &frameWrite);
 			}
 		}
 	}

@@ -1,10 +1,20 @@
 #include "race_map.h"
+#include "byte_order.h"
+#include "fixed_point.h"
 #include "gpu/map.h"
 #include "gpu/renderer.h"
 #include "race_display.h"
 #include "raster/raster.h"
 #include "renderer_host.h"
 #include "renderer_projection.h"
+#include "track_format.h"
+
+enum {
+	SLIP_RACE_MAP_MARKER_RADIUS = 2,
+	SLIP_RACE_MAP_MARKER_OUTER_EDGE = 2 * SLIP_RACE_MAP_MARKER_RADIUS,
+	SLIP_RACE_MAP_MARKER_INNER_EDGE = SLIP_RACE_MAP_MARKER_OUTER_EDGE - 1,
+	SLIP_RACE_MAP_MARKER_BORDER_COLOUR = 0
+};
 
 typedef struct SlipRaceMapProjection {
 	SlipView3DMatrix matrix;
@@ -22,8 +32,8 @@ static SlipDraw3DVec32 SlipRaceMap_Transform(const SlipRaceMapProjection *projec
 	    (uint64_t)((int64_t)projection->matrix.m[3] * deltaX) + (uint64_t)((int64_t)projection->matrix.m[5] * deltaZ);
 	SlipDraw3DVec32 transformed;
 
-	transformed.x = (int32_t)((int64_t)transformedX >> 14);
-	transformed.y = (int32_t)((int64_t)transformedY >> 14);
+	transformed.x = (int32_t)((int64_t)transformedX >> SLIP_Q14_FRACTION_BITS);
+	transformed.y = (int32_t)((int64_t)transformedY >> SLIP_Q14_FRACTION_BITS);
 	transformed.z = (int32_t)(0u - (uint32_t)deltaY);
 	return transformed;
 }
@@ -52,23 +62,37 @@ static void SlipRaceMap_DrawObject(const SlipRaceMapProjection *projection, cons
 	}
 	x = (int16_t)projectedX;
 	y = (int16_t)projectedY;
-	x = (int16_t)(x - 2);
-	y = (int16_t)(y - 2);
-	Raster_DrawLineClipped(0, (int16_t)(x + 1), y, (int16_t)(x + 3), y);
-	Raster_DrawLineClipped(0, (int16_t)(x + 1), (int16_t)(y + 4), (int16_t)(x + 3), (int16_t)(y + 4));
-	Raster_DrawLineClipped(0, x, (int16_t)(y + 1), x, (int16_t)(y + 3));
-	Raster_DrawLineClipped(0, (int16_t)(x + 4), (int16_t)(y + 1), (int16_t)(x + 4), (int16_t)(y + 3));
-	Raster_FillRectClipped(color, (int16_t)(x + 1), (int16_t)(y + 1), (int16_t)(x + 3), (int16_t)(y + 3));
+	x = (int16_t)(x - SLIP_RACE_MAP_MARKER_RADIUS);
+	y = (int16_t)(y - SLIP_RACE_MAP_MARKER_RADIUS);
+	Raster_DrawLineClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, (int16_t)(x + 1), y,
+	                       (int16_t)(x + SLIP_RACE_MAP_MARKER_INNER_EDGE), y);
+	Raster_DrawLineClipped(
+	    SLIP_RACE_MAP_MARKER_BORDER_COLOUR, (int16_t)(x + 1), (int16_t)(y + SLIP_RACE_MAP_MARKER_OUTER_EDGE),
+	    (int16_t)(x + SLIP_RACE_MAP_MARKER_INNER_EDGE), (int16_t)(y + SLIP_RACE_MAP_MARKER_OUTER_EDGE));
+	Raster_DrawLineClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, x, (int16_t)(y + 1), x,
+	                       (int16_t)(y + SLIP_RACE_MAP_MARKER_INNER_EDGE));
+	Raster_DrawLineClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, (int16_t)(x + SLIP_RACE_MAP_MARKER_OUTER_EDGE),
+	                       (int16_t)(y + 1), (int16_t)(x + SLIP_RACE_MAP_MARKER_OUTER_EDGE),
+	                       (int16_t)(y + SLIP_RACE_MAP_MARKER_INNER_EDGE));
+	Raster_FillRectClipped(color, (int16_t)(x + 1), (int16_t)(y + 1), (int16_t)(x + SLIP_RACE_MAP_MARKER_INNER_EDGE),
+	                       (int16_t)(y + SLIP_RACE_MAP_MARKER_INNER_EDGE));
 	if (SlipRaceGpu_Active()) {
-		Raster_FillRectClipped(0, x + 1, y + 1, x + 1, y + 1);
-		Raster_FillRectClipped(0, x + 1, y + 3, x + 1, y + 3);
-		Raster_FillRectClipped(0, x + 3, y + 1, x + 3, y + 1);
-		Raster_FillRectClipped(0, x + 3, y + 3, x + 3, y + 3);
+		Raster_FillRectClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, x + 1, y + 1, x + 1, y + 1);
+		Raster_FillRectClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, x + 1, y + SLIP_RACE_MAP_MARKER_INNER_EDGE, x + 1,
+		                       y + SLIP_RACE_MAP_MARKER_INNER_EDGE);
+		Raster_FillRectClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, x + SLIP_RACE_MAP_MARKER_INNER_EDGE, y + 1,
+		                       x + SLIP_RACE_MAP_MARKER_INNER_EDGE, y + 1);
+		Raster_FillRectClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, x + SLIP_RACE_MAP_MARKER_INNER_EDGE,
+		                       y + SLIP_RACE_MAP_MARKER_INNER_EDGE, x + SLIP_RACE_MAP_MARKER_INNER_EDGE,
+		                       y + SLIP_RACE_MAP_MARKER_INNER_EDGE);
 	} else {
-		Raster_PutPixelClipped(0, (int16_t)(y + 1), (int16_t)(x + 1));
-		Raster_PutPixelClipped(0, (int16_t)(y + 3), (int16_t)(x + 1));
-		Raster_PutPixelClipped(0, (int16_t)(y + 1), (int16_t)(x + 3));
-		Raster_PutPixelClipped(0, (int16_t)(y + 3), (int16_t)(x + 3));
+		Raster_PutPixelClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, (int16_t)(y + 1), (int16_t)(x + 1));
+		Raster_PutPixelClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, (int16_t)(y + SLIP_RACE_MAP_MARKER_INNER_EDGE),
+		                       (int16_t)(x + 1));
+		Raster_PutPixelClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, (int16_t)(y + 1),
+		                       (int16_t)(x + SLIP_RACE_MAP_MARKER_INNER_EDGE));
+		Raster_PutPixelClipped(SLIP_RACE_MAP_MARKER_BORDER_COLOUR, (int16_t)(y + SLIP_RACE_MAP_MARKER_INNER_EDGE),
+		                       (int16_t)(x + SLIP_RACE_MAP_MARKER_INNER_EDGE));
 	}
 }
 
@@ -77,8 +101,8 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
                       uint16_t playerColor, uint16_t rivalColor, const SlipView3DMaths *maths,
                       SlipDraw3DProjectState *projectState, SlipObject *objectTable, size_t objectTableBytes,
                       const uint8_t *trkData, size_t trkBytes, const uint8_t *trdData, size_t trdBytes,
-                      const SlipTrackSlotRecord *slots, size_t slotCount, uint32_t slotListBaseAddress,
-                      uint32_t activeListAddress) {
+                      const SlipTrackSlotRecord *slots, size_t slotCount, uint32_t slotListBaseToken,
+                      uint32_t activeListToken) {
 	SlipRaceMapProjection projection;
 	SlipObjectMatrixCopy matrixCopy;
 	SlipObjectMatrixInstall matrixInstall;
@@ -94,21 +118,21 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 	SlipView3DMatrix playerMatrix;
 	uint16_t routeOffset;
 	size_t activeIndex;
-	uint32_t nextSlotAddress;
+	uint32_t nextSlotToken;
 
 	if (cameraDistance == 0 || objectTable == NULL || maths == NULL || projectState == NULL) {
 		return;
 	}
-	if (activeListAddress < slotListBaseAddress || (activeListAddress - slotListBaseAddress) % sizeof(*slots) != 0) {
+	if (activeListToken < slotListBaseToken || (activeListToken - slotListBaseToken) % sizeof(*slots) != 0) {
 		return;
 	}
-	activeIndex = (activeListAddress - slotListBaseAddress) / sizeof(*slots);
+	activeIndex = (activeListToken - slotListBaseToken) / sizeof(*slots);
 	if (activeIndex >= slotCount) {
 		return;
 	}
 
 	savedMaximumDepth = SlipDraw3D_maximumDepth;
-	SlipDraw3D_SetMaximumDepth(0x7fffffffu);
+	SlipDraw3D_SetMaximumDepth(INT32_MAX);
 	Raster_GetClipRect(&savedClipMinX, &savedClipMinY, &savedClipMaxX, &savedClipMaxY);
 	if (!SlipDraw3D_LoadClipAndCenter(projectState, &savedViewport)) {
 		return;
@@ -123,7 +147,7 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 		return;
 	projection.matrix = playerMatrix;
 	SlipView3D_BuildYawMatrix(maths, SlipView3D_RollFromMatrix(maths, &projection.matrix), &projection.matrix);
-	SlipView3D_ApplyPitchMatrix(maths, -0x4000, &projection.matrix);
+	SlipView3D_ApplyPitchMatrix(maths, -SLIP_ANGLE_QUARTER_TURN, &projection.matrix);
 	SlipView3D_OrthonormalizeForwardBasis(&projection.matrix);
 
 	if (!SlipObject_MatrixInstall(objectTable, objectTableBytes, 0, &projection.matrix, &matrixInstall))
@@ -140,26 +164,26 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 	if (!SlipObject_SetPosition(objectTable, objectTableBytes, 0, (uint32_t)projection.camera.x,
 	                            (uint32_t)projection.camera.y, (uint32_t)projection.camera.z, &cameraPosition))
 		return;
-	SlipDraw3D_SetProjectionMode(projectState, 1);
+	SlipDraw3D_SetProjectionMode(projectState, SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC);
 	SlipDraw3D_SetCameraDistance(projectState, (uint32_t)cameraDistance);
 	projection.projectState = projectState;
 
 	const bool nativeMap = SlipRaceDisplay_BeginMap();
 
-	if (trkData != NULL && trkBytes >= 6u &&
-	    (uint16_t)((uint16_t)trkData[4] | (uint16_t)((uint16_t)trkData[5] << 8)) != 0 && trdData != NULL &&
-	    trdBytes >= 10u) {
-		routeOffset = (uint16_t)((uint16_t)trdData[8] | (uint16_t)((uint16_t)trdData[9] << 8));
-		if (routeOffset != 0 && (size_t)routeOffset + 2u <= trdBytes) {
-			const uint16_t routeCount = (uint16_t)((uint16_t)trdData[routeOffset] |
-			                                       (uint16_t)((uint16_t)trdData[(size_t)routeOffset + 1u] << 8));
-			size_t recordOffset = (size_t)routeOffset + 2u;
+	if (trkData != NULL && trkBytes >= SLIP_TRACK_LINKED_HEADER_BYTES &&
+	    SlipBytes_ReadLE16(trkData + SLIP_TRACK_LINKED_OFFSET) != 0 && trdData != NULL &&
+	    trdBytes >= SLIP_TRD_ROUTE_HEADER_BYTES) {
+		routeOffset = SlipBytes_ReadLE16(trdData + SLIP_TRD_ROUTE_TABLE_OFFSET);
+		if (routeOffset != 0 && (size_t)routeOffset + SLIP_TRD_TABLE_COUNT_BYTES <= trdBytes) {
+			const uint16_t routeCount = SlipBytes_ReadLE16(trdData + routeOffset);
+			size_t recordOffset = (size_t)routeOffset + SLIP_TRD_TABLE_COUNT_BYTES;
 
 			if (nativeMap)
 				SlipRaceGpu_DrawMapRoute(&projection.matrix, &projection.camera, projection.projectState, trdData,
 				                         trdBytes, recordOffset, routeCount, routeColor);
-			for (uint16_t index = 0; !nativeMap && index < routeCount && recordOffset + 0x32u <= trdBytes;
-			     ++index, recordOffset += 0x32u) {
+			for (uint16_t index = 0;
+			     !nativeMap && index < routeCount && recordOffset + SLIP_TRD_ROUTE_RECORD_BYTES <= trdBytes;
+			     ++index, recordOffset += SLIP_TRD_ROUTE_RECORD_BYTES) {
 				SlipView3DVec32 position;
 				SlipDraw3DVec32 transformedPosition;
 				SlipView3DVec32 linkedPosition;
@@ -167,35 +191,16 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 				const SlipDraw3DVec32 *points[2];
 				uint16_t linkedOffset;
 
-				position.x =
-				    (int32_t)((uint32_t)trdData[recordOffset + 0x0cu] | ((uint32_t)trdData[recordOffset + 0x0du] << 8) |
-				              ((uint32_t)trdData[recordOffset + 0x0eu] << 16) |
-				              ((uint32_t)trdData[recordOffset + 0x0fu] << 24));
-				position.y =
-				    (int32_t)((uint32_t)trdData[recordOffset + 0x10u] | ((uint32_t)trdData[recordOffset + 0x11u] << 8) |
-				              ((uint32_t)trdData[recordOffset + 0x12u] << 16) |
-				              ((uint32_t)trdData[recordOffset + 0x13u] << 24));
-				position.z =
-				    (int32_t)((uint32_t)trdData[recordOffset + 0x14u] | ((uint32_t)trdData[recordOffset + 0x15u] << 8) |
-				              ((uint32_t)trdData[recordOffset + 0x16u] << 16) |
-				              ((uint32_t)trdData[recordOffset + 0x17u] << 24));
+				position.x = SlipBytes_ReadLEI32(trdData + recordOffset + SLIP_TRD_POSITION_X_OFFSET);
+				position.y = SlipBytes_ReadLEI32(trdData + recordOffset + SLIP_TRD_POSITION_Y_OFFSET);
+				position.z = SlipBytes_ReadLEI32(trdData + recordOffset + SLIP_TRD_POSITION_Z_OFFSET);
 				transformedPosition = SlipRaceMap_Transform(&projection, position);
 
-				linkedOffset =
-				    (uint16_t)((uint16_t)trdData[recordOffset] | (uint16_t)((uint16_t)trdData[recordOffset + 1u] << 8));
-				if (linkedOffset != 0 && (size_t)linkedOffset + 0x18u <= trdBytes) {
-					linkedPosition.x = (int32_t)((uint32_t)trdData[(size_t)linkedOffset + 0x0cu] |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x0du] << 8) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x0eu] << 16) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x0fu] << 24));
-					linkedPosition.y = (int32_t)((uint32_t)trdData[(size_t)linkedOffset + 0x10u] |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x11u] << 8) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x12u] << 16) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x13u] << 24));
-					linkedPosition.z = (int32_t)((uint32_t)trdData[(size_t)linkedOffset + 0x14u] |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x15u] << 8) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x16u] << 16) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x17u] << 24));
+				linkedOffset = SlipBytes_ReadLE16(trdData + recordOffset + SLIP_TRD_ROUTE_FIRST_LINK_OFFSET);
+				if (linkedOffset != 0 && (size_t)linkedOffset + SLIP_TRD_POSITION_RECORD_BYTES <= trdBytes) {
+					linkedPosition.x = SlipBytes_ReadLEI32(trdData + (size_t)linkedOffset + SLIP_TRD_POSITION_X_OFFSET);
+					linkedPosition.y = SlipBytes_ReadLEI32(trdData + (size_t)linkedOffset + SLIP_TRD_POSITION_Y_OFFSET);
+					linkedPosition.z = SlipBytes_ReadLEI32(trdData + (size_t)linkedOffset + SLIP_TRD_POSITION_Z_OFFSET);
 					transformedLinkedPosition = SlipRaceMap_Transform(&projection, linkedPosition);
 					points[0] = &transformedPosition;
 					points[1] = &transformedLinkedPosition;
@@ -207,21 +212,11 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 					}
 				}
 
-				linkedOffset = (uint16_t)((uint16_t)trdData[recordOffset + 4u] |
-				                          (uint16_t)((uint16_t)trdData[recordOffset + 5u] << 8));
-				if (linkedOffset != 0 && (size_t)linkedOffset + 0x18u <= trdBytes) {
-					linkedPosition.x = (int32_t)((uint32_t)trdData[(size_t)linkedOffset + 0x0cu] |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x0du] << 8) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x0eu] << 16) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x0fu] << 24));
-					linkedPosition.y = (int32_t)((uint32_t)trdData[(size_t)linkedOffset + 0x10u] |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x11u] << 8) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x12u] << 16) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x13u] << 24));
-					linkedPosition.z = (int32_t)((uint32_t)trdData[(size_t)linkedOffset + 0x14u] |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x15u] << 8) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x16u] << 16) |
-					                             ((uint32_t)trdData[(size_t)linkedOffset + 0x17u] << 24));
+				linkedOffset = SlipBytes_ReadLE16(trdData + recordOffset + SLIP_TRD_ROUTE_SECOND_LINK_OFFSET);
+				if (linkedOffset != 0 && (size_t)linkedOffset + SLIP_TRD_POSITION_RECORD_BYTES <= trdBytes) {
+					linkedPosition.x = SlipBytes_ReadLEI32(trdData + (size_t)linkedOffset + SLIP_TRD_POSITION_X_OFFSET);
+					linkedPosition.y = SlipBytes_ReadLEI32(trdData + (size_t)linkedOffset + SLIP_TRD_POSITION_Y_OFFSET);
+					linkedPosition.z = SlipBytes_ReadLEI32(trdData + (size_t)linkedOffset + SLIP_TRD_POSITION_Z_OFFSET);
 					transformedLinkedPosition = SlipRaceMap_Transform(&projection, linkedPosition);
 					points[0] = &transformedPosition;
 					points[1] = &transformedLinkedPosition;
@@ -235,29 +230,19 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 			}
 		}
 		{
-			const uint16_t startOffset = (uint16_t)((uint16_t)trdData[6] | (uint16_t)((uint16_t)trdData[7] << 8));
-			if (startOffset != 0 && (size_t)startOffset + 0x20u <= trdBytes) {
+			const uint16_t startOffset = SlipBytes_ReadLE16(trdData + SLIP_TRD_START_OFFSET);
+			if (startOffset != 0 && (size_t)startOffset + SLIP_TRD_START_RECORD_BYTES <= trdBytes) {
 				SlipView3DVec32 finish;
 				SlipDraw3DVec32 transformedFinish;
 				int32_t projectedX;
 				int32_t projectedY;
 				const uint16_t finishOffset =
-				    (uint16_t)((uint16_t)trdData[(size_t)startOffset + 0x1eu] |
-				               (uint16_t)((uint16_t)trdData[(size_t)startOffset + 0x1fu] << 8));
+				    SlipBytes_ReadLE16(trdData + startOffset + SLIP_TRD_START_FINISH_LINK_OFFSET);
 
-				if (finishOffset != 0 && (size_t)finishOffset + 0x18u <= trdBytes) {
-					finish.x = (int32_t)((uint32_t)trdData[(size_t)finishOffset + 0x0cu] |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x0du] << 8) |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x0eu] << 16) |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x0fu] << 24));
-					finish.y = (int32_t)((uint32_t)trdData[(size_t)finishOffset + 0x10u] |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x11u] << 8) |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x12u] << 16) |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x13u] << 24));
-					finish.z = (int32_t)((uint32_t)trdData[(size_t)finishOffset + 0x14u] |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x15u] << 8) |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x16u] << 16) |
-					                     ((uint32_t)trdData[(size_t)finishOffset + 0x17u] << 24));
+				if (finishOffset != 0 && (size_t)finishOffset + SLIP_TRD_POSITION_RECORD_BYTES <= trdBytes) {
+					finish.x = SlipBytes_ReadLEI32(trdData + (size_t)finishOffset + SLIP_TRD_POSITION_X_OFFSET);
+					finish.y = SlipBytes_ReadLEI32(trdData + (size_t)finishOffset + SLIP_TRD_POSITION_Y_OFFSET);
+					finish.z = SlipBytes_ReadLEI32(trdData + (size_t)finishOffset + SLIP_TRD_POSITION_Z_OFFSET);
 					if (nativeMap) {
 						SlipRaceGpu_DrawMapFinish(&projection.matrix, &projection.camera, projection.projectState,
 						                          finish, finishColor);
@@ -274,21 +259,21 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 		}
 	}
 
-	nextSlotAddress = slots[activeIndex].nextSlotAddress;
-	while (nextSlotAddress != activeListAddress) {
+	nextSlotToken = slots[activeIndex].nextSlotAddress;
+	while (nextSlotToken != activeListToken) {
 		size_t slotIndex;
 		const SlipTrackSlotRecord *slot;
 
-		if (nextSlotAddress < slotListBaseAddress || (nextSlotAddress - slotListBaseAddress) % sizeof(*slots) != 0) {
+		if (nextSlotToken < slotListBaseToken || (nextSlotToken - slotListBaseToken) % sizeof(*slots) != 0) {
 			break;
 		}
-		slotIndex = (nextSlotAddress - slotListBaseAddress) / sizeof(*slots);
+		slotIndex = (nextSlotToken - slotListBaseToken) / sizeof(*slots);
 		if (slotIndex >= slotCount) {
 			break;
 		}
 		slot = &slots[slotIndex];
-		nextSlotAddress = slot->nextSlotAddress;
-		if ((slot->flags & 4u) != 0 && slot->ownerObjectOffset != playerObject &&
+		nextSlotToken = slot->nextSlotAddress;
+		if ((slot->flags & SLIP_TRACK_SLOT_ARTICULATED_BOUNDS) != 0 && slot->ownerObjectOffset != playerObject &&
 		    slot->ownerObjectOffset != rivalObject) {
 			SlipRaceMap_DrawObject(&projection, objectTable, objectTableBytes, (uint16_t)slot->ownerObjectOffset,
 			                       (uint8_t)objectColor);
@@ -302,7 +287,7 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 	if (nativeMap)
 		SlipRaceDisplay_EndMap();
 
-	SlipDraw3D_SetProjectionMode(projectState, 0);
+	SlipDraw3D_SetProjectionMode(projectState, SLIP_DRAW3D_PROJECTION_PERSPECTIVE);
 	SlipDraw3D_SetViewport(projectState, (int16_t)savedViewport.clipMinX, (uint16_t)savedViewport.clipMinY,
 	                       (uint16_t)savedViewport.clipMaxX, (uint16_t)savedViewport.clipMaxY,
 	                       (uint32_t)savedViewport.clipCenterX, (uint32_t)savedViewport.clipCenterY);

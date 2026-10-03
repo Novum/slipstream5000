@@ -1,15 +1,21 @@
 #include "refuel_beams.h"
+#include "actor_tags.h"
 
 void SlipRefuel_BuildBeams(SlipRefuelBeamState *state, uint32_t section, uint16_t firstDrawOffset,
                            const SlipTrackDrawRecord *drawRecords, uint32_t drawRecordsAddress,
                            const SlipView3DMaths *maths, uint32_t incomingX, uint32_t incomingY,
                            const SlipRefuelBeamCalls *calls) {
 
-	enum { SLIP_REFUEL_SLOT_EMITS_BEAMS = 4u };
+	enum {
+		SLIP_REFUEL_SLOT_EMITS_BEAMS = 4u,
+		SLIP_REFUEL_BEAMS_PER_SLOT = 8,
+		SLIP_REFUEL_BEAM_ROTATION_VARIATION_SHIFT = 4,
+		SLIP_REFUEL_BEAM_LENGTH = 0xee480
+	};
 
-	const uint32_t mainPartTag = 0x6d61696e;
-	const uint32_t leftLaserTag = 0x6c61736c;
-	const uint32_t rightLaserTag = 0x6c617372;
+	const uint32_t mainPartTag = SLIP_ACTOR_PART_MAIN;
+	const uint32_t leftLaserTag = SLIP_ACTOR_POINT_LEFT_LASER;
+	const uint32_t rightLaserTag = SLIP_ACTOR_POINT_RIGHT_LASER;
 	if (section != state->section || state->built != 0)
 		return;
 	state->built = UINT32_MAX;
@@ -25,7 +31,7 @@ void SlipRefuel_BuildBeams(SlipRefuelBeamState *state, uint32_t section, uint16_
 		if ((slot->flags & SLIP_REFUEL_SLOT_EMITS_BEAMS) != 0) {
 			state->active = UINT32_MAX;
 			bool rightSide = false;
-			for (uint32_t remaining = 8; remaining != 0; --remaining) {
+			for (uint32_t remaining = SLIP_REFUEL_BEAMS_PER_SLOT; remaining != 0; --remaining) {
 				rightSide = !rightSide;
 				SlipView3DVec32 start = {(int32_t)incomingX, (int32_t)incomingY, (int32_t)remaining};
 				calls->position(calls->context, object, mainPartTag, rightSide ? rightLaserTag : leftLaserTag, &start);
@@ -38,14 +44,15 @@ void SlipRefuel_BuildBeams(SlipRefuelBeamState *state, uint32_t section, uint16_
 				(void)calls->random(calls->context);
 				const int16_t pitch = (int16_t)calls->random(calls->context);
 				SlipView3D_ApplyPitchMatrix(maths, pitch, &beamMatrix);
-				int16_t rotation = (int16_t)(calls->random(calls->context) >> 4);
+				int16_t rotation =
+				    (int16_t)(calls->random(calls->context) >> SLIP_REFUEL_BEAM_ROTATION_VARIATION_SHIFT);
 				const int16_t rotationSign = (int16_t)calls->random(calls->context);
 				if (rotationSign < 0)
 					rotation = (int16_t)-rotation;
 				SlipView3D_ApplyRow0Row2Rotation(maths, rotation, &beamMatrix);
 				SlipView3D_OrthonormalizeForwardBasis(&beamMatrix);
 				SlipView3DVec32 displacement =
-				    SlipView3D_ScaleVector(beamMatrix.m[6], beamMatrix.m[7], beamMatrix.m[8], 0xee480);
+				    SlipView3D_ScaleVector(beamMatrix.m[6], beamMatrix.m[7], beamMatrix.m[8], SLIP_REFUEL_BEAM_LENGTH);
 				SlipView3DVec32 end = {(int32_t)((uint32_t)start.x + (uint32_t)displacement.x),
 				                       (int32_t)((uint32_t)start.y + (uint32_t)displacement.y),
 				                       (int32_t)((uint32_t)start.z + (uint32_t)displacement.z)};

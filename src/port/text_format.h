@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-enum { SLIP_TEXT_LOWERCASE_DIGITS = 0x80u };
+enum { SLIP_TEXT_LOWERCASE_DIGITS = 0x80u, SLIP_TEXT_EXPANSION_BUFFER_BYTES = 100 };
 
 typedef union SlipTextArgument {
 	const int16_t *word;
@@ -12,7 +12,7 @@ typedef union SlipTextArgument {
 } SlipTextArgument;
 
 typedef struct SlipTextExpansion {
-	char text[100];
+	char text[SLIP_TEXT_EXPANSION_BUFFER_BYTES];
 	const char *continuation;
 	uint32_t byteCount;
 } SlipTextExpansion;

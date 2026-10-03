@@ -1,7 +1,11 @@
 #include "track_view_render.h"
+#include "actor_format.h"
+#include "actor_tags.h"
 #include "byte_order.h"
 #include "config_settings.h"
+#include "fixed_point.h"
 #include "gpu/renderer.h"
+#include "material_format.h"
 #include "material_frames.h"
 #include "material_host.h"
 #include "menu_resources.h"
@@ -13,6 +17,8 @@
 #include "renderer_state.h"
 #include "renderer_vertices.h"
 #include "shape_format.h"
+#include "sprite_format.h"
+#include "track_format.h"
 
 #include "actor_render.h"
 #include "artic_slot.h"
@@ -39,6 +45,7 @@
 #include "timed_values.h"
 #include "track_assets.h"
 #include "track_world.h"
+#include "vehicle_viewer.h"
 #include "view3d.h"
 
 #include <limits.h>
@@ -50,14 +57,310 @@
 
 static void TrackView_WriteLE32(uint8_t *p, uint32_t value);
 
-static uint16_t TrackView_effectRandomState = 0x5a4a;
+enum { SLIP_TRACK_EFFECT_RANDOM_INITIAL_SEED = 0x5a4a };
+
+static uint16_t TrackView_effectRandomState = SLIP_TRACK_EFFECT_RANDOM_INITIAL_SEED;
 static SlipRefuelBeamState TrackView_refuelBeams;
 
 enum {
 	kDriverCount = SLIPSTREAM_DRIVER_COUNT,
 	TRACK_VIEW_DIAGNOSTIC_POINT_BUFFER_BASE = 0x00018880u,
+	SLIP_CALLBACK_PAYLOAD_UPPER_WORD_MASK = 0xffff0000u,
+	SLIP_IMPACT_SPRITE_SELECTION_ATTEMPTS = 4,
+	SLIP_IMPACT_SPRITE_RADIUS = 0xa00,
+	SLIP_CLOUD_FULL_DETAIL_MINIMUM_WIDTH = 400,
+	/* SLIP_RENDER_MASKED_TEXTURE and SLIP_RENDER_ALTERNATE_TEXTURE_RASTER. */
+	SLIP_CLOUD_RENDER_FLAGS = 0x30u,
+	SLIP_VEHICLE_DIAGNOSTIC_PAYLOAD_DUMP_BYTES = 160,
+	SLIP_PRIMITIVE_DIAGNOSTIC_PAYLOAD_DUMP_BYTES = 64,
+	SLIP_TEXTURED_RASTER_VISIT_CAPACITY = 512,
+	SLIP_GPU_WORLD_TEXTURE_VERTEX_CAPACITY = 128,
+	SLIP_MATERIAL_SETUP_SEED_CAPACITY = 16,
+	SLIP_MATERIAL_SETUP_DIAGNOSTIC_RECORD_LIMIT = 16,
+	SLIP_COMPONENT_TAIL_VISIT_CAPACITY = 128,
+	SLIP_PRIMITIVE_WALKER_VISIT_CAPACITY = 128,
+	SLIP_DIRECT_CALLBACK_VISIT_CAPACITY = 256,
+	SLIP_POST_PLANE_DIAGNOSTIC_VISIT_LIMIT = 16,
+	SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY = 256,
+	SLIP_RENDER_FULL_DETAIL_LEVEL = 3,
 
-	SLIP_TRACK_PRIMITIVE_REPLAY_PLANE = 0x02u,
+	SLIP_TRACK_PRIMITIVE_REPLAY_PLANE = SLIP_TRC_PRIMITIVE_REPLAY_PLANE,
+	SLIP_TRACK_PRIMITIVE_REPLAY_LIGHT_ANGLE = 0x3f00,
+	SLIP_TRACK_PRIMITIVE_REPLAY_MAXIMUM_NORMAL_Y_Q14 = 0x3000,
+	SLIP_TRACK_TEXTURE_SCROLL_ACCUMULATOR_MASK = 0x7fff,
+	SLIP_TRACK_TEXTURE_SCROLL_FRACTION_MASK = SLIP_Q14_ONE - 1,
+	SLIP_TRACK_TEXTURE_SCROLL_TOKEN_MASK = 0x3ff,
+	SLIP_TRACK_TEXTURE_SCROLL_REVERSE_TOKEN_START = 0x200,
+	SLIP_VEHICLE_PREVIEW_DIRECT_LIGHT_Q14 = SLIP_Q14_ONE,
+	SLIP_VEHICLE_PREVIEW_LIGHT_DIAGONAL_Q14 = -11594,
+	SLIP_VEHICLE_PREVIEW_ORIGINAL_PART_CAPACITY = 16,
+	SLIP_VEHICLE_PREVIEW_VIEWPORT_LEFT = 31,
+	SLIP_VEHICLE_PREVIEW_VIEWPORT_TOP = 14,
+	SLIP_VEHICLE_PREVIEW_VIEWPORT_RIGHT = 287,
+	SLIP_VEHICLE_PREVIEW_VIEWPORT_BOTTOM = 183,
+	SLIP_VEHICLE_PREVIEW_VIEWPORT_CENTER_X = 159,
+	SLIP_VEHICLE_PREVIEW_VIEWPORT_CENTER_Y = 98,
+	SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES = SLIP_MENU_ARCHIVE_PATH_BYTES,
+	SLIP_VEHICLE_PREVIEW_RESOURCE_NAME_BYTES = 32,
+	SLIP_TRACK_MATERIAL_NAME_BUFFER_BYTES = 16,
+	SLIP_MATERIAL_ANIMATED_POLYGON_COUNT = 8,
+	SLIP_MATERIAL_ANIMATED_QUAD_BYTES =
+	    sizeof(uint16_t) + SLIP_POLYGON_RECTANGLE_VERTICES * SLIP_SERIALIZED_INDEX_BYTES,
+	SLIP_VEHICLE_DESCRIPTION_LEFT = 33,
+	SLIP_VEHICLE_DESCRIPTION_RIGHT = 285,
+	SLIP_VEHICLE_DESCRIPTION_TOP = 130,
+	SLIP_VEHICLE_DESCRIPTION_BOTTOM = 179,
+	SLIP_MASKED_RASTER_DIAGNOSTIC_VISIT_LIMIT = 80,
+	SLIP_CROSS_EFFECT_MAXIMUM_DETAIL = 100,
+	SLIP_CROSS_EFFECT_POINT_MAXIMUM_DETAIL = 2,
+	/* Q14 sine/cosine scaled to one quarter of the projected detail size. */
+	SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT = SLIP_Q14_FRACTION_BITS + 2,
+	SLIP_DIAGNOSTIC_VEHICLE_BOX_LEFT = 151,
+	SLIP_DIAGNOSTIC_VEHICLE_BOX_RIGHT = 169,
+	SLIP_DIAGNOSTIC_VEHICLE_BOX_TOP = 107,
+	SLIP_DIAGNOSTIC_VEHICLE_BOX_BOTTOM = 115,
+	SLIP_VEHICLE_PREVIEW_AMBIENT_LIGHT_Q14 = 0x0c00,
+	SLIP_MATERIAL_ANIMATION_PHASE_MASK = SLIP_Q14_ONE - 1,
+	SLIP_MATERIAL_ANIMATION_AMPLITUDE_SHIFT = 1,
+	SLIP_MATERIAL_PERSPECTIVE_DEPTH_THRESHOLD = 683200,
+	SLIP_MATERIAL_LINES_MAXIMUM_DEPTH = 19520000,
+	SLIP_MATERIAL_TWO_COLOUR_LINES_MAXIMUM_DEPTH = 1561600,
+	SLIP_MATERIAL_DARK_LINES_MAXIMUM_DEPTH = 3904000,
+	SLIP_MATERIAL_DARK_LINES_DETAIL_DEPTH = 1952,
+	SLIP_MATERIAL_ANIMATED_POLYGONS_MAXIMUM_DEPTH = 2147200,
+	SLIP_MATERIAL_FLOOR_LIGHTS_MAXIMUM_DEPTH = 1708000,
+	SLIP_MATERIAL_POLYGONS_MAXIMUM_DEPTH = 2732800,
+	SLIP_MATERIAL_ROAD_LINES_MAXIMUM_DEPTH = 1464000,
+	SLIP_MATERIAL_NO_POLYGON_COLOUR = UINT16_MAX,
+	SLIP_MATERIAL_DASH_PHASE_SHIFT = 11,
+	SLIP_MATERIAL_DASH_PHASE_COUNT = 4,
+	SLIP_MATERIAL_DASH_PHASE_MASK = SLIP_MATERIAL_DASH_PHASE_COUNT - 1,
+	SLIP_MATERIAL_DASH_ACCUMULATOR_MASK = (SLIP_MATERIAL_DASH_PHASE_COUNT << SLIP_MATERIAL_DASH_PHASE_SHIFT) - 1,
+	SLIP_MATERIAL_DASH_DETAIL_PAIR_COUNT = 8,
+	SLIP_MATERIAL_DASH_LISTS_PER_PAIR = 2,
+	SLIP_MATERIAL_DASH_LIST_ADDRESS_BYTES = sizeof(uint32_t),
+	SLIP_MATERIAL_DASH_PAIR_BYTES = SLIP_MATERIAL_DASH_LISTS_PER_PAIR * SLIP_MATERIAL_DASH_LIST_ADDRESS_BYTES,
+	SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES = sizeof(uint16_t),
+	/* Bits recorded in the primitive callback diagnostics. */
+	SLIP_TRACK_CALLBACK_SKIPPED = 1u,
+	SLIP_TRACK_CALLBACK_TEXTURED = 2u,
+	SLIP_TRACK_CALLBACK_SPECIAL_PLANE = 4u,
+	SLIP_TRACK_CALLBACK_PLANE_REJECTED = 8u,
+	SLIP_TRACK_CALLBACK_GLOBAL_GATE_REJECTED = 16u,
+	SLIP_TRACK_CALLBACK_HIGH_TEXTURED_PATH = 32u,
+	SLIP_TRACK_SPRITE_MINIMUM_SOLID_RADIUS = 16384,
+	SLIP_VEHICLE_PREVIEW_ANIMATED_PART_COUNT = 4,
+	SLIP_VEHICLE_PREVIEW_INITIAL_TIMER_SAMPLES = 2,
+	SLIP_VEHICLE_PREVIEW_ACTOR_ANGLE_STEP = SLIP_ANGLE_QUARTER_TURN,
+	SLIP_VEHICLE_PREVIEW_FAN_ANGLE_STEP = SLIP_ANGLE_HALF_TURN - 1,
+	SLIP_VEHICLE_PREVIEW_JET_RATE_SHIFT = 1,
+	SLIP_REFUEL_COLOUR_RAMP_START = 0x40,
+	SLIP_REFUEL_COLOUR_RAMP_END = 0x4f,
+};
+
+/* Original routine addresses retained as identifiers in diagnostic traces. */
+enum {
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_VISIBILITY_COUNT = 0x00039e7cu,
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_LIST_ENTRY = 0x00039e67u,
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_TRANSFORM = 0x00039f27u,
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_VIEW_MATRIX = 0x00039f54u,
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_COMPONENT_LIST = 0x00039f7eu,
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_CHILD_LIST_DISPATCH = 0x0003a468u,
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_PRIMITIVE_LIST = 0x00039fafu,
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_BOUNDS = 0x00039fb6u,
+	TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_PRE_GATE = 0x0003a065u,
+	TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_DRAW_GATE = 0x0003a128u,
+	TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_RELATED_SCAN = 0x0003a166u,
+	TRACK_VIEW_DIAGNOSTIC_RELATED_CHILD_LIST_DISPATCH = 0x0003a204u,
+	TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_RANGE = 0x0003a218u,
+	TRACK_VIEW_DIAGNOSTIC_NESTED_PRIMITIVE_SETUP = 0x0003a34cu,
+	TRACK_VIEW_DIAGNOSTIC_RELATED_OBJECT_RECORD = 0x0003a39cu,
+	TRACK_VIEW_DIAGNOSTIC_STORED_COMPONENT_CHILD_LIST_DISPATCH = 0x0003a3e3u,
+	TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_DRAW_ADVANCE = 0x0003a40du,
+	TRACK_VIEW_DIAGNOSTIC_DIRECT_PRIMITIVE_HEADER = 0x00038754u,
+	TRACK_VIEW_DIAGNOSTIC_CLASSIFY_SOURCE_PLANE = 0x000193ffu,
+	TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_CALLBACK_DISPATCH = 0x0003872cu,
+	TRACK_VIEW_DIAGNOSTIC_HIGH_TEXTURED_CALLBACK = 0x00038795u,
+	TRACK_VIEW_DIAGNOSTIC_TEXTURED_PERSPECTIVE_DEPTH = 0x00019354u,
+	TRACK_VIEW_DIAGNOSTIC_TEXTURED_EMIT_GATE = 0x00019e0du,
+	TRACK_VIEW_DIAGNOSTIC_TEXTURED_DISPATCH_FALLBACK = 0x00019eafu,
+	TRACK_VIEW_DIAGNOSTIC_LOCK_TEXTURE_PAYLOAD = 0x000248a5u,
+	TRACK_VIEW_DIAGNOSTIC_TEXTURE_ROW_TABLE = 0x0002d91au,
+	TRACK_VIEW_DIAGNOSTIC_AFFINE_TEXTURED_ENTRY = 0x00030600u,
+	TRACK_VIEW_DIAGNOSTIC_AFFINE_HORIZONTAL_SPAN = 0x0003072eu,
+	TRACK_VIEW_DIAGNOSTIC_AFFINE_EDGE_STEPS = 0x000316d3u,
+	TRACK_VIEW_DIAGNOSTIC_AFFINE_SCANLINE_LOOP = 0x00030676u,
+	TRACK_VIEW_DIAGNOSTIC_PERSPECTIVE_TEXTURED_ENTRY = 0x000308e2u,
+	TRACK_VIEW_DIAGNOSTIC_OPAQUE_PERSPECTIVE_POLYGON = 0x00030978u,
+	TRACK_VIEW_DIAGNOSTIC_MASKED_PERSPECTIVE_POLYGON = 0x0002dc2fu,
+	TRACK_VIEW_DIAGNOSTIC_OPAQUE_AFFINE_POLYGON = 0x00030e48u,
+	TRACK_VIEW_DIAGNOSTIC_ACTIVE_MATERIAL_EMIT = 0x0001c0a1u,
+	TRACK_VIEW_DIAGNOSTIC_COMPONENT_TRAVERSAL_CALLBACK = 0x00039a6eu,
+	TRACK_VIEW_DIAGNOSTIC_LOAD_DRAW_STATE = 0x0001dbbeu,
+	TRACK_VIEW_DIAGNOSTIC_DIRECT_PRIMITIVE_LOOP = 0x000396dau,
+	TRACK_VIEW_DIAGNOSTIC_DRAW_COMPONENT_ACTORS = 0x00037b46u,
+	TRACK_VIEW_DIAGNOSTIC_CHUNK_PROJECT_INDEX = 0x0001cfa8u,
+	TRACK_VIEW_DIAGNOSTIC_DEFERRED_CALLBACK_GATE = 0x0003a5b6u,
+	TRACK_VIEW_DIAGNOSTIC_ACTOR_SHADED_RING = 0x0001b01au,
+	TRACK_VIEW_DIAGNOSTIC_CHILD_BUILD_VERTEX_RECORDS = 0x00037878u,
+	TRACK_VIEW_DIAGNOSTIC_CHILD_RESTORE_VERTEX_CURSOR = 0x000378a7u,
+	TRACK_VIEW_DIAGNOSTIC_COMPONENT_BUILD_VERTEX_RECORDS = 0x00039b7fu,
+	TRACK_VIEW_DIAGNOSTIC_COMPONENT_RESTORE_VERTEX_CURSOR = 0x00039c44u,
+	TRACK_VIEW_DIAGNOSTIC_OBJECT_RESTORE_VERTEX_CURSOR = 0x0003a43eu,
+	TRACK_VIEW_DIAGNOSTIC_UNCLIPPED_POLYGON = 0x0001dfa8u,
+	TRACK_VIEW_DIAGNOSTIC_MATERIAL_GATE = 0x0001ba7du,
+	TRACK_VIEW_DIAGNOSTIC_MATERIAL_NORMAL_COLOUR = 0x0001cce9u,
+	TRACK_VIEW_DIAGNOSTIC_REGULAR_MATERIAL_SETUP = 0x0001bbb1u,
+	TRACK_VIEW_DIAGNOSTIC_SOLID_RING = 0x0001bc0cu,
+	TRACK_VIEW_DIAGNOSTIC_FLAT_RING = 0x0001ae47u,
+	TRACK_VIEW_DIAGNOSTIC_MATERIAL_COLOUR_TRIPLET = 0x0001a1c8u,
+	TRACK_VIEW_DIAGNOSTIC_MATERIAL_VERTEX_SETUP = 0x0003f32au,
+	TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP = 0x0003f3c4u,
+	TRACK_VIEW_DIAGNOSTIC_BUILD_VERTEX_RECORDS = 0x0001dcf7u,
+	TRACK_VIEW_DIAGNOSTIC_RESTORE_VERTEX_CURSOR = 0x0001de44u,
+	TRACK_VIEW_DIAGNOSTIC_MATERIAL_STATE_POP = 0x0003f4e0u,
+	TRACK_VIEW_DIAGNOSTIC_STORE_CLIP_BOUNDS = 0x00018bd1u,
+	TRACK_VIEW_DIAGNOSTIC_PROJECT_INDEX = 0x00019746u,
+	TRACK_VIEW_DIAGNOSTIC_CAPTURE_POST_PLANE_RING = 0x0001ab34u,
+	TRACK_VIEW_DIAGNOSTIC_RELEASE_POST_PLANE_RING = 0x0001abb5u,
+	TRACK_VIEW_DIAGNOSTIC_REPLAY_LIST = 0x0003977au,
+	TRACK_VIEW_DIAGNOSTIC_REPLAY_OBJECT_DRAW = 0x00011eecu,
+	TRACK_VIEW_DIAGNOSTIC_FAR_MATERIAL_COLOUR_TRIPLET = 0x0001a290u,
+	TRACK_VIEW_DIAGNOSTIC_SHADED_TEN_LINES_LIST = 0x00040554u,
+	TRACK_VIEW_DIAGNOSTIC_ORANGE_DASH_MAIN_LIST = 0x0003f630u,
+	TRACK_VIEW_DIAGNOSTIC_ORANGE_DASH_DETAIL_LIST = 0x0003f697u,
+	TRACK_VIEW_DIAGNOSTIC_FLOOR_LIGHT_DASH_LIST = 0x0003fac9u,
+	TRACK_VIEW_DIAGNOSTIC_SECONDARY_COLOUR_LINE_LIST = 0x000411f6u,
+	TRACK_VIEW_DIAGNOSTIC_EXTENDED_MATERIAL_DISPATCH = 0x0003f2c8u,
+	TRACK_VIEW_DIAGNOSTIC_PREVIEW_BUILD_VERTEX_RECORDS = 0x00026242u,
+	TRACK_VIEW_DIAGNOSTIC_ACTOR_PREVIEW_RESTORE_VERTEX_CURSOR = 0x00025d80u,
+	TRACK_VIEW_DIAGNOSTIC_VEHICLE_PREVIEW_RESTORE_VERTEX_CURSOR = 0x00025efdu,
+};
+
+/* Original identifiers for embedded material lists and their draw routines. */
+enum {
+	TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_DATA_TOKEN = 0x0004109eu,
+	TRACK_VIEW_ROAD_LINE_POLYGONS_DATA_TOKEN = 0x00041584u,
+	TRACK_VIEW_ROAD_SURFACE_POLYGON_TOKEN = 0x0004159cu,
+	TRACK_VIEW_ROAD_DARK_SURFACE_POLYGON_TOKEN = 0x000415a4u,
+	TRACK_VIEW_ROAD_FIRST_LINE_POLYGON_TOKEN = TRACK_VIEW_ROAD_LINE_POLYGONS_DATA_TOKEN,
+	TRACK_VIEW_ROAD_SECOND_LINE_POLYGON_TOKEN = 0x0004158cu,
+	TRACK_VIEW_ROAD_THIRD_LINE_POLYGON_TOKEN = 0x00041594u,
+	TRACK_VIEW_SHADED_TRIANGLE_QUADS_DATA_TOKEN = 0x00040dc2u,
+	TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_DATA_TOKEN = 0x00040f6cu,
+	TRACK_VIEW_SECONDARY_COLOR_QUADS_DATA_TOKEN = 0x0004133eu,
+	TRACK_VIEW_ANIMATED_ORANGE_DASHES_DATA_TOKEN = 0x0003f6c0u,
+	TRACK_VIEW_ORANGE_DASH_DETAIL_PAIRS_DATA_TOKEN = 0x0003f6e0u,
+	TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_DATA_TOKEN = 0x0003faf8u,
+	TRACK_VIEW_THREE_LINE_DIAGONAL_DATA_TOKEN = 0x0004027cu,
+	TRACK_VIEW_SEVEN_LINE_FRAME_ALTERNATE_DATA_TOKEN = 0x0004034cu,
+	TRACK_VIEW_FIVE_LINE_FRAME_DATA_TOKEN = 0x000403d8u,
+	TRACK_VIEW_CAGE_FIVE_LINES_DATA_TOKEN = 0x00040464u,
+	TRACK_VIEW_CAGE_SIXTEEN_LINES_DATA_TOKEN = 0x000404e4u,
+	TRACK_VIEW_SHADED_TEN_LINES_DATA_TOKEN = 0x00040580u,
+	TRACK_VIEW_QUAD_OUTLINE_DATA_TOKEN = 0x000416d4u,
+	TRACK_VIEW_TWO_CONNECTED_LINES_DATA_TOKEN = 0x0004173cu,
+	TRACK_VIEW_TWO_CORNER_LINES_DATA_TOKEN = 0x00041798u,
+	TRACK_VIEW_CAGE_SEVEN_LINES_DATA_TOKEN = 0x0004017cu,
+	TRACK_VIEW_SEVEN_LINE_FRAME_DATA_TOKEN = 0x000402e4u,
+	TRACK_VIEW_THREE_LINE_STRIP_DATA_TOKEN = 0x00040208u,
+	TRACK_VIEW_SHADED_QUADS_DATA_TOKEN = 0x00040ba4u,
+	TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_DATA_TOKEN = 0x0004124au,
+	TRACK_VIEW_THREE_LINE_STRIP_SETUP_TOKEN = 0x0004021eu,
+	TRACK_VIEW_THREE_LINE_STRIP_DIAGNOSTIC_DRAW = 0x000401ebu,
+	TRACK_VIEW_THREE_LINE_DIAGONAL_SETUP_TOKEN = 0x0004028au,
+	TRACK_VIEW_THREE_LINE_DIAGONAL_DIAGNOSTIC_DRAW = 0x0004025fu,
+	TRACK_VIEW_SEVEN_LINE_FRAME_ALTERNATE_SETUP_TOKEN = 0x0004036au,
+	TRACK_VIEW_SEVEN_LINE_FRAME_ALTERNATE_DIAGNOSTIC_DRAW = 0x0004032fu,
+	TRACK_VIEW_FIVE_LINE_FRAME_SETUP_TOKEN = 0x000403f6u,
+	TRACK_VIEW_FIVE_LINE_FRAME_DIAGNOSTIC_DRAW = 0x000403bbu,
+	TRACK_VIEW_CAGE_FIVE_LINES_SETUP_TOKEN = 0x0004047au,
+	TRACK_VIEW_CAGE_FIVE_LINES_DIAGNOSTIC_DRAW = 0x00040447u,
+	TRACK_VIEW_CAGE_SIXTEEN_LINES_SETUP_TOKEN = 0x000404fau,
+	TRACK_VIEW_CAGE_SIXTEEN_LINES_DIAGNOSTIC_DRAW = 0x000404c7u,
+	TRACK_VIEW_QUAD_OUTLINE_SETUP_TOKEN = 0x000416e6u,
+	TRACK_VIEW_QUAD_OUTLINE_DIAGNOSTIC_DRAW = 0x000416b5u,
+	TRACK_VIEW_TWO_CONNECTED_LINES_SETUP_TOKEN = 0x00041746u,
+	TRACK_VIEW_TWO_CONNECTED_LINES_DIAGNOSTIC_DRAW = 0x0004171fu,
+	TRACK_VIEW_TWO_CORNER_LINES_SETUP_TOKEN = 0x000417a2u,
+	TRACK_VIEW_TWO_CORNER_LINES_DIAGNOSTIC_DRAW = 0x0004177bu,
+	TRACK_VIEW_SEVEN_LINE_FRAME_SETUP_TOKEN = 0x000402f2u,
+	TRACK_VIEW_SEVEN_LINE_FRAME_DIAGNOSTIC_DRAW = 0x000402c7u,
+	TRACK_VIEW_CAGE_SEVEN_LINES_SETUP_TOKEN = 0x0004019au,
+	TRACK_VIEW_CAGE_SEVEN_LINES_DIAGNOSTIC_DRAW = 0x0004015du,
+	TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_DATA_TOKEN = 0x000406f8u,
+	TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN = 0x0004092cu,
+};
+
+enum {
+	TRACK_VIEW_TWO_COLOUR_SIXTEEN_LINE_FRAME_LINES_TOKEN = 0x0003fd90u,
+	TRACK_VIEW_TWO_COLOUR_SIXTEEN_LINE_FRAME_SETUP_TOKEN = 0x0003fdf2u,
+	TRACK_VIEW_TWO_COLOUR_SHARED_FRAME_LINES_TOKEN = 0x0003ff0cu,
+	TRACK_VIEW_TWO_COLOUR_SHARED_FRAME_ALTERNATE_LINES_TOKEN = 0x0003ff90u,
+	TRACK_VIEW_TWO_COLOUR_SHARED_FRAME_SETUP_TOKEN = 0x0003ffb0u,
+	TRACK_VIEW_TWO_COLOUR_CROSS_FRAME_LINES_TOKEN = 0x00040054u,
+	TRACK_VIEW_TWO_COLOUR_CROSS_FRAME_INVERSE_LINES_TOKEN = 0x000400d8u,
+	TRACK_VIEW_TWO_COLOUR_CROSS_FRAME_SETUP_TOKEN = 0x000400f8u,
+	TRACK_VIEW_DIAGNOSTIC_TWO_COLOUR_LINE_LIST = 0x0003fd7du,
+	TRACK_VIEW_DIAGNOSTIC_LINE_PAIR = 0x0001bcaau,
+	SLIP_MATERIAL_LINE_LIST_HEADER_BYTES = sizeof(uint16_t),
+	SLIP_MATERIAL_LINE_PAIR_BYTES = 2 * sizeof(uint16_t),
+	SLIP_MATERIAL_COLOURED_LINE_SELECTOR_OFFSET = SLIP_MATERIAL_LINE_PAIR_BYTES,
+	SLIP_MATERIAL_COLOURED_LINE_BYTES = SLIP_MATERIAL_LINE_PAIR_BYTES + sizeof(uint16_t)
+};
+
+enum {
+	TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_SETUP_TOKEN = 0x000410deu,
+	TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_SECONDARY_BASE_TOKEN = 0x000410a0u,
+	TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_SECONDARY_DETAIL_TOKEN = 0x000410a8u,
+	TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_PRIMARY_TOKEN = 0x000410aeu,
+	TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_LINES_TOKEN = 0x000410b8u,
+	TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_DIAGNOSTIC_FAR_PATH = 0x00041080u,
+	TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_DIAGNOSTIC_LINES = 0x0004104au,
+	TRACK_VIEW_SHADED_QUADS_SETUP_TOKEN = 0x00040c18u,
+	TRACK_VIEW_SHADED_QUADS_SECONDARY_DETAIL_TOKEN = 0x00040bacu,
+	TRACK_VIEW_SHADED_QUADS_PRIMARY_TOKEN = 0x00040bb4u,
+	TRACK_VIEW_SHADED_QUADS_LINES_TOKEN = 0x00040bbcu,
+	TRACK_VIEW_SHADED_QUADS_DIAGNOSTIC_FAR_PATH = 0x00040b84u,
+	TRACK_VIEW_SHADED_QUADS_DIAGNOSTIC_LINES = 0x00040b4eu,
+	TRACK_VIEW_SHADED_TRIANGLE_QUADS_SETUP_TOKEN = 0x00040dfeu,
+	TRACK_VIEW_SHADED_TRIANGLE_QUADS_SECONDARY_DETAIL_TOKEN = 0x00040dcau,
+	TRACK_VIEW_SHADED_TRIANGLE_QUADS_PRIMARY_TOKEN = 0x00040dd0u,
+	TRACK_VIEW_SHADED_TRIANGLE_QUADS_LINES_TOKEN = 0x00040dd8u,
+	TRACK_VIEW_SHADED_TRIANGLE_QUADS_DIAGNOSTIC_FAR_PATH = 0x00040da2u,
+	TRACK_VIEW_SHADED_TRIANGLE_QUADS_DIAGNOSTIC_LINES = 0x00040d6cu,
+	TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_SECONDARY_DETAIL_TOKEN = 0x00040f74u,
+	TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_PRIMARY_TOKEN = 0x00040f7au,
+	TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_LINES_TOKEN = 0x00040f84u,
+	TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_DIAGNOSTIC_FAR_PATH = 0x00040f4cu,
+	TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_DIAGNOSTIC_LINES = 0x00040f16u,
+	TRACK_VIEW_SHADED_TEN_LINES_SETUP_LIST_TOKEN = 0x000405e2u,
+	TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_SETUP_LIST_TOKEN = 0x00040754u,
+	TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_NEAR_DETAIL_LINE_LIST_TOKEN = 0x00040722u,
+	TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_SETUP_LIST_TOKEN = 0x0004097cu,
+	TRACK_VIEW_ANIMATED_ORANGE_DASHES_SETUP_LIST_TOKEN = 0x0003f810u,
+	TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_ENTRY_TABLE_TOKEN = 0x0003fb00u,
+	TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_SETUP_LIST_TOKEN = 0x0003fbe0u,
+	TRACK_VIEW_ROAD_LINE_POLYGONS_SETUP_LIST_TOKEN = 0x000415acu,
+	TRACK_VIEW_SECONDARY_COLOR_QUADS_SETUP_LIST_TOKEN = 0x00041356u,
+	TRACK_VIEW_SECONDARY_COLOR_QUADS_SECONDARY_DETAIL_POLYGON_TOKEN = 0x00041346u,
+	TRACK_VIEW_SECONDARY_COLOR_QUADS_PRIMARY_POLYGON_TOKEN = 0x0004134eu,
+	TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_SECONDARY_BASE_POLYGON_TOKEN = 0x0004124cu,
+	TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_SECONDARY_DETAIL_POLYGON_TOKEN = 0x00041254u,
+	TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_PRIMARY_POLYGON_TOKEN = 0x0004125au,
+	TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_LINE_LIST_TOKEN = 0x00041264u,
+};
+
+enum {
+	SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES = 2 * sizeof(uint16_t),
+	SLIP_MATERIAL_VERTEX_SETUP_DERIVED_COUNT_OFFSET = sizeof(uint16_t),
+	SLIP_MATERIAL_VERTEX_INDEX_BYTES = sizeof(uint16_t),
+	SLIP_MATERIAL_MIDPOINT_RECORD_BYTES = 2 * SLIP_MATERIAL_VERTEX_INDEX_BYTES,
+	/* Preserve the original setup check for one word beyond the midpoint records. */
+	SLIP_MATERIAL_VERTEX_SETUP_TRAILING_BYTES = sizeof(uint16_t),
+	SLIP_MATERIAL_RAMP_UPPER_WORD_MASK = 0xffff0000u,
+	TRACK_VIEW_DIAGNOSTIC_BUILD_MATERIAL_MIDPOINTS = 0x0003f37du,
+	TRACK_VIEW_DIAGNOSTIC_BUILD_MATERIAL_SCREEN_MIDPOINTS = 0x0003f408u
 };
 
 const SlipRaceTrackFrameCallback g_trackViewFrameCallbacks[kDriverCount] = {
@@ -112,6 +415,10 @@ static void TrackView_DumpAffineTexturePayload(size_t recordOffset, const TrackV
                                                uint32_t rowScroll, const RasterTextureRowTable *rowTable);
 
 static void TrackView_CopyScreenSnapshot(uint8_t snapshot[SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT]);
+
+typedef struct TrackViewDiagnosticProbePixel {
+	int x, y;
+} TrackViewDiagnosticProbePixel;
 
 static void TrackView_DumpRecordDamage(size_t recordOffset, uint32_t dispatchFlags,
                                        const uint8_t before[SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT]);
@@ -513,7 +820,7 @@ static uint64_t g_vehicleViewLastTickMs;
 static int g_vehicleViewTimerSuppressedSamples;
 static SlipView3DMatrix g_trackSelectGlobeMatrix;
 static bool g_trackSelectGlobeMatrixValid;
-static int16_t g_vehicleViewFanAngles[4];
+static int16_t g_vehicleViewFanAngles[SLIP_VEHICLE_PREVIEW_ANIMATED_PART_COUNT];
 static int16_t g_vehicleViewJetAngle;
 static int16_t g_vehicleViewJetDirection;
 
@@ -545,11 +852,36 @@ static void TrackView_DumpTexturedDispatch(size_t recordOffset, uint32_t inputAc
 	}
 }
 
+/* Offsets of captured primitive records selected for vehicle-view diagnostics.
+ * These identify resource data records, rather than fields within each record. */
+enum { TRACK_VIEW_OPAQUE_DIAGNOSTIC_RECORD = 0x649b };
+
+static bool TrackView_DiagnosticRecordSelected(size_t recordOffset, const uint16_t *records, size_t count) {
+	for (size_t index = 0; index < count; ++index) {
+		if (recordOffset == records[index])
+			return true;
+	}
+	return false;
+}
+
 static bool TrackView_ShouldDumpAffineRecord(size_t recordOffset) {
-	return recordOffset == 0x52b8u || recordOffset == 0x52dcu || recordOffset == 0x5300u || recordOffset == 0x552eu ||
-	       recordOffset == 0x58fau || recordOffset == 0x591eu || recordOffset == 0x5c0eu || recordOffset == 0x5c2cu ||
-	       recordOffset == 0x649bu || recordOffset == 0x64d7u || recordOffset == 0x650du || recordOffset == 0x6619u ||
-	       recordOffset == 0x6637u;
+	static const uint16_t records[] = {
+	    0x52b8u, 0x52dcu, 0x5300u, 0x552eu, 0x58fau, 0x591eu, 0x5c0eu, 0x5c2cu, TRACK_VIEW_OPAQUE_DIAGNOSTIC_RECORD,
+	    0x64d7u, 0x650du, 0x6619u, 0x6637u};
+	return TrackView_DiagnosticRecordSelected(recordOffset, records, sizeof(records) / sizeof(records[0]));
+}
+
+static bool TrackView_ShouldDumpMaskedRecord(size_t recordOffset) {
+	static const uint16_t records[] = {
+	    0x65c9u, 0x65e7u, 0x6619u, 0x6637u, 0x6655u, 0x6673u, 0x6245u,
+	    0x6269u, 0x630du, 0x6355u, 0x63a1u, 0x63c5u, 0x6411u, TRACK_VIEW_OPAQUE_DIAGNOSTIC_RECORD,
+	    0x64d7u, 0x650du};
+	return TrackView_DiagnosticRecordSelected(recordOffset, records, sizeof(records) / sizeof(records[0]));
+}
+
+static bool TrackView_ShouldDumpCallbackRecord(size_t recordOffset) {
+	static const uint16_t records[] = {0x65c9u, 0x65e7u, 0x6619u, 0x6637u, 0x6655u, 0x6673u, 0x6245u};
+	return TrackView_DiagnosticRecordSelected(recordOffset, records, sizeof(records) / sizeof(records[0]));
 }
 
 static void TrackView_DumpAffineEntry(size_t recordOffset, const RasterAffineTexturedEntrySetup *affineEntry) {
@@ -612,16 +944,13 @@ static void TrackView_CopyScreenSnapshot(uint8_t snapshot[SLIPSTREAM_SCREEN_WIDT
 
 static void TrackView_DumpRecordDamage(size_t recordOffset, uint32_t dispatchFlags,
                                        const uint8_t before[SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT]) {
-	static const struct {
-		int x;
-		int y;
-	} probePixels[] = {
+	static const TrackViewDiagnosticProbePixel probePixels[] = {
 	    {59, 68},   {100, 68}, {150, 68}, {59, 80},   {100, 80}, {150, 80},
 	    {220, 130}, {239, 94}, {250, 94}, {240, 103}, {280, 71},
 	};
 
 	size_t changed = 0;
-	unsigned colorCounts[256] = {0};
+	unsigned colorCounts[UINT8_MAX + 1] = {0};
 	int minX = SLIPSTREAM_SCREEN_WIDTH;
 	int minY = SLIPSTREAM_SCREEN_HEIGHT;
 	int maxX = -1;
@@ -658,13 +987,14 @@ static void TrackView_DumpRecordDamage(size_t recordOffset, uint32_t dispatchFla
 				if (y > maxY) {
 					maxY = y;
 				}
-				if (x >= 151 && x <= 169 && y >= 107 && y <= 115) {
+				if (x >= SLIP_DIAGNOSTIC_VEHICLE_BOX_LEFT && x <= SLIP_DIAGNOSTIC_VEHICLE_BOX_RIGHT &&
+				    y >= SLIP_DIAGNOSTIC_VEHICLE_BOX_TOP && y <= SLIP_DIAGNOSTIC_VEHICLE_BOX_BOTTOM) {
 					++vehicleBoxChanged;
 				}
 			}
 		}
 	}
-	for (x = 0; x < 256; ++x) {
+	for (x = 0; x <= UINT8_MAX; ++x) {
 		if (colorCounts[x] > dominantCount) {
 			dominantCount = colorCounts[x];
 			dominantColor = (unsigned)x;
@@ -707,7 +1037,7 @@ static void TrackView_DumpAffineTexturePayload(size_t recordOffset, const TrackV
 	        rowTable != NULL ? rowTable->rotationRowOffset : 0u, rowTable != NULL ? rowTable->rowsWritten : 0u,
 	        rowTable != NULL && rowTable->directRows ? 1u : 0u,
 	        rowTable != NULL && rowTable->usedRotatedRows ? 1u : 0u);
-	TrackView_DumpPayloadBytes(payload->data, payload->size, 0xa0u);
+	TrackView_DumpPayloadBytes(payload->data, payload->size, SLIP_VEHICLE_DIAGNOSTIC_PAYLOAD_DUMP_BYTES);
 	fprintf(stderr, "\n");
 }
 
@@ -752,10 +1082,7 @@ static void TrackView_DumpMaskedRaster(size_t recordOffset, const RasterMaskedPe
 	if (!g_vehicleViewDumpDiagnostics || masked == NULL || visits == NULL) {
 		return;
 	}
-	if (recordOffset != 0x65c9u && recordOffset != 0x65e7u && recordOffset != 0x6619u && recordOffset != 0x6637u &&
-	    recordOffset != 0x6655u && recordOffset != 0x6673u && recordOffset != 0x6245u && recordOffset != 0x6269u &&
-	    recordOffset != 0x630du && recordOffset != 0x6355u && recordOffset != 0x63a1u && recordOffset != 0x63c5u &&
-	    recordOffset != 0x6411u && recordOffset != 0x649bu && recordOffset != 0x64d7u && recordOffset != 0x650du) {
+	if (!TrackView_ShouldDumpMaskedRecord(recordOffset)) {
 		return;
 	}
 	fprintf(stderr,
@@ -792,8 +1119,8 @@ static void TrackView_DumpMaskedRaster(size_t recordOffset, const RasterMaskedPe
 	if (visitLimit > visitCapacity) {
 		visitLimit = visitCapacity;
 	}
-	if (visitLimit > 80u) {
-		visitLimit = 80u;
+	if (visitLimit > SLIP_MASKED_RASTER_DIAGNOSTIC_VISIT_LIMIT) {
+		visitLimit = SLIP_MASKED_RASTER_DIAGNOSTIC_VISIT_LIMIT;
 	}
 	for (visitIndex = 0; visitIndex < visitLimit; ++visitIndex) {
 		const RasterMaskedPerspectiveTexturedPolygonVisit *const visit = &visits[visitIndex];
@@ -846,7 +1173,8 @@ static void TrackView_DumpOpaquePerspective(size_t recordOffset, const RasterOpa
 	size_t visitIndex;
 	size_t visitLimit;
 
-	if (!g_vehicleViewDumpDiagnostics || opaque == NULL || visits == NULL || recordOffset != 0x649bu) {
+	if (!g_vehicleViewDumpDiagnostics || opaque == NULL || visits == NULL ||
+	    recordOffset != TRACK_VIEW_OPAQUE_DIAGNOSTIC_RECORD) {
 		return;
 	}
 	fprintf(stderr,
@@ -981,7 +1309,7 @@ static bool TrackView_MaterialStatePop(TrackViewRawBspContext *context) {
 		        context->recordIndex, context->vertexBufferCursor, (void *)context->drawStateRecord,
 		        (void *)context->vertexBufferBase, context->drawStateRecordCount);
 	}
-	if (!TrackView_RestoreVertexBufferCursor(context, 0x0003f4e0u)) {
+	if (!TrackView_RestoreVertexBufferCursor(context, TRACK_VIEW_DIAGNOSTIC_MATERIAL_STATE_POP)) {
 		if (g_vehicleViewDumpDiagnostics) {
 			fprintf(stderr,
 			        "track_view_material_state_pop_0003f4e0 restore_failed bp=%u cursor=0x%08x state_ptr=%p "
@@ -1051,7 +1379,7 @@ static bool TrackView_StoreClipBounds(TrackViewRawBspContext *context, uint32_t 
 		return false;
 	}
 	SlipDraw3D_StoreClipBounds(context->projectState, minX, minY, maxX, maxY);
-	if (context->mode != 0u) {
+	if (context->mode != SLIP_DRAW3D_PROJECTION_PERSPECTIVE) {
 		return true;
 	}
 	if (!SlipDraw3D_RefreshProjectFrustum(context->projectState, context->mode, &refresh)) {
@@ -1158,24 +1486,26 @@ static bool TrackView_BuildVertexRecords(TrackViewRawBspContext *context, uint32
 
 bool TrackView_BuildChunkVertexRecords(const uint8_t *vertexSource, size_t sourceBytes, uint16_t vertexCount,
                                        int16_t sourceStride, void *userData) {
-	return TrackView_BuildVertexRecords((TrackViewRawBspContext *)userData, 0x00037878u, vertexSource, sourceBytes,
-	                                    vertexCount, sourceStride, TrackView_ChunkTransformPoint,
-	                                    TrackView_ChunkSourcePoint, NULL);
+	return TrackView_BuildVertexRecords(
+	    (TrackViewRawBspContext *)userData, TRACK_VIEW_DIAGNOSTIC_CHILD_BUILD_VERTEX_RECORDS, vertexSource, sourceBytes,
+	    vertexCount, sourceStride, TrackView_ChunkTransformPoint, TrackView_ChunkSourcePoint, NULL);
 }
 
 bool TrackView_RestoreChunkVertexBuffer(void *userData) {
-	return TrackView_RestoreVertexBufferCursor((TrackViewRawBspContext *)userData, 0x000378a7u);
+	return TrackView_RestoreVertexBufferCursor((TrackViewRawBspContext *)userData,
+	                                           TRACK_VIEW_DIAGNOSTIC_CHILD_RESTORE_VERTEX_CURSOR);
 }
 
 bool TrackView_BuildComponentVertexRecords(const uint8_t *vertexSource, size_t sourceBytes, uint16_t vertexCount,
                                            int16_t sourceStride, void *userData) {
-	return TrackView_BuildVertexRecords((TrackViewRawBspContext *)userData, 0x00039b7fu, vertexSource, sourceBytes,
-	                                    vertexCount, sourceStride, TrackView_TransformVertex, TrackView_SourcePoint,
-	                                    NULL);
+	return TrackView_BuildVertexRecords(
+	    (TrackViewRawBspContext *)userData, TRACK_VIEW_DIAGNOSTIC_COMPONENT_BUILD_VERTEX_RECORDS, vertexSource,
+	    sourceBytes, vertexCount, sourceStride, TrackView_TransformVertex, TrackView_SourcePoint, NULL);
 }
 
 bool TrackView_RestoreComponentVertexBuffer(void *userData) {
-	return TrackView_RestoreVertexBufferCursor((TrackViewRawBspContext *)userData, 0x00039c44u);
+	return TrackView_RestoreVertexBufferCursor((TrackViewRawBspContext *)userData,
+	                                           TRACK_VIEW_DIAGNOSTIC_COMPONENT_RESTORE_VERTEX_CURSOR);
 }
 
 bool TrackView_ApplyComponentLight(void *userData, const SlipTrackWorldComponentTail *tail) {
@@ -1248,7 +1578,8 @@ static bool TrackView_SlotDrawRecord(TrackViewRawBspContext *context, uint32_t r
 		return false;
 	}
 	recordOffset = recordAddress - context->slotDrawBaseAddress;
-	if ((size_t)recordOffset + 0x38u > context->slotDrawBytes || recordOffset % 0x38u != 0) {
+	if ((size_t)recordOffset + SLIP_TRACK_DRAW_RECORD_BYTES > context->slotDrawBytes ||
+	    recordOffset % SLIP_TRACK_DRAW_RECORD_BYTES != 0) {
 		return false;
 	}
 	*record = context->slotDrawBase + recordOffset;
@@ -1263,14 +1594,14 @@ static bool TrackView_ScheduleSlotDraw(TrackViewRawBspContext *context, SlipDraw
 	uint16_t objectOffset;
 	SlipObject *object;
 
-	objectOffset = (uint16_t)SlipBytes_ReadLE32(drawRecord + 0x34u);
+	objectOffset = (uint16_t)SlipBytes_ReadLE32(drawRecord + offsetof(SlipTrackDrawRecord, objectOffset));
 	if ((size_t)objectOffset + SLIP_OBJECT_DOS_STRIDE > context->objectTableBytes ||
 	    objectOffset % SLIP_OBJECT_DOS_STRIDE != 0) {
 		return false;
 	}
 	object = &context->objectTable[objectOffset / SLIP_OBJECT_DOS_STRIDE];
 
-	if ((object->flags & 0x0002u) != 0) {
+	if ((object->flags & SLIP_OBJECT_RENDER_HIDDEN) != 0) {
 		return true;
 	}
 	if (!SlipObject_ViewPosition(context->objectTable, context->objectTableBytes, objectOffset, &viewPosition)) {
@@ -1301,7 +1632,7 @@ bool TrackView_DrawSlotRecord(TrackViewRawBspContext *context, uint32_t drawPayl
 		return false;
 	}
 	drawRecordOffset = drawRecordAddress - context->slotDrawBaseAddress;
-	drawRecordIndex = drawRecordOffset / 0x38u;
+	drawRecordIndex = drawRecordOffset / SLIP_TRACK_DRAW_RECORD_BYTES;
 	if (context->slotDrawCallbacks == NULL || drawRecordIndex >= context->slotDrawCallbackCount) {
 		return false;
 	}
@@ -1327,8 +1658,8 @@ bool TrackView_DrawSlotRecord(TrackViewRawBspContext *context, uint32_t drawPayl
 		uint8_t *childRecord;
 		const uint8_t *attachmentRecord;
 
-		if (attachmentOffset + 0x10u > context->componentBaseBytes || context->cameraMatrix == NULL ||
-		    !TrackView_SlotDrawRecord(context, childAddress, &childRecord)) {
+		if (attachmentOffset + SLIP_TRC_PRIMITIVE_FIRST_INDEX_DWORD_END > context->componentBaseBytes ||
+		    context->cameraMatrix == NULL || !TrackView_SlotDrawRecord(context, childAddress, &childRecord)) {
 			return false;
 		}
 		attachmentRecord = context->componentBase + attachmentOffset;
@@ -1336,9 +1667,10 @@ bool TrackView_DrawSlotRecord(TrackViewRawBspContext *context, uint32_t drawPayl
 		TrackViewPrimitiveCallbackContext attachmentContext = {.viewMatrix = *context->cameraMatrix,
 		                                                       .transformedObjectOffset = context->componentViewOrigin};
 
-		if (!SlipDraw3D_ProjectIndex(context->vertexRecords, context->vertexRecordCount,
-		                             (uint16_t)SlipBytes_ReadLE32(attachmentRecord + 0x0cu), context->transform,
-		                             &attachmentContext, &project)) {
+		if (!SlipDraw3D_ProjectIndex(
+		        context->vertexRecords, context->vertexRecordCount,
+		        (uint16_t)SlipBytes_ReadLE32(attachmentRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
+		        context->transform, &attachmentContext, &project)) {
 			return false;
 		}
 
@@ -1508,8 +1840,6 @@ bool TrackView_DrawComponentActors(uint32_t objectListOffset, const uint8_t *sec
 		return false;
 
 	if (sectionRecord == context->specialRecord) {
-		enum { SLIP_REFUEL_COLOUR_RAMP_START = 0x40, SLIP_REFUEL_COLOUR_RAMP_END = 0x4f };
-
 		context->limitStart = SLIP_REFUEL_COLOUR_RAMP_START;
 		context->limitEnd = SLIP_REFUEL_COLOUR_RAMP_END;
 		context->limitEnabled = UINT32_MAX;
@@ -1531,31 +1861,31 @@ static uint32_t TrackView_TextureRowScroll(const uint8_t *materialTable, size_t 
 	uint32_t rowScroll;
 	uint32_t recordPhase;
 
-	if (materialTable == NULL || materialTableBytes < 4u) {
+	if (materialTable == NULL || materialTableBytes < SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES) {
 		return 0;
 	}
 	materialCount = SlipBytes_ReadLE32(materialTable);
-	materialIndex = (uint32_t)(materialId & 0x7fffu);
-	materialOffset = 4u;
+	materialIndex = materialId & SLIP_DRAW3D_MATERIAL_INDEX_MASK;
+	materialOffset = SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 	if (materialIndex < materialCount) {
-		materialOffset += (size_t)materialIndex * 0x54u;
+		materialOffset += (size_t)materialIndex * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
 	}
-	if (materialOffset > materialTableBytes || materialTableBytes - materialOffset < 7u) {
+	if (materialOffset > materialTableBytes || materialTableBytes - materialOffset < sizeof("TRNCSIN") - 1) {
 		return 0;
 	}
 	materialRecord = materialTable + materialOffset;
-	if (SlipBytes_ReadLE32(materialRecord) != 0x434e5254u || SlipBytes_ReadLE32(materialRecord + 3u) != 0x4e495343u) {
+	if (memcmp(materialRecord, "TRNCSIN", sizeof("TRNCSIN") - 1) != 0) {
 		return 0;
 	}
 	rowScroll = animationAccumulator;
-	rowScroll &= 0x7fffu;
+	rowScroll &= SLIP_TRACK_TEXTURE_SCROLL_ACCUMULATOR_MASK;
 	rowScroll >>= 1u;
-	rowScroll &= 0x3fffu;
-	recordPhase = primitiveRecordToken & 0x3ffu;
-	if (recordPhase >= 0x200u) {
-		rowScroll = 0x4000u - rowScroll;
+	rowScroll &= SLIP_TRACK_TEXTURE_SCROLL_FRACTION_MASK;
+	recordPhase = primitiveRecordToken & SLIP_TRACK_TEXTURE_SCROLL_TOKEN_MASK;
+	if (recordPhase >= SLIP_TRACK_TEXTURE_SCROLL_REVERSE_TOKEN_START) {
+		rowScroll = SLIP_Q14_ONE - rowScroll;
 	}
-	return rowScroll & 0xffffu;
+	return rowScroll & UINT16_MAX;
 }
 
 static SlipView3DVec32 TrackView_DrawStateLightVector(const TrackViewRawBspContext *context) {
@@ -1617,7 +1947,7 @@ static int TrackView_ActorCollectRingPoints(const SlipDraw3DRecordPool *pool, ui
 		}
 		record = recordPoolBytes + currentOffset;
 		points[pointCount].x = (int32_t)SlipBytes_ReadLE32(record + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET);
-		points[pointCount].y = (int32_t)SlipBytes_ReadLE32(record + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET + 4u);
+		points[pointCount].y = (int32_t)SlipBytes_ReadLE32(record + offsetof(SlipDraw3DVertexRecord, screenY));
 		++pointCount;
 		currentOffset = SlipBytes_ReadLE32(record + SLIP_DRAW3D_RECORD_NEXT_OFFSET);
 	} while (currentOffset != inputActiveHeadOffset);
@@ -1657,20 +1987,21 @@ static int TrackView_ActorCollectShadedRing(const SlipDraw3DRecordPool *pool, ui
 			return 0;
 		}
 		record = recordPoolBytes + currentOffset;
-		shade = SlipBytes_ReadLE16(record + 0x20u);
-		color = (uint8_t)(shade >> 8);
+		shade = SlipBytes_ReadLE16(record + offsetof(SlipDraw3DDrawRecord, shade));
+		color = (uint8_t)(shade >> SLIP_SHADE_COLOUR_SHIFT);
 		if (pointCount == 0) {
 			firstColor = color;
 		} else if (color != firstColor) {
 			uniform = false;
 		}
-		uint8_t *const rasterPoint = SlipDraw3D_PointBuffer() + pointCount * 0x20u;
+		uint8_t *const rasterPoint = SlipDraw3D_PointBuffer() + pointCount * sizeof(RasterTexturedPoint);
 		TrackView_WriteLE32(rasterPoint, SlipBytes_ReadLE32(record + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET));
-		TrackView_WriteLE32(rasterPoint + 4, SlipBytes_ReadLE32(record + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET + 4u));
-		TrackView_WriteLE32(rasterPoint + 8, shade);
+		TrackView_WriteLE32(rasterPoint + offsetof(RasterTexturedPoint, y),
+		                    SlipBytes_ReadLE32(record + offsetof(SlipDraw3DVertexRecord, screenY)));
+		TrackView_WriteLE32(rasterPoint + offsetof(RasterTexturedPoint, reserved08), shade);
 		points[pointCount].x = SlipBytes_ReadLEI32(rasterPoint);
-		points[pointCount].y = SlipBytes_ReadLEI32(rasterPoint + 4);
-		points[pointCount].shade = SlipBytes_ReadLE16(rasterPoint + 8);
+		points[pointCount].y = SlipBytes_ReadLEI32(rasterPoint + offsetof(RasterTexturedPoint, y));
+		points[pointCount].shade = SlipBytes_ReadLE16(rasterPoint + offsetof(RasterTexturedPoint, reserved08));
 		++pointCount;
 		currentOffset = SlipBytes_ReadLE32(record + SLIP_DRAW3D_RECORD_NEXT_OFFSET);
 	} while (currentOffset != inputActiveHeadOffset);
@@ -1681,8 +2012,8 @@ static int TrackView_ActorCollectShadedRing(const SlipDraw3DRecordPool *pool, ui
 }
 
 static void TrackView_WriteLE16(uint8_t *p, uint16_t v) {
-	p[0] = (uint8_t)(v & 0xffu);
-	p[1] = (uint8_t)((v >> 8) & 0xffu);
+	p[0] = (uint8_t)(v & UINT8_MAX);
+	p[1] = (uint8_t)((v >> 8) & UINT8_MAX);
 }
 
 static void TrackView_WriteLE32(uint8_t *p, uint32_t v) {
@@ -1699,26 +2030,27 @@ static uint8_t *TrackView_FindComponentMaterial(uint8_t *componentBase, size_t c
 	size_t materialOffset;
 	uint16_t materialIndex;
 
-	if (componentBase == NULL || componentBaseBytes < 0x0au) {
+	if (componentBase == NULL || componentBaseBytes < SLIP_TRC_FILE_MATERIAL_TABLE_END) {
 		return NULL;
 	}
-	materialTableOffset = SlipBytes_ReadLE16(componentBase + 0x08u);
-	if (materialTableOffset == 0u || (size_t)materialTableOffset + 2u > componentBaseBytes) {
+	materialTableOffset = SlipBytes_ReadLE16(componentBase + SLIP_TRC_FILE_MATERIAL_TABLE_OFFSET);
+	if (materialTableOffset == 0u || (size_t)materialTableOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 		return NULL;
 	}
 	materialCount = SlipBytes_ReadLE16(componentBase + materialTableOffset);
-	materialOffset = (size_t)materialTableOffset + 2u;
+	materialOffset = (size_t)materialTableOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 	for (materialIndex = 0; materialIndex < materialCount; ++materialIndex) {
 		uint8_t *materialRecord;
 
-		if (materialOffset > componentBaseBytes || componentBaseBytes - materialOffset < 0x12u) {
+		if (materialOffset > componentBaseBytes ||
+		    componentBaseBytes - materialOffset < SLIP_SHAPE_MATERIAL_ENTRY_BYTES) {
 			return NULL;
 		}
 		materialRecord = componentBase + materialOffset;
-		if (SlipBytes_ReadLE16(materialRecord + 0x10u) == materialId) {
+		if (SlipBytes_ReadLE16(materialRecord + SLIP_SHAPE_MATERIAL_ID_OFFSET) == materialId) {
 			return materialRecord;
 		}
-		materialOffset += 0x12u;
+		materialOffset += SLIP_SHAPE_MATERIAL_ENTRY_BYTES;
 	}
 	return NULL;
 }
@@ -1733,11 +2065,11 @@ static int TrackView_ResolvePrimitiveMaterials(uint8_t *componentBase, size_t co
 	if (primitiveListOffset == 0u) {
 		return 1;
 	}
-	if ((size_t)primitiveListOffset + 2u > componentBaseBytes) {
+	if ((size_t)primitiveListOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 		return 0;
 	}
 	primitiveCount = SlipBytes_ReadLE16(componentBase + primitiveListOffset);
-	primitiveOffset = (size_t)primitiveListOffset + 2u;
+	primitiveOffset = (size_t)primitiveListOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 	for (primitiveIndex = 0; primitiveIndex < primitiveCount; ++primitiveIndex) {
 		uint8_t *primitive;
 		uint16_t localMaterial;
@@ -1747,26 +2079,30 @@ static int TrackView_ResolvePrimitiveMaterials(uint8_t *componentBase, size_t co
 		uint8_t *componentMaterial;
 		SlipDraw3DMaterialNumber lookup;
 
-		if (primitiveOffset > componentBaseBytes || componentBaseBytes - primitiveOffset < 0x0cu) {
+		if (primitiveOffset > componentBaseBytes ||
+		    componentBaseBytes - primitiveOffset < SLIP_TRC_PRIMITIVE_HEADER_BYTES) {
 			return 0;
 		}
 		primitive = componentBase + primitiveOffset;
-		localMaterial = (uint16_t)(SlipBytes_ReadLE16(primitive + 0x0au) & 0x7fffu);
-		resolvedMaterial = (uint16_t)(localMaterial | 0x8000u);
+		localMaterial = (uint16_t)(SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET) &
+		                           SLIP_DRAW3D_MATERIAL_INDEX_MASK);
+		resolvedMaterial = (uint16_t)(localMaterial | SLIP_TRC_PRIMITIVE_MATERIAL_UNRESOLVED);
 		componentMaterial = TrackView_FindComponentMaterial(componentBase, componentBaseBytes, localMaterial);
 		if (componentMaterial != NULL &&
-		    SlipDraw3D_GetMaterialNumber(materialTable, materialTableBytes, materialGlobal, componentMaterial, 0x10u,
-		                                 &lookup) &&
+		    SlipDraw3D_GetMaterialNumber(materialTable, materialTableBytes, materialGlobal, componentMaterial,
+		                                 SLIP_SHAPE_MATERIAL_NAME_BYTES, &lookup) &&
 		    !lookup.carryOut) {
 			resolvedMaterial = lookup.materialIndex;
 		}
-		TrackView_WriteLE16(primitive + 0x0au, resolvedMaterial);
+		TrackView_WriteLE16(primitive + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET, resolvedMaterial);
 
 		descriptor = SlipBytes_ReadLE16(primitive);
-		if ((descriptor & 0x8000u) == 0u) {
-			primitiveBytes = (uint32_t)descriptor * 2u + 0x0cu;
+		if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) == 0u) {
+			primitiveBytes = (uint32_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		} else {
-			primitiveBytes = (uint32_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+			primitiveBytes =
+			    (uint32_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+			    SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		}
 		primitiveOffset += primitiveBytes;
 	}
@@ -1778,12 +2114,12 @@ int TrackView_ResolveComponentMaterials(uint8_t *componentBase, size_t component
                                         TrackViewMaterialInit *result) {
 	uint16_t componentMaterialTableOffset;
 
-	if (componentBase == NULL || componentBaseBytes < 0x0au || result == NULL) {
+	if (componentBase == NULL || componentBaseBytes < SLIP_TRC_FILE_MATERIAL_TABLE_END || result == NULL) {
 		return 0;
 	}
-	componentMaterialTableOffset = SlipBytes_ReadLE16(componentBase + 0x08u);
+	componentMaterialTableOffset = SlipBytes_ReadLE16(componentBase + SLIP_TRC_FILE_MATERIAL_TABLE_OFFSET);
 	if (componentMaterialTableOffset != 0u) {
-		const uint16_t siblingListOffset = SlipBytes_ReadLE16(componentBase + 0x06u);
+		const uint16_t siblingListOffset = SlipBytes_ReadLE16(componentBase + SLIP_TRC_FILE_COMPONENT_LIST_OFFSET);
 		uint16_t siblingCount;
 		size_t siblingOffset;
 		uint16_t siblingIndex;
@@ -1791,25 +2127,28 @@ int TrackView_ResolveComponentMaterials(uint8_t *componentBase, size_t component
 		size_t componentMaterialOffset;
 		uint16_t componentMaterialIndex;
 
-		if ((size_t)siblingListOffset + 2u > componentBaseBytes) {
+		if ((size_t)siblingListOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 			return 0;
 		}
 		siblingCount = SlipBytes_ReadLE16(componentBase + siblingListOffset);
-		siblingOffset = (size_t)siblingListOffset + 2u;
+		siblingOffset = (size_t)siblingListOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 		for (siblingIndex = 0; siblingIndex < siblingCount; ++siblingIndex) {
 			uint8_t *sibling;
 			uint16_t siblingBytes;
 
-			if (siblingOffset > componentBaseBytes || componentBaseBytes - siblingOffset < 8u) {
+			if (siblingOffset > componentBaseBytes ||
+			    componentBaseBytes - siblingOffset < SLIP_TRC_COMPONENT_LINK_HEADER_BYTES) {
 				return 0;
 			}
 			sibling = componentBase + siblingOffset;
-			if (!TrackView_ResolvePrimitiveMaterials(componentBase, componentBaseBytes,
-			                                         SlipBytes_ReadLE16(sibling + 0x04u), materialTable,
-			                                         materialTableBytes, materialGlobal) ||
-			    !TrackView_ResolvePrimitiveMaterials(componentBase, componentBaseBytes,
-			                                         SlipBytes_ReadLE16(sibling + 0x06u), materialTable,
-			                                         materialTableBytes, materialGlobal)) {
+			if (!TrackView_ResolvePrimitiveMaterials(
+			        componentBase, componentBaseBytes,
+			        SlipBytes_ReadLE16(sibling + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET), materialTable,
+			        materialTableBytes, materialGlobal) ||
+			    !TrackView_ResolvePrimitiveMaterials(
+			        componentBase, componentBaseBytes,
+			        SlipBytes_ReadLE16(sibling + SLIP_TRC_COMPONENT_SECOND_LIST_OFFSET), materialTable,
+			        materialTableBytes, materialGlobal)) {
 				return 0;
 			}
 			siblingBytes = SlipBytes_ReadLE16(sibling);
@@ -1819,25 +2158,26 @@ int TrackView_ResolveComponentMaterials(uint8_t *componentBase, size_t component
 			siblingOffset += siblingBytes;
 		}
 
-		if ((size_t)componentMaterialTableOffset + 2u > componentBaseBytes) {
+		if ((size_t)componentMaterialTableOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 			return 0;
 		}
 		componentMaterialCount = SlipBytes_ReadLE16(componentBase + componentMaterialTableOffset);
-		componentMaterialOffset = (size_t)componentMaterialTableOffset + 2u;
+		componentMaterialOffset = (size_t)componentMaterialTableOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 		for (componentMaterialIndex = 0; componentMaterialIndex < componentMaterialCount; ++componentMaterialIndex) {
 			uint8_t *componentMaterial;
 			SlipDraw3DMaterialNumber lookup;
 
-			if (componentMaterialOffset > componentBaseBytes || componentBaseBytes - componentMaterialOffset < 0x12u) {
+			if (componentMaterialOffset > componentBaseBytes ||
+			    componentBaseBytes - componentMaterialOffset < SLIP_SHAPE_MATERIAL_ENTRY_BYTES) {
 				return 0;
 			}
 			componentMaterial = componentBase + componentMaterialOffset;
 			if (SlipDraw3D_GetMaterialNumber(materialTable, materialTableBytes, materialGlobal, componentMaterial,
-			                                 0x10u, &lookup) &&
+			                                 SLIP_SHAPE_MATERIAL_NAME_BYTES, &lookup) &&
 			    !lookup.carryOut) {
-				TrackView_WriteLE16(componentMaterial + 0x10u, lookup.materialIndex);
+				TrackView_WriteLE16(componentMaterial + SLIP_SHAPE_MATERIAL_ID_OFFSET, lookup.materialIndex);
 			}
-			componentMaterialOffset += 0x12u;
+			componentMaterialOffset += SLIP_SHAPE_MATERIAL_ENTRY_BYTES;
 		}
 	}
 
@@ -1848,18 +2188,19 @@ int TrackView_ResolveComponentMaterials(uint8_t *componentBase, size_t component
 static const uint8_t *TrackView_MaterialRecord(const uint8_t *materialTable, size_t materialTableBytes,
                                                uint16_t materialIndex) {
 	uint16_t count;
-	size_t offset = 4u;
+	size_t offset = SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 
-	if (materialTable == NULL || materialTableBytes < 4u) {
+	if (materialTable == NULL || materialTableBytes < SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES) {
 		return NULL;
 	}
 
 	count = SlipBytes_ReadLE16(materialTable);
-	materialIndex = (uint16_t)(materialIndex & 0x7fffu);
+	materialIndex = (uint16_t)(materialIndex & SLIP_DRAW3D_MATERIAL_INDEX_MASK);
 	if (materialIndex < count) {
-		offset = 4u + (size_t)(uint16_t)(0x54u * materialIndex);
+		offset = SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES +
+		         (size_t)(uint16_t)(SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE * materialIndex);
 	}
-	if (offset > materialTableBytes || materialTableBytes - offset < 0x54u) {
+	if (offset > materialTableBytes || materialTableBytes - offset < SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE) {
 		return NULL;
 	}
 	return materialTable + offset;
@@ -1869,7 +2210,12 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
                                       size_t materialTableBytes, uint16_t materialGlobal, uint32_t materialFrameIndex,
                                       const TrackViewResourceHandleRegistry *resourceRegistry,
                                       const SlipView3DMaths *maths, SlipView3DVec32 light) {
-	static const uint8_t kMaterialSetBit[] = {0x80u, 0x81u, 0x82u, 0x8fu, 0x8du, 0x91u, 0x84u, 0x85u, 0x92u, 0x93u};
+	static const uint8_t kMaterialSetBit[] = {
+	    SLIP_TRC_MATERIAL_CAGE_SEVEN_LINES,    SLIP_TRC_MATERIAL_CAGE_FIVE_LINES,
+	    SLIP_TRC_MATERIAL_CAGE_SIXTEEN_LINES,  SLIP_TRC_MATERIAL_FLOOR_LIGHT_DASHES,
+	    SLIP_TRC_MATERIAL_THREE_LINE_STRIP,    SLIP_TRC_MATERIAL_QUAD_OUTLINE,
+	    SLIP_TRC_MATERIAL_THREE_LINE_DIAGONAL, SLIP_TRC_MATERIAL_SEVEN_LINE_FRAME,
+	    SLIP_TRC_MATERIAL_TWO_CONNECTED_LINES, SLIP_TRC_MATERIAL_TWO_CORNER_LINES};
 	uint16_t rootListOffset;
 	uint16_t siblingCount;
 	size_t siblingOffset;
@@ -1877,35 +2223,36 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 	bool haveFrameState;
 	int16_t threshold = 0;
 
-	if (componentBase == NULL || componentBaseBytes < 8u) {
+	if (componentBase == NULL || componentBaseBytes < SLIP_TRC_FILE_COMPONENT_LIST_END) {
 		return;
 	}
-	haveFrameState = materialTable != NULL && materialTableBytes >= 4u && maths != NULL;
+	haveFrameState =
+	    materialTable != NULL && materialTableBytes >= SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES && maths != NULL;
 	if (haveFrameState) {
 
-		threshold = SlipView3D_CosQ14(maths, 0x3f00);
+		threshold = SlipView3D_CosQ14(maths, SLIP_TRACK_PRIMITIVE_REPLAY_LIGHT_ANGLE);
 	}
-	rootListOffset = SlipBytes_ReadLE16(componentBase + 0x06u);
-	if (rootListOffset == 0u || (size_t)rootListOffset + 2u > componentBaseBytes) {
+	rootListOffset = SlipBytes_ReadLE16(componentBase + SLIP_TRC_FILE_COMPONENT_LIST_OFFSET);
+	if (rootListOffset == 0u || (size_t)rootListOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 		return;
 	}
 	siblingCount = SlipBytes_ReadLE16(componentBase + rootListOffset);
-	siblingOffset = (size_t)rootListOffset + 2u;
+	siblingOffset = (size_t)rootListOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 
 	for (siblingIndex = 0; siblingIndex < siblingCount; ++siblingIndex) {
 		uint8_t *sibling;
 		uint16_t listOffset;
 		uint16_t stride;
 
-		if (siblingOffset + 8u > componentBaseBytes) {
+		if (siblingOffset + SLIP_TRC_COMPONENT_LINK_HEADER_BYTES > componentBaseBytes) {
 			break;
 		}
 		sibling = componentBase + siblingOffset;
-		listOffset = SlipBytes_ReadLE16(sibling + 0x04u);
+		listOffset = SlipBytes_ReadLE16(sibling + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 
-		if (listOffset != 0u && (size_t)listOffset + 2u <= componentBaseBytes) {
+		if (listOffset != 0u && (size_t)listOffset + SLIP_TRC_TABLE_COUNT_BYTES <= componentBaseBytes) {
 			const uint16_t primitiveCount = SlipBytes_ReadLE16(componentBase + listOffset);
-			size_t primitiveOffset = (size_t)listOffset + 2u;
+			size_t primitiveOffset = (size_t)listOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 			uint16_t primitiveIndex;
 
 			for (primitiveIndex = 0; primitiveIndex < primitiveCount; ++primitiveIndex) {
@@ -1918,29 +2265,30 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 				uint32_t advance;
 				size_t k;
 
-				if (primitiveOffset + 0x0au > componentBaseBytes) {
+				if (primitiveOffset + SLIP_TRC_PRIMITIVE_FLAGS_END > componentBaseBytes) {
 					break;
 				}
 				primitive = componentBase + primitiveOffset;
 
-				primaryMaterialRecord = materialGlobal != 0
-				                            ? TrackView_MaterialRecord(materialTable, materialTableBytes,
-				                                                       SlipBytes_ReadLE16(primitive + 0x0au))
-				                            : NULL;
-				flags = primitive[0x08u];
+				primaryMaterialRecord =
+				    materialGlobal != 0
+				        ? TrackView_MaterialRecord(materialTable, materialTableBytes,
+				                                   SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET))
+				        : NULL;
+				flags = primitive[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
 
-				flags = (uint8_t)(flags & 0x7fu);
+				flags = (uint8_t)(flags & ~SLIP_TRC_PRIMITIVE_SPECIAL_PLANE);
 
-				if (primaryMaterialRecord != NULL && SlipBytes_ReadLE32(primaryMaterialRecord) == 0x45544157u) {
-					flags = (uint8_t)(flags | 0x80u);
+				if (primaryMaterialRecord != NULL && memcmp(primaryMaterialRecord, "WATE", 4u) == 0) {
+					flags = (uint8_t)(flags | SLIP_TRC_PRIMITIVE_SPECIAL_PLANE);
 				}
 
-				flags = (uint8_t)(flags & 0xb7u);
+				flags = (uint8_t)(flags & ~(SLIP_TRC_PRIMITIVE_TRANSPARENT | SLIP_TRC_PRIMITIVE_TRENCH));
 
-				material = primitive[0x09u];
+				material = primitive[SLIP_TRC_PRIMITIVE_MATERIAL_FLAGS_OFFSET];
 				setBit = false;
-				if ((flags & 0x01u) == 0u) {
-					if ((flags & 0x04u) != 0u) {
+				if ((flags & SLIP_TRC_PRIMITIVE_RANGE_PLANE) == 0u) {
+					if ((flags & SLIP_TRC_PRIMITIVE_FORCE_TRANSPARENT) != 0u) {
 						setBit = true;
 					} else {
 						for (k = 0; k < sizeof(kMaterialSetBit); ++k) {
@@ -1953,21 +2301,22 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 				}
 
 				if (setBit) {
-					flags = (uint8_t)(flags | 0x08u);
+					flags = (uint8_t)(flags | SLIP_TRC_PRIMITIVE_TRANSPARENT);
 				}
 
-				flags = (uint8_t)(flags & 0xfdu);
+				flags = (uint8_t)(flags & ~SLIP_TRACK_PRIMITIVE_REPLAY_PLANE);
 
 				if (haveFrameState) {
 					const uint8_t *const siblingMaterialRecord = primaryMaterialRecord;
 					bool skipAll = false;
 					bool skipToTrnc = false;
 
-					if (material != 0x8fu) {
-						if ((flags & 0x01u) != 0 || (flags & 0x04u) != 0) {
+					if (material != SLIP_TRC_MATERIAL_FLOOR_LIGHT_DASHES) {
+						if ((flags & SLIP_TRC_PRIMITIVE_RANGE_PLANE) != 0 ||
+						    (flags & SLIP_TRC_PRIMITIVE_FORCE_TRANSPARENT) != 0) {
 
 							skipAll = true;
-						} else if ((flags & 0x08u) != 0) {
+						} else if ((flags & SLIP_TRC_PRIMITIVE_TRANSPARENT) != 0) {
 
 							skipToTrnc = true;
 						} else if (siblingMaterialRecord != NULL &&
@@ -1983,34 +2332,39 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 
 						SlipView3D_DotProductQ14(
 						    (uint16_t)(int16_t)-(int32_t)light.x, (uint16_t)(int16_t)-(int32_t)light.y,
-						    (uint16_t)(int16_t)-(int32_t)light.z, (uint16_t)SlipBytes_ReadLE16(primitive + 0x02u),
-						    (uint16_t)SlipBytes_ReadLE16(primitive + 0x04u),
-						    (uint16_t)SlipBytes_ReadLE16(primitive + 0x06u), &dot);
+						    (uint16_t)(int16_t)-(int32_t)light.z,
+						    (uint16_t)SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+						    (uint16_t)SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+						    (uint16_t)SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET), &dot);
 						facingDot = (int16_t)dot.dotProductQ14;
 						if (facingDot >= threshold) {
 							flags = (uint8_t)(flags | SLIP_TRACK_PRIMITIVE_REPLAY_PLANE);
 						}
 
-						if ((int16_t)SlipBytes_ReadLE16(primitive + 0x04u) > 0x3000) {
+						if ((int16_t)SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET) >
+						    SLIP_TRACK_PRIMITIVE_REPLAY_MAXIMUM_NORMAL_Y_Q14) {
 							skipToTrnc = true;
 						}
 					}
 					if (!skipAll && !skipToTrnc) {
 
-						uint32_t materialIndex = SlipBytes_ReadLE16(primitive + 0x0au);
+						uint32_t materialIndex = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET);
 						const SlipDraw3DMaterialTable *const frameTable = (const void *)materialTable;
 						const uint32_t textureHandle =
 						    SlipMaterial_GetFrame(frameTable, materialGlobal, &materialIndex, materialFrameIndex);
 						if ((uint16_t)textureHandle != 0 && siblingMaterialRecord != NULL &&
 
-						    SlipBytes_ReadLE16(siblingMaterialRecord + 0x1au) == 0 && resourceRegistry != NULL) {
+						    SlipBytes_ReadLE16(siblingMaterialRecord +
+						                       offsetof(SlipDraw3DMaterialRecord, skipFlatPolygon)) == 0 &&
+						    resourceRegistry != NULL) {
 							SlipResourcePayload texturePayload = {0};
 
 							if (TrackView_LockResourceHandlePayload(resourceRegistry, textureHandle, &texturePayload)) {
 								TrackView_UnlockResourceHandlePayload(resourceRegistry, textureHandle);
-								if (texturePayload.size >= 0x0au &&
-								    SlipBytes_ReadLE16(texturePayload.data + 0x08u) != 0xffffu) {
-									flags = (uint8_t)(flags | 0x08u);
+								if (texturePayload.size >= SLIP_SPRITE_TRANSPARENT_COLOUR_END &&
+								    SlipBytes_ReadLE16(texturePayload.data + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET) !=
+								        SLIP_SPRITE_NO_TRANSPARENT_COLOUR) {
+									flags = (uint8_t)(flags | SLIP_TRC_PRIMITIVE_TRANSPARENT);
 								}
 							}
 						}
@@ -2018,17 +2372,19 @@ void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBa
 					if (!skipAll) {
 
 						if (siblingMaterialRecord != NULL && memcmp(siblingMaterialRecord, "TRNC", 4u) == 0) {
-							flags = (uint8_t)(flags | 0x40u);
+							flags = (uint8_t)(flags | SLIP_TRC_PRIMITIVE_TRENCH);
 						}
 					}
 				}
-				primitive[0x08u] = flags;
+				primitive[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] = flags;
 
 				descriptor = SlipBytes_ReadLE16(primitive);
-				if ((descriptor & 0x8000u) != 0u) {
-					advance = (uint32_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+				if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0u) {
+					advance =
+					    (uint32_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+					    SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 				} else {
-					advance = (uint32_t)descriptor * 2u + 0x0cu;
+					advance = (uint32_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 				}
 				primitiveOffset += advance;
 			}
@@ -2098,7 +2454,7 @@ static bool TrackView_ExecuteLowEmitPath(TrackViewRawBspContext *context,
 	}
 	*carryOut = false;
 	++context->emitPathCount;
-	if (context->postPlaneHead == 0 && (context->shapeProjectionFlags & 2u) != 0) {
+	if (context->postPlaneHead == 0 && (context->shapeProjectionFlags & SLIP_SHAPE_INSIDE_VIEW) != 0) {
 		SlipView3DVec32 light = TrackView_DrawStateLightVector(context);
 		SlipDraw3DVertexLighting lighting = {.light = {light.x, light.y, light.z},
 		                                     .origin = {context->origin.x, context->origin.y, context->origin.z},
@@ -2119,7 +2475,7 @@ static bool TrackView_ExecuteLowEmitPath(TrackViewRawBspContext *context,
 		                                     context->vertexRecords, context->vertexRecordCount, indexStream,
 		                                     indexStreamBytes, context->projectState, TrackView_TransformVertex,
 		                                     TrackView_ProjectScreenSecondary, &lighting, &context->materialColor)) {
-			context->failureAddress = 0x0001dfa8u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_UNCLIPPED_POLYGON;
 			context->failed = true;
 			return false;
 		}
@@ -2132,7 +2488,7 @@ static bool TrackView_ExecuteLowEmitPath(TrackViewRawBspContext *context,
 	    !SlipDraw3D_MaterialGate(context->materialTable, context->materialTableBytes, materialIndex,
 	                             context->rendererFlags, polygonCountAndFlags, indexStream, indexStreamBytes,
 	                             &materialGate)) {
-		context->failureAddress = 0x0001ba7du;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_GATE;
 		context->failed = true;
 		return false;
 	}
@@ -2177,7 +2533,7 @@ static bool TrackView_ExecuteLowEmitPath(TrackViewRawBspContext *context,
 		        sizeof(postBoundsVisits) / sizeof(postBoundsVisits[0]), postClipRecordVisits,
 		        sizeof(postClipRecordVisits) / sizeof(postClipRecordVisits[0]), postClipPlaneVisits,
 		        sizeof(postClipPlaneVisits) / sizeof(postClipPlaneVisits[0]), &solidRing)) {
-			context->failureAddress = 0x0001bc0cu;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_SOLID_RING;
 			context->failed = true;
 			return false;
 		}
@@ -2196,7 +2552,7 @@ static bool TrackView_ExecuteLowEmitPath(TrackViewRawBspContext *context,
 			                                  regularSetup.storedMaterialColor, regularSetup.materialDitherBits,
 			                                  SLIP_DRAW3D_RECORD_NEXT_OFFSET, flatPoints,
 			                                  sizeof(flatPoints) / sizeof(flatPoints[0]), &flatRing)) {
-				context->failureAddress = 0x0001ae47u;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 				context->failed = true;
 				return false;
 			}
@@ -2230,7 +2586,7 @@ static bool TrackView_ExecuteLowEmitPath(TrackViewRawBspContext *context,
 		}
 		return true;
 	}
-	context->failureAddress = 0x0001ba7du;
+	context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_GATE;
 	context->failed = true;
 	return false;
 }
@@ -2245,17 +2601,21 @@ static bool TrackView_ExecuteObjectEntry(TrackViewRawBspContext *context, const 
 	uint32_t objectCount;
 	uint32_t objectListCursorAddress;
 
-	if (context == NULL || objectRecord == NULL || context->objectList == NULL || context->objectListBytes < 4u ||
+	if (context == NULL || objectRecord == NULL || context->objectList == NULL ||
+	    context->objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES ||
 	    context->chunkCallbacks.viewMatrix == NULL) {
 		return false;
 	}
 	objectCount = *(const uint32_t *)(const void *)context->objectList;
-	if (objectCount > 0x300u || (size_t)objectCount > (context->objectListBytes - 4u) / 0x2cu) {
-		context->failureAddress = 0x00039e7cu;
+	if (objectCount > SLIP_TRACK_VISIBILITY_ENTRY_CAPACITY ||
+	    (size_t)objectCount >
+	        (context->objectListBytes - SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) / SLIP_TRACK_VISIBILITY_ENTRY_BYTES) {
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_VISIBILITY_COUNT;
 		context->failed = true;
 		return false;
 	}
-	objectListCursorAddress = context->objectListBaseToken + 4u + objectCount * 0x2cu;
+	objectListCursorAddress = context->objectListBaseToken + SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES +
+	                          objectCount * SLIP_TRACK_VISIBILITY_ENTRY_BYTES;
 	if (!SlipTrackWorld_ObjectListEntry(
 	        context->objectList, context->objectListBytes, context->objectListBaseToken, &objectListCursorAddress,
 	        objectRecord, objectBytesRemaining, objectAddress, counterBefore, context->defaultTraversalGate,
@@ -2263,7 +2623,7 @@ static bool TrackView_ExecuteObjectEntry(TrackViewRawBspContext *context, const 
 	        (uint32_t)context->projectState->minY, (uint32_t)context->projectState->maxX,
 	        (uint32_t)context->projectState->maxY, context->viewportMinX, context->viewportMinY, context->viewportMaxX,
 	        context->viewportMaxY, &objectListEntry)) {
-		context->failureAddress = 0x00039e67u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_LIST_ENTRY;
 		context->failed = true;
 		return false;
 	}
@@ -2272,16 +2632,19 @@ static bool TrackView_ExecuteObjectEntry(TrackViewRawBspContext *context, const 
 	}
 	viewMatrix = *context->chunkCallbacks.viewMatrix;
 	relativeObject =
-	    (SlipView3DVec32){(int32_t)(uint32_t)(SlipBytes_ReadLE32(objectRecord + 0x12u) - context->cameraWorldX),
-	                      (int32_t)(uint32_t)(SlipBytes_ReadLE32(objectRecord + 0x16u) - context->cameraWorldY),
-	                      (int32_t)(uint32_t)(SlipBytes_ReadLE32(objectRecord + 0x1au) - context->cameraWorldZ)};
+	    (SlipView3DVec32){(int32_t)(uint32_t)(SlipBytes_ReadLE32(objectRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET) -
+	                                          context->cameraWorldX),
+	                      (int32_t)(uint32_t)(SlipBytes_ReadLE32(objectRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET) -
+	                                          context->cameraWorldY),
+	                      (int32_t)(uint32_t)(SlipBytes_ReadLE32(objectRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET) -
+	                                          context->cameraWorldZ)};
 	transformedObject = SlipView3D_TransformPositionByColumns(&viewMatrix, relativeObject);
 	if (!SlipTrackWorld_ObjectTransform(
 	        objectRecord, objectBytesRemaining, objectListEntry.entry,
 	        context->objectListBytes - (size_t)(objectListEntry.entry - context->objectList), context->cameraWorldX,
 	        context->cameraWorldY, context->cameraWorldZ, (uint32_t)transformedObject.x, (uint32_t)transformedObject.y,
 	        (uint32_t)transformedObject.z, &objectTransform)) {
-		context->failureAddress = 0x00039f27u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_TRANSFORM;
 		context->failed = true;
 		return false;
 	}
@@ -2294,6 +2657,8 @@ static bool TrackView_ExecuteObjectEntry(TrackViewRawBspContext *context, const 
 	                      (int32_t)objectTransform.storedViewZ},
 	    context);
 }
+
+enum { SLIP_TRACK_OBJECT_BOUNDS_VISIT_CAPACITY = 512, SLIP_ARTIC_PART_POINTER_BYTES = sizeof(uint32_t) };
 
 bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectBytesRemaining, uint32_t objectAddress,
                                   uint32_t counter, uint8_t *objectListEntry, size_t objectListEntryBytes,
@@ -2319,8 +2684,6 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 	size_t primitiveVisitCount = 0;
 	size_t componentListOffset;
 
-	enum { BOUNDS_VISIT_CAPACITY = 512, DRAW_POOL_VISIT_CAPACITY = SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT };
-
 #define TRACK_VIEW_FREE_OBJECT_CONTINUATION()                                                                          \
 	do {                                                                                                               \
 		free(boundsCalls);                                                                                             \
@@ -2338,14 +2701,14 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 	} while (0)
 
 	(void)objectAddress;
-	if (context == NULL || objectRecord == NULL || objectListEntry == NULL || objectListEntryBytes < 0x0cu ||
-	    context->componentBase == NULL || context->drawRecordPool == NULL || context->projectState == NULL ||
-	    context->vertexRecords == NULL) {
+	if (context == NULL || objectRecord == NULL || objectListEntry == NULL ||
+	    objectListEntryBytes < SLIP_TRACK_VISIBILITY_POSITION_END || context->componentBase == NULL ||
+	    context->drawRecordPool == NULL || context->projectState == NULL || context->vertexRecords == NULL) {
 		return false;
 	}
 	memset(&primitiveContext, 0, sizeof(primitiveContext));
 	if (context->chunkCallbacks.viewMatrix == NULL) {
-		context->failureAddress = 0x00039f54u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_VIEW_MATRIX;
 		context->failed = true;
 		return false;
 	}
@@ -2356,7 +2719,7 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 	primitiveContext.frustum = &context->frustum;
 	if (!SlipTrackWorld_ComponentList(objectRecord, objectBytesRemaining, context->componentBase,
 	                                  context->componentBaseBytes, &componentList)) {
-		context->failureAddress = 0x00039f7eu;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_COMPONENT_LIST;
 		context->failed = true;
 		return false;
 	}
@@ -2372,24 +2735,24 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 		        componentList.componentRecord,
 		        context->componentBaseBytes - (size_t)(componentList.componentRecord - context->componentBase),
 		        context->componentBase, context->componentBaseBytes, &childDispatch.dispatch)) {
-			context->failureAddress = 0x0003a468u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_CHILD_LIST_DISPATCH;
 			context->failed = true;
 			return false;
 		}
 		if (childDispatch.dispatch.vertexSource < context->componentBase ||
 		    childDispatch.dispatch.vertexSource > context->componentBase + context->componentBaseBytes) {
-			context->failureAddress = 0x0003a468u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_CHILD_LIST_DISPATCH;
 			context->failed = true;
 			return false;
 		}
 		sourceSize =
 		    context->componentBaseBytes - (size_t)(childDispatch.dispatch.vertexSource - context->componentBase);
 		childDispatch.callBuildVertexRecords = true;
-		if (!TrackView_BuildVertexRecords(context, 0x0003a468u, childDispatch.dispatch.vertexSource, sourceSize,
-		                                  childDispatch.dispatch.vertexCount,
-		                                  (int16_t)childDispatch.dispatch.vertexSourceStride, TrackView_TransformVertex,
-		                                  TrackView_SourcePoint, NULL)) {
-			context->failureAddress = 0x0001dcf7u;
+		if (!TrackView_BuildVertexRecords(
+		        context, TRACK_VIEW_DIAGNOSTIC_OBJECT_CHILD_LIST_DISPATCH, childDispatch.dispatch.vertexSource,
+		        sourceSize, childDispatch.dispatch.vertexCount, (int16_t)childDispatch.dispatch.vertexSourceStride,
+		        TrackView_TransformVertex, TrackView_SourcePoint, NULL)) {
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_BUILD_VERTEX_RECORDS;
 			context->failed = true;
 			return false;
 		}
@@ -2400,32 +2763,38 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 	}
 	if (componentList.primitiveList < context->componentBase ||
 	    componentList.primitiveList > context->componentBase + context->componentBaseBytes) {
-		context->failureAddress = 0x00039fafu;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_PRIMITIVE_LIST;
 		context->failed = true;
 		return false;
 	}
 	componentListOffset = (size_t)(componentList.primitiveList - context->componentBase);
-	boundsCalls = (SlipTrackWorldPrimitiveBoundsCall *)calloc(BOUNDS_VISIT_CAPACITY, sizeof(*boundsCalls));
-	boundsVisits = (SlipTrackWorldPrimitiveBoundsVisit *)calloc(BOUNDS_VISIT_CAPACITY, sizeof(*boundsVisits));
-	evaluatedVisits =
-	    (SlipTrackWorldPrimitiveBoundsEvaluatedExecuteVisit *)calloc(BOUNDS_VISIT_CAPACITY, sizeof(*evaluatedVisits));
-	returnVisits = (SlipDraw3DReturnActiveVisit *)calloc(DRAW_POOL_VISIT_CAPACITY, sizeof(*returnVisits));
-	clipFlagVisits = (SlipDraw3DClipFlagVisit *)calloc(DRAW_POOL_VISIT_CAPACITY, sizeof(*clipFlagVisits));
-	postBoundsVisits = (SlipDraw3DPostPlaneBoundsVisit *)calloc(DRAW_POOL_VISIT_CAPACITY, sizeof(*postBoundsVisits));
-	postClipRecordVisits =
-	    (SlipDraw3DPostPlaneClipRecordVisit *)calloc(DRAW_POOL_VISIT_CAPACITY, sizeof(*postClipRecordVisits));
+	boundsCalls =
+	    (SlipTrackWorldPrimitiveBoundsCall *)calloc(SLIP_TRACK_OBJECT_BOUNDS_VISIT_CAPACITY, sizeof(*boundsCalls));
+	boundsVisits =
+	    (SlipTrackWorldPrimitiveBoundsVisit *)calloc(SLIP_TRACK_OBJECT_BOUNDS_VISIT_CAPACITY, sizeof(*boundsVisits));
+	evaluatedVisits = (SlipTrackWorldPrimitiveBoundsEvaluatedExecuteVisit *)calloc(
+	    SLIP_TRACK_OBJECT_BOUNDS_VISIT_CAPACITY, sizeof(*evaluatedVisits));
+	returnVisits = (SlipDraw3DReturnActiveVisit *)calloc(SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, sizeof(*returnVisits));
+	clipFlagVisits = (SlipDraw3DClipFlagVisit *)calloc(SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, sizeof(*clipFlagVisits));
+	postBoundsVisits =
+	    (SlipDraw3DPostPlaneBoundsVisit *)calloc(SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, sizeof(*postBoundsVisits));
+	postClipRecordVisits = (SlipDraw3DPostPlaneClipRecordVisit *)calloc(SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
+	                                                                    sizeof(*postClipRecordVisits));
 	postClipPlaneVisits =
-	    (SlipDraw3DPostPlaneClipPlaneVisit *)calloc(DRAW_POOL_VISIT_CAPACITY, sizeof(*postClipPlaneVisits));
-	activeVisits = (SlipDraw3DActiveRingVisit *)calloc(DRAW_POOL_VISIT_CAPACITY, sizeof(*activeVisits));
-	activeBoundsVisits = (SlipDraw3DActiveBoundsVisit *)calloc(DRAW_POOL_VISIT_CAPACITY, sizeof(*activeBoundsVisits));
-	drawStatusVisits = (SlipDraw3DPolygonStatusVisit *)calloc(DRAW_POOL_VISIT_CAPACITY, sizeof(*drawStatusVisits));
-	relatedVisits = (SlipTrackWorldPrimitiveRelatedScanVisit *)calloc(3u, sizeof(*relatedVisits));
+	    (SlipDraw3DPostPlaneClipPlaneVisit *)calloc(SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, sizeof(*postClipPlaneVisits));
+	activeVisits = (SlipDraw3DActiveRingVisit *)calloc(SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, sizeof(*activeVisits));
+	activeBoundsVisits =
+	    (SlipDraw3DActiveBoundsVisit *)calloc(SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, sizeof(*activeBoundsVisits));
+	drawStatusVisits =
+	    (SlipDraw3DPolygonStatusVisit *)calloc(SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, sizeof(*drawStatusVisits));
+	relatedVisits =
+	    (SlipTrackWorldPrimitiveRelatedScanVisit *)calloc(SLIP_TRC_RELATED_OBJECT_COUNT, sizeof(*relatedVisits));
 	if (boundsCalls == NULL || boundsVisits == NULL || evaluatedVisits == NULL || returnVisits == NULL ||
 	    clipFlagVisits == NULL || postBoundsVisits == NULL || postClipRecordVisits == NULL ||
 	    postClipPlaneVisits == NULL || activeVisits == NULL || activeBoundsVisits == NULL || drawStatusVisits == NULL ||
 	    relatedVisits == NULL) {
 		TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-		context->failureAddress = 0x00039fb6u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_BOUNDS;
 		context->failed = true;
 		return false;
 	}
@@ -2442,14 +2811,16 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 		        &primitiveContext, postPlaneArgs.hasPostPlanes, postPlaneArgs.planeBase, postPlaneArgs.planeBytes,
 		        postPlaneArgs.planeHeadOffset, postPlaneArgs.limitXMin, postPlaneArgs.limitXMax,
 		        postPlaneArgs.limitYMin, postPlaneArgs.limitYMax, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, boundsCalls,
-		        BOUNDS_VISIT_CAPACITY, boundsVisits, BOUNDS_VISIT_CAPACITY, &primitiveVisitCount, evaluatedVisits,
-		        BOUNDS_VISIT_CAPACITY, returnVisits, DRAW_POOL_VISIT_CAPACITY, clipFlagVisits, DRAW_POOL_VISIT_CAPACITY,
-		        postBoundsVisits, DRAW_POOL_VISIT_CAPACITY, postClipRecordVisits, DRAW_POOL_VISIT_CAPACITY,
-		        postClipPlaneVisits, DRAW_POOL_VISIT_CAPACITY, activeVisits, DRAW_POOL_VISIT_CAPACITY,
-		        activeBoundsVisits, DRAW_POOL_VISIT_CAPACITY,
+		        SLIP_TRACK_OBJECT_BOUNDS_VISIT_CAPACITY, boundsVisits, SLIP_TRACK_OBJECT_BOUNDS_VISIT_CAPACITY,
+		        &primitiveVisitCount, evaluatedVisits, SLIP_TRACK_OBJECT_BOUNDS_VISIT_CAPACITY, returnVisits,
+		        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, clipFlagVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
+		        postBoundsVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, postClipRecordVisits,
+		        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, postClipPlaneVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
+		        activeVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, activeBoundsVisits,
+		        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
 		        context->drawStateRecord != NULL ? &context->drawStateRecord->matrix : NULL, &bounds)) {
 			TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-			context->failureAddress = 0x00039fb6u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OBJECT_BOUNDS;
 			context->failed = true;
 			return false;
 		}
@@ -2461,10 +2832,11 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 	context->primaryRight = bounds.bounds.primaryRight;
 	context->primaryBottom = bounds.bounds.primaryBottom;
 	++context->objectPrimitiveBoundsCount;
-	if (componentList.primitiveList != NULL && componentListOffset + 2u <= context->componentBaseBytes) {
+	if (componentList.primitiveList != NULL &&
+	    componentListOffset + SLIP_TRC_TABLE_COUNT_BYTES <= context->componentBaseBytes) {
 		const uint16_t drawCount = SlipBytes_ReadLE16(componentList.primitiveList);
 		uint16_t drawRemaining = drawCount;
-		size_t recordOffset = componentListOffset + 2u;
+		size_t recordOffset = componentListOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 		uint32_t rangeFlag = 0;
 		uint32_t rangeMinX = context->rangeMinX;
 		uint32_t rangeMinY = context->rangeMinY;
@@ -2478,9 +2850,10 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 			SlipTrackWorldPrimitiveDrawAdvance advance;
 			bool enterRelatedScan = false;
 
-			if (recordOffset > context->componentBaseBytes || context->componentBaseBytes - recordOffset < 0x0eu) {
+			if (recordOffset > context->componentBaseBytes ||
+			    context->componentBaseBytes - recordOffset < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 				TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-				context->failureAddress = 0x0003a065u;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_PRE_GATE;
 				context->failed = true;
 				return false;
 			}
@@ -2494,7 +2867,7 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 			                          (int32_t)context->cameraWorldZ},
 			        &preGate)) {
 				TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-				context->failureAddress = 0x0003a065u;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_PRE_GATE;
 				context->failed = true;
 				return false;
 			}
@@ -2512,10 +2885,11 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 				        projectedRecord, recordBytesRemaining, *(const uint32_t *)(const void *)context->objectList,
 				        context->mode, context->vertexRecords, context->vertexRecordCount, context->origin,
 				        TrackView_SourcePoint, context->projectState, TrackView_TransformVertex,
-				        TrackView_PrimitiveProjectMask, &primitiveContext, drawStatusVisits, DRAW_POOL_VISIT_CAPACITY,
+				        TrackView_PrimitiveProjectMask, &primitiveContext, drawStatusVisits,
+				        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
 				        context->drawStateRecord != NULL ? &context->drawStateRecord->matrix : NULL, &drawGate)) {
 					TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-					context->failureAddress = 0x0003a128u;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_DRAW_GATE;
 					context->failed = true;
 					return false;
 				}
@@ -2570,7 +2944,7 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 				const uint32_t savedRangeMaxX = rangeMaxX;
 				const uint32_t savedRangeMaxY = rangeMaxY;
 
-				memset(relatedVisits, 0, 3u * sizeof(*relatedVisits));
+				memset(relatedVisits, 0, SLIP_TRC_RELATED_OBJECT_COUNT * sizeof(*relatedVisits));
 				++context->objectPrimitiveRelatedScanCount;
 				if (!SlipTrackWorld_PrimitiveRelatedScanExecute(
 				        context->componentBaseToken + (uint32_t)recordOffset, componentList.currentObject,
@@ -2580,9 +2954,10 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 				        context->viewportMaxX, context->viewportMaxY, rangeMinX, rangeMinY, rangeMaxX, rangeMaxY,
 				        componentList.storedComponentRecord, (uint32_t)context->projectState->minX,
 				        (uint32_t)context->projectState->minY, (uint32_t)context->projectState->maxX,
-				        (uint32_t)context->projectState->maxY, relatedVisits, 3u, &relatedVisitCount, &related)) {
+				        (uint32_t)context->projectState->maxY, relatedVisits, SLIP_TRC_RELATED_OBJECT_COUNT,
+				        &relatedVisitCount, &related)) {
 					TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-					context->failureAddress = 0x0003a166u;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_RELATED_SCAN;
 					context->failed = true;
 					return false;
 				}
@@ -2590,15 +2965,15 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 					if (!TrackView_StoreClipBounds(context, related.scan.entryMinX, related.scan.entryMinY,
 					                               related.scan.entryMaxX, related.scan.entryMaxY)) {
 						TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-						context->failureAddress = 0x00018bd1u;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_STORE_CLIP_BOUNDS;
 						context->failed = true;
 						return false;
 					}
 				}
 				if (related.scan.calledRestoreVertexBufferCursor &&
-				    !TrackView_RestoreVertexBufferCursor(context, 0x0003a166u)) {
+				    !TrackView_RestoreVertexBufferCursor(context, TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_RELATED_SCAN)) {
 					TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-					context->failureAddress = 0x0001de44u;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RESTORE_VERTEX_CURSOR;
 					context->failed = true;
 					return false;
 				}
@@ -2612,26 +2987,27 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 					            (size_t)(related.scan.dispatchComponent - context->componentBase),
 					        context->componentBase, context->componentBaseBytes, &childDispatch.dispatch)) {
 						TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-						context->failureAddress = 0x0003a204u;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RELATED_CHILD_LIST_DISPATCH;
 						context->failed = true;
 						return false;
 					}
 					if (childDispatch.dispatch.vertexSource < context->componentBase ||
 					    childDispatch.dispatch.vertexSource > context->componentBase + context->componentBaseBytes) {
 						TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-						context->failureAddress = 0x0003a204u;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RELATED_CHILD_LIST_DISPATCH;
 						context->failed = true;
 						return false;
 					}
 					sourceSize = context->componentBaseBytes -
 					             (size_t)(childDispatch.dispatch.vertexSource - context->componentBase);
 					childDispatch.callBuildVertexRecords = true;
-					if (!TrackView_BuildVertexRecords(context, 0x0003a204u, childDispatch.dispatch.vertexSource,
-					                                  sourceSize, childDispatch.dispatch.vertexCount,
+					if (!TrackView_BuildVertexRecords(context, TRACK_VIEW_DIAGNOSTIC_RELATED_CHILD_LIST_DISPATCH,
+					                                  childDispatch.dispatch.vertexSource, sourceSize,
+					                                  childDispatch.dispatch.vertexCount,
 					                                  (int16_t)childDispatch.dispatch.vertexSourceStride,
 					                                  TrackView_TransformVertex, TrackView_SourcePoint, NULL)) {
 						TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-						context->failureAddress = 0x0001dcf7u;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_BUILD_VERTEX_RECORDS;
 						context->failed = true;
 						return false;
 					}
@@ -2686,12 +3062,15 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 						        postPlaneArgs.planeBase, postPlaneArgs.planeBytes, postPlaneArgs.planeHeadOffset,
 						        postPlaneArgs.limitXMin, postPlaneArgs.limitXMax, postPlaneArgs.limitYMin,
 						        postPlaneArgs.limitYMax, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, returnVisits,
-						        DRAW_POOL_VISIT_CAPACITY, clipFlagVisits, DRAW_POOL_VISIT_CAPACITY, postBoundsVisits,
-						        DRAW_POOL_VISIT_CAPACITY, postClipRecordVisits, DRAW_POOL_VISIT_CAPACITY,
-						        postClipPlaneVisits, DRAW_POOL_VISIT_CAPACITY, activeVisits, DRAW_POOL_VISIT_CAPACITY,
-						        activeBoundsVisits, DRAW_POOL_VISIT_CAPACITY, &range)) {
+						        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, clipFlagVisits,
+						        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, postBoundsVisits,
+						        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, postClipRecordVisits,
+						        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, postClipPlaneVisits,
+						        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, activeVisits,
+						        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, activeBoundsVisits,
+						        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &range)) {
 							TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-							context->failureAddress = 0x0003a218u;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_RANGE;
 							context->failed = true;
 							return false;
 						}
@@ -2709,7 +3088,8 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 						rangeTrace->rangeBranch = (uint32_t)range.range.branch;
 						rangeTrace->activeRingVisitCount = (uint32_t)range.primitive.activeRing.build.visitCount;
 						for (size_t activeVisitIndex = 0;
-						     activeVisitIndex < range.primitive.activeRing.build.visitCount && activeVisitIndex < 8u;
+						     activeVisitIndex < range.primitive.activeRing.build.visitCount &&
+						     activeVisitIndex < SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT;
 						     ++activeVisitIndex) {
 							rangeTrace->activeRingIndex[activeVisitIndex] = activeVisits[activeVisitIndex].indexWord;
 							rangeTrace->activeRingFlags[activeVisitIndex] =
@@ -2720,19 +3100,19 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 								rangeTrace->activeRingSourceX[activeVisitIndex] = (int16_t)SlipBytes_ReadLE16(
 								    activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET);
 								rangeTrace->activeRingSourceY[activeVisitIndex] = (int16_t)SlipBytes_ReadLE16(
-								    activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET + 2u);
+								    activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, sourceY));
 								rangeTrace->activeRingSourceZ[activeVisitIndex] = (int16_t)SlipBytes_ReadLE16(
-								    activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET + 4u);
+								    activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, sourceZ));
 								rangeTrace->activeRingWorldX[activeVisitIndex] = (int32_t)SlipBytes_ReadLE32(
 								    activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET);
 								rangeTrace->activeRingWorldY[activeVisitIndex] = (int32_t)SlipBytes_ReadLE32(
-								    activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET + 4u);
+								    activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, world.y));
 								rangeTrace->activeRingWorldZ[activeVisitIndex] = (int32_t)SlipBytes_ReadLE32(
-								    activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET + 8u);
+								    activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, world.z));
 								rangeTrace->activeRingScreenX[activeVisitIndex] = (int32_t)SlipBytes_ReadLE32(
 								    activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET);
 								rangeTrace->activeRingScreenY[activeVisitIndex] = (int32_t)SlipBytes_ReadLE32(
-								    activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET + 4u);
+								    activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, screenY));
 							}
 						}
 					}
@@ -2748,15 +3128,15 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 						if (!TrackView_StoreClipBounds(context, range.range.rangeMinX, range.range.rangeMinY,
 						                               range.range.rangeMaxX, range.range.rangeMaxY)) {
 							TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-							context->failureAddress = 0x00018bd1u;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_STORE_CLIP_BOUNDS;
 							context->failed = true;
 							return false;
 						}
 					}
 					if (range.range.calledRestoreVertexBufferCursor &&
-					    !TrackView_RestoreVertexBufferCursor(context, 0x0003a218u)) {
+					    !TrackView_RestoreVertexBufferCursor(context, TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_RANGE)) {
 						TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-						context->failureAddress = 0x0001de44u;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RESTORE_VERTEX_CURSOR;
 						context->failed = true;
 						return false;
 					}
@@ -2778,7 +3158,7 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 						        currentComponentAddress, context->excludedRelatedObjectToken,
 						        context->nestedClipBoundsSuppressed, context->renderContextCount, &nested)) {
 							TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-							context->failureAddress = 0x0003a34cu;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_NESTED_PRIMITIVE_SETUP;
 							context->failed = true;
 							return false;
 						}
@@ -2790,15 +3170,15 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 						++context->objectPrimitiveNestedPendingCount;
 						if (relatedObjectAddress < context->chunkBaseToken) {
 							TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-							context->failureAddress = 0x0003a39cu;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RELATED_OBJECT_RECORD;
 							context->failed = true;
 							return false;
 						}
 						nestedObjectOffset = (size_t)(relatedObjectAddress - context->chunkBaseToken);
 						if (nestedObjectOffset > context->chunkBaseBytes ||
-						    context->chunkBaseBytes - nestedObjectOffset < 0x1eu) {
+						    context->chunkBaseBytes - nestedObjectOffset < SLIP_TRD_SECTION_ORIGIN_END) {
 							TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-							context->failureAddress = 0x0003a39cu;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RELATED_OBJECT_RECORD;
 							context->failed = true;
 							return false;
 						}
@@ -2828,7 +3208,7 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 							            (size_t)(componentList.storedComponentRecord - context->componentBase),
 							        context->componentBase, context->componentBaseBytes, &childDispatch.dispatch)) {
 								TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-								context->failureAddress = 0x0003a3e3u;
+								context->failureAddress = TRACK_VIEW_DIAGNOSTIC_STORED_COMPONENT_CHILD_LIST_DISPATCH;
 								context->failed = true;
 								return false;
 							}
@@ -2836,19 +3216,20 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 							    childDispatch.dispatch.vertexSource >
 							        context->componentBase + context->componentBaseBytes) {
 								TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-								context->failureAddress = 0x0003a3e3u;
+								context->failureAddress = TRACK_VIEW_DIAGNOSTIC_STORED_COMPONENT_CHILD_LIST_DISPATCH;
 								context->failed = true;
 								return false;
 							}
 							sourceSize = context->componentBaseBytes -
 							             (size_t)(childDispatch.dispatch.vertexSource - context->componentBase);
 							childDispatch.callBuildVertexRecords = true;
-							if (!TrackView_BuildVertexRecords(context, 0x0003a468u, childDispatch.dispatch.vertexSource,
-							                                  sourceSize, childDispatch.dispatch.vertexCount,
+							if (!TrackView_BuildVertexRecords(context, TRACK_VIEW_DIAGNOSTIC_OBJECT_CHILD_LIST_DISPATCH,
+							                                  childDispatch.dispatch.vertexSource, sourceSize,
+							                                  childDispatch.dispatch.vertexCount,
 							                                  (int16_t)childDispatch.dispatch.vertexSourceStride,
 							                                  TrackView_TransformVertex, TrackView_SourcePoint, NULL)) {
 								TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-								context->failureAddress = 0x0001dcf7u;
+								context->failureAddress = TRACK_VIEW_DIAGNOSTIC_BUILD_VERTEX_RECORDS;
 								context->failed = true;
 								return false;
 							}
@@ -2875,7 +3256,7 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 				if (!TrackView_StoreClipBounds(context, related.load.clipMinX, related.load.clipMinY,
 				                               related.load.clipMaxX, related.load.clipMaxY)) {
 					TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-					context->failureAddress = 0x00018bd1u;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_STORE_CLIP_BOUNDS;
 					context->failed = true;
 					return false;
 				}
@@ -2883,7 +3264,7 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 			if (!SlipTrackWorld_PrimitiveDrawAdvance(projectedRecord, recordBytesRemaining,
 			                                         recordOffset - componentListOffset, drawRemaining, &advance)) {
 				TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-				context->failureAddress = 0x0003a40du;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_DRAW_ADVANCE;
 				context->failed = true;
 				return false;
 			}
@@ -2892,9 +3273,9 @@ bool TrackView_ObjectContinuation(const uint8_t *objectRecord, size_t objectByte
 			recordOffset = componentListOffset + advance.recordOffsetAfterAdvance;
 		}
 		++context->objectPrimitiveOuterTailCount;
-		if (!TrackView_RestoreVertexBufferCursor(context, 0x0003a43eu)) {
+		if (!TrackView_RestoreVertexBufferCursor(context, TRACK_VIEW_DIAGNOSTIC_OBJECT_RESTORE_VERTEX_CURSOR)) {
 			TRACK_VIEW_FREE_OBJECT_CONTINUATION();
-			context->failureAddress = 0x0001de44u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RESTORE_VERTEX_CURSOR;
 			context->failed = true;
 			return false;
 		}
@@ -2924,7 +3305,7 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 	uint16_t normalZ;
 
 	if (context == NULL || environment == NULL || environment->componentSetup == NULL || primitiveRecord == NULL ||
-	    recordBytesRemaining < 0x0cu || callbackResult == NULL || carryFromCallback == NULL) {
+	    recordBytesRemaining < SLIP_TRC_PRIMITIVE_HEADER_BYTES || callbackResult == NULL || carryFromCallback == NULL) {
 		return false;
 	}
 	savedContextRenderFlags = context->rendererFlags;
@@ -2938,29 +3319,33 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 		for (replayIndex = 0; replayIndex < replayCount; ++replayIndex) {
 			const uint16_t replayObjectOffset = environment->componentSetup->replayList[replayIndex];
 
-			context->replayListBuffer[replayIndex * 2u] = (uint8_t)(replayObjectOffset & 0xffu);
-			context->replayListBuffer[replayIndex * 2u + 1u] = (uint8_t)(replayObjectOffset >> 8);
+			context->replayListBuffer[replayIndex * SLIP_TRACK_REPLAY_OBJECT_OFFSET_BYTES] =
+			    (uint8_t)(replayObjectOffset & UINT8_MAX);
+			context->replayListBuffer[replayIndex * SLIP_TRACK_REPLAY_OBJECT_OFFSET_BYTES + 1u] =
+			    (uint8_t)(replayObjectOffset >> 8);
 		}
 		context->replayCount = replayCount;
 		context->replayList = context->replayListBuffer;
 		context->replayListBytes = sizeof(context->replayListBuffer);
 	}
-	flags = primitiveRecord[0x08u];
-	materialFlags = primitiveRecord[0x09u];
+	flags = primitiveRecord[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
+	materialFlags = primitiveRecord[SLIP_TRC_PRIMITIVE_MATERIAL_FLAGS_OFFSET];
 	countAndFlags = SlipBytes_ReadLE16(primitiveRecord);
-	normalX = SlipBytes_ReadLE16(primitiveRecord + 0x02u);
-	normalY = SlipBytes_ReadLE16(primitiveRecord + 0x04u);
-	normalZ = SlipBytes_ReadLE16(primitiveRecord + 0x06u);
-	materialIndex = SlipBytes_ReadLE16(primitiveRecord + 0x0au);
+	normalX = SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+	normalY = SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+	normalZ = SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
+	materialIndex = SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET);
 
-	if ((materialIndex & 0x8000u) != 0) {
+	if ((materialIndex & SLIP_TRC_PRIMITIVE_MATERIAL_UNRESOLVED) != 0) {
 		materialIndex = 0;
 	}
 	context->directCallbackActiveRecordOffset = (uint32_t)recordOffset;
 	context->directCallbackActivePolygonCountAndFlags = countAndFlags;
 	context->directCallbackActiveMaterialIndex = materialIndex;
 	context->directCallbackActivePlaneIndex =
-	    recordBytesRemaining >= 0x0eu ? SlipBytes_ReadLE16(primitiveRecord + 0x0cu) : 0;
+	    recordBytesRemaining >= SLIP_TRC_PRIMITIVE_FIRST_INDEX_END
+	        ? SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET)
+	        : 0;
 	context->directCallbackActiveFlags = flags;
 	context->directCallbackActiveMaterialFlags = materialFlags;
 	if (g_vehicleViewDumpDiagnostics) {
@@ -2968,13 +3353,13 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 		        "track_view_direct_record_0003872c offset=0x%zx bp=0x%04x ax=0x%04x bx=0x%04x cx=0x%04x flags=0x%02x "
 		        "mat=0x%02x dx=0x%04x plane=0x%04x bytes=",
 		        recordOffset, countAndFlags, normalX, normalY, normalZ, flags, materialFlags, materialIndex,
-		        recordBytesRemaining >= 0x0eu ? SlipBytes_ReadLE16(primitiveRecord + 0x0cu) : 0);
-		TrackView_DumpPayloadBytes(primitiveRecord, recordBytesRemaining, 0x40u);
+		        recordBytesRemaining >= SLIP_TRC_PRIMITIVE_FIRST_INDEX_END
+		            ? SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET)
+		            : 0);
+		TrackView_DumpPayloadBytes(primitiveRecord, recordBytesRemaining, SLIP_PRIMITIVE_DIAGNOSTIC_PAYLOAD_DUMP_BYTES);
 		fprintf(stderr, "\n");
 	}
-	if (g_vehicleViewDumpDiagnostics &&
-	    (recordOffset == 0x65c9u || recordOffset == 0x65e7u || recordOffset == 0x6619u || recordOffset == 0x6637u ||
-	     recordOffset == 0x6655u || recordOffset == 0x6673u || recordOffset == 0x6245u)) {
+	if (g_vehicleViewDumpDiagnostics && TrackView_ShouldDumpCallbackRecord(recordOffset)) {
 		const SlipTrackWorldDrawFlags *const drawFlags = &environment->componentSetup->drawFlags;
 		const SlipTrackWorldComponentTail *const componentTail = environment->componentTail;
 
@@ -2990,18 +3375,19 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 		        componentTail != NULL ? componentTail->restoredRenderFlags : 0);
 	}
 
-	skipMask = environment->inlineWalkMode ? 0x05u : 0x15u;
-	context->directCallbackActiveBranchMask = ((flags & skipMask) != 0 ? 0x00000001u : 0u) |
-	                                          ((countAndFlags & 0x8000u) != 0 ? 0x00000002u : 0u) |
-	                                          ((flags & 0x80u) != 0 ? 0x00000004u : 0u);
+	skipMask = environment->inlineWalkMode ? SLIP_TRC_PRIMITIVE_WALK_SKIP_MASK : SLIP_TRC_PRIMITIVE_CALLBACK_SKIP_MASK;
+	context->directCallbackActiveBranchMask =
+	    ((flags & skipMask) != 0 ? SLIP_TRACK_CALLBACK_SKIPPED : 0u) |
+	    ((countAndFlags & SLIP_TRC_PRIMITIVE_TEXTURED) != 0 ? SLIP_TRACK_CALLBACK_TEXTURED : 0u) |
+	    ((flags & SLIP_TRC_PRIMITIVE_SPECIAL_PLANE) != 0 ? SLIP_TRACK_CALLBACK_SPECIAL_PLANE : 0u);
 	if ((flags & skipMask) != 0) {
 		++context->directCallbackSkipCount;
 	} else {
 		SlipTrackWorldPlaneClassify plane;
 		uint16_t planeVertexIndex;
 
-		if (recordBytesRemaining < 0x0eu) {
-			context->failureAddress = 0x00038754u;
+		if (recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_DIRECT_PRIMITIVE_HEADER;
 			context->failed = true;
 			return false;
 		}
@@ -3027,23 +3413,23 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 		}
 		primitiveContext.projectState = context->projectState;
 		primitiveContext.frustum = &context->frustum;
-		planeVertexIndex = SlipBytes_ReadLE16(primitiveRecord + 0x0cu);
+		planeVertexIndex = SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET);
 		if (!SlipTrackWorld_ClassifyPlaneFromSource(
 		        context->mode, planeVertexIndex, normalX, normalY, normalZ, (const uint8_t *)context->vertexRecords,
 		        context->vertexRecordCount * sizeof(context->vertexRecords[0]), context->origin, TrackView_SourcePoint,
 		        &primitiveContext, context->drawStateRecord != NULL ? &context->drawStateRecord->matrix : NULL,
 		        &plane)) {
-			context->failureAddress = 0x000193ffu;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_CLASSIFY_SOURCE_PLANE;
 			context->failed = true;
 			context->rendererFlags = savedContextRenderFlags;
 			return false;
 		}
 		planeRejected = plane.carry;
 		if (planeRejected) {
-			context->directCallbackActiveBranchMask |= 0x00000008u;
+			context->directCallbackActiveBranchMask |= SLIP_TRACK_CALLBACK_PLANE_REJECTED;
 			++context->directCallbackPlaneRejectedCount;
 		}
-		if (!planeRejected && (flags & 0x80u) != 0) {
+		if (!planeRejected && (flags & SLIP_TRC_PRIMITIVE_SPECIAL_PLANE) != 0) {
 			SlipTrackWorldGlobalCarryGate globalCarry;
 
 			if (!SlipTrackWorld_GlobalCarryGate(context->flaggedPrimitiveReject, &globalCarry)) {
@@ -3052,7 +3438,7 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 			}
 			trackWorldGlobalCarryGateCarry = globalCarry.carryOut;
 			if (trackWorldGlobalCarryGateCarry) {
-				context->directCallbackActiveBranchMask |= 0x00000010u;
+				context->directCallbackActiveBranchMask |= SLIP_TRACK_CALLBACK_GLOBAL_GATE_REJECTED;
 				++context->directCallbackGlobalGateRejectedCount;
 			}
 		}
@@ -3060,7 +3446,7 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 	bool fallbackLowFromHigh = false;
 
 	if ((flags & skipMask) == 0 && !planeRejected && !trackWorldGlobalCarryGateCarry &&
-	    (countAndFlags & 0x8000u) != 0) {
+	    (countAndFlags & SLIP_TRC_PRIMITIVE_TEXTURED) != 0) {
 		bool handled = false;
 		uint32_t texturedCallbackResult = 0;
 		bool carryHigh = false;
@@ -3094,15 +3480,16 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 		if (environment->inlineWalkMode && fallbackLowFromHigh &&
 		    context->directCallbackHighFarFallbackCount > farFallbacksBefore) {
 			bool polygonRejected = false;
-			const uint16_t polygonCountAndFlags = (uint16_t)(countAndFlags & 0x7fffu);
+			const uint16_t polygonCountAndFlags = (uint16_t)(countAndFlags & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
 			uint16_t drawMaterialIndex = materialIndex;
 
-			if (drawMaterialIndex & 0x8000u) {
+			if (drawMaterialIndex & SLIP_TRC_PRIMITIVE_MATERIAL_UNRESOLVED) {
 				drawMaterialIndex = 0;
 			}
-			if (!TrackView_ExecuteLowEmitPath(context, &primitiveContext, primitiveRecord + 0x0cu,
-			                                  recordBytesRemaining - 0x0cu, polygonCountAndFlags, normalX, normalY,
-			                                  normalZ, drawMaterialIndex, &polygonRejected)) {
+			if (!TrackView_ExecuteLowEmitPath(
+			        context, &primitiveContext, primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+			        recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, polygonCountAndFlags, normalX, normalY,
+			        normalZ, drawMaterialIndex, &polygonRejected)) {
 				context->rendererFlags = savedContextRenderFlags;
 				return false;
 			}
@@ -3124,10 +3511,11 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 	}
 
 	if (fallbackLowFromHigh) {
-		countAndFlags = (uint16_t)(countAndFlags & 0x7fffu);
+		countAndFlags = (uint16_t)(countAndFlags & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
 	}
 	if ((flags & skipMask) == 0 && !planeRejected && !trackWorldGlobalCarryGateCarry &&
-	    (countAndFlags & 0x8000u) == 0 && (materialFlags != 0 && (materialFlags & 0x80u) != 0)) {
+	    (countAndFlags & SLIP_TRC_PRIMITIVE_TEXTURED) == 0 &&
+	    (materialFlags != 0 && (materialFlags & SLIP_TRC_MATERIAL_EXTENDED) != 0)) {
 		bool extendedMaterialRejected = false;
 		bool skipDispatch = false;
 		uint32_t materialDispatchValue = 0;
@@ -3147,16 +3535,18 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 				context->rendererFlags = savedContextRenderFlags;
 				return true;
 			}
-			materialDispatchValue = 0xffffffffu;
+			materialDispatchValue = UINT32_MAX;
 		} else {
 			SlipDraw3DPolygonStatusVisit statusVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 			SlipDraw3DPolygonStatus status;
 
-			if (!SlipDraw3D_PolygonStatus(context->vertexRecords, context->vertexRecordCount, primitiveRecord + 0x0cu,
-			                              recordBytesRemaining - 0x0cu, countAndFlags, context->projectState,
-			                              TrackView_TransformVertex, TrackView_PrimitiveProjectMask, &primitiveContext,
-			                              statusVisits, sizeof(statusVisits) / sizeof(statusVisits[0]), &status)) {
-				context->failureAddress = 0x0001995bu;
+			if (!SlipDraw3D_PolygonStatus(context->vertexRecords, context->vertexRecordCount,
+			                              primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+			                              recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, countAndFlags,
+			                              context->projectState, TrackView_TransformVertex,
+			                              TrackView_PrimitiveProjectMask, &primitiveContext, statusVisits,
+			                              sizeof(statusVisits) / sizeof(statusVisits[0]), &status)) {
+				context->failureAddress = SLIP_DRAW3D_TEXTURED_RING_STATUS_FAILURE_DOS_STAGE;
 				context->failed = true;
 				context->rendererFlags = savedContextRenderFlags;
 				return false;
@@ -3182,17 +3572,19 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 		return true;
 	}
 	if ((flags & skipMask) == 0 && !planeRejected && !trackWorldGlobalCarryGateCarry &&
-	    (countAndFlags & 0x8000u) == 0 && (materialFlags == 0 || (materialFlags & 0x80u) == 0)) {
+	    (countAndFlags & SLIP_TRC_PRIMITIVE_TEXTURED) == 0 &&
+	    (materialFlags == 0 || (materialFlags & SLIP_TRC_MATERIAL_EXTENDED) == 0)) {
 		bool polygonRejected = false;
-		const uint16_t polygonCountAndFlags = (uint16_t)(countAndFlags & 0x7fffu);
+		const uint16_t polygonCountAndFlags = (uint16_t)(countAndFlags & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
 		uint16_t drawMaterialIndex = materialIndex;
 
-		if (drawMaterialIndex & 0x8000u) {
+		if (drawMaterialIndex & SLIP_TRC_PRIMITIVE_MATERIAL_UNRESOLVED) {
 			drawMaterialIndex = 0;
 		}
-		if (!TrackView_ExecuteLowEmitPath(context, &primitiveContext, primitiveRecord + 0x0cu,
-		                                  recordBytesRemaining - 0x0cu, polygonCountAndFlags, normalX, normalY, normalZ,
-		                                  drawMaterialIndex, &polygonRejected)) {
+		if (!TrackView_ExecuteLowEmitPath(context, &primitiveContext,
+		                                  primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+		                                  recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, polygonCountAndFlags,
+		                                  normalX, normalY, normalZ, drawMaterialIndex, &polygonRejected)) {
 			context->rendererFlags = savedContextRenderFlags;
 			return false;
 		}
@@ -3215,20 +3607,25 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 
 				const uint8_t *const shadeRecord =
 				    TrackView_MaterialRecord(context->materialTable, context->materialTableBytes, materialIndex);
-				const uint32_t shadeValue = shadeRecord != NULL ? SlipBytes_ReadLE32(shadeRecord + 0x50u) : 0;
+				const uint32_t shadeValue =
+				    shadeRecord != NULL
+				        ? SlipBytes_ReadLE32(shadeRecord + offsetof(SlipDraw3DMaterialRecord, importedMaterialByte))
+				        : 0;
 				SlipView3DVec32 rotatedNormal = SlipView3D_TransformPosition16(
 				    &primitiveContext.viewMatrix,
-				    (SlipView3DVec32){(int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x02u),
-				                      (int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x04u),
-				                      (int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x06u)});
+				    (SlipView3DVec32){
+				        (int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+				        (int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+				        (int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET)});
 				SlipDraw3DProjectIndex project;
 				SlipDraw3DPostPlaneCaptureVisit captureVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 				SlipDraw3DPostPlaneCapture capture;
 
-				if (!SlipDraw3D_ProjectIndex(context->vertexRecords, context->vertexRecordCount,
-				                             SlipBytes_ReadLE16(primitiveRecord + 0x0cu), TrackView_TransformVertex,
-				                             &primitiveContext, &project)) {
-					context->failureAddress = 0x00019746u;
+				if (!SlipDraw3D_ProjectIndex(
+				        context->vertexRecords, context->vertexRecordCount,
+				        SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
+				        TrackView_TransformVertex, &primitiveContext, &project)) {
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PROJECT_INDEX;
 					context->failed = true;
 					context->rendererFlags = savedContextRenderFlags;
 					return false;
@@ -3239,7 +3636,7 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 				        (uint16_t)rotatedNormal.y, (uint16_t)rotatedNormal.z, context->cameraLightX,
 				        context->cameraLightY, context->cameraLightZ, captureVisits,
 				        sizeof(captureVisits) / sizeof(captureVisits[0]), &capture)) {
-					context->failureAddress = 0x0001ab34u;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_CAPTURE_POST_PLANE_RING;
 					context->failed = true;
 					context->rendererFlags = savedContextRenderFlags;
 					return false;
@@ -3282,7 +3679,7 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 						if (!SlipDraw3D_ReleasePostPlaneRing(
 						        context->drawRecordPool, context->postPlaneHead, releaseVisits,
 						        sizeof(releaseVisits) / sizeof(releaseVisits[0]), &release)) {
-							context->failureAddress = 0x0001abb5u;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RELEASE_POST_PLANE_RING;
 							context->failed = true;
 							context->rendererFlags = savedContextRenderFlags;
 							return false;
@@ -3315,7 +3712,7 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 		}
 		if (materialFlags == 0 || polygonRejected) {
 			++context->directCallbackDispatchCount;
-			*callbackResult = ((callbackInput & 0xffffff00u) | flags);
+			*callbackResult = ((callbackInput & (UINT32_MAX ^ UINT8_MAX)) | flags);
 			*carryFromCallback = polygonRejected;
 			context->rendererFlags = savedContextRenderFlags;
 			return true;
@@ -3337,7 +3734,7 @@ bool TrackView_DirectCallback(const uint8_t *primitiveRecord, size_t recordBytes
 	                                              planeRejected, trackWorldGlobalCarryGateCarry, false, false, 0, 0, 0,
 	                                              0, 0, 0, &dispatch) ||
 	    !dispatch.returnStateKnown) {
-		context->failureAddress = 0x0003872cu;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PRIMITIVE_CALLBACK_DISPATCH;
 		context->failed = true;
 		context->rendererFlags = savedContextRenderFlags;
 		return false;
@@ -3360,16 +3757,18 @@ static bool TrackView_PrepareMaterialState(TrackViewRawBspContext *context,
 	SlipTrackWorldMaterialStateStore materialPlaneState;
 	uint32_t pushedDword;
 
-	if (context == NULL || primitiveContext == NULL || primitiveRecord == NULL || recordBytesRemaining < 0x10u ||
-	    skipDispatch == NULL) {
+	if (context == NULL || primitiveContext == NULL || primitiveRecord == NULL ||
+	    recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_DWORD_END || skipDispatch == NULL) {
 		return false;
 	}
 	*skipDispatch = false;
-	if (!SlipDraw3D_PolygonStatus(context->vertexRecords, context->vertexRecordCount, primitiveRecord + 0x0cu,
-	                              recordBytesRemaining - 0x0cu, countAndFlags, context->projectState,
-	                              TrackView_TransformVertex, TrackView_PrimitiveProjectMask, primitiveContext,
-	                              statusVisits, sizeof(statusVisits) / sizeof(statusVisits[0]), &status)) {
-		context->failureAddress = 0x0001995bu;
+	if (!SlipDraw3D_PolygonStatus(context->vertexRecords, context->vertexRecordCount,
+	                              primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+	                              recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, countAndFlags,
+	                              context->projectState, TrackView_TransformVertex, TrackView_PrimitiveProjectMask,
+	                              primitiveContext, statusVisits, sizeof(statusVisits) / sizeof(statusVisits[0]),
+	                              &status)) {
+		context->failureAddress = SLIP_DRAW3D_TEXTURED_RING_STATUS_FAILURE_DOS_STAGE;
 		context->failed = true;
 		return false;
 	}
@@ -3377,18 +3776,19 @@ static bool TrackView_PrepareMaterialState(TrackViewRawBspContext *context,
 		*skipDispatch = true;
 		return true;
 	}
-	pushedDword = SlipBytes_ReadLE32(primitiveRecord + 0x0cu);
+	pushedDword = SlipBytes_ReadLE32(primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET);
 	transformedOrigin = SlipView3D_TransformPosition16(
-	    &primitiveContext->viewMatrix, (SlipView3DVec32){(int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x02u),
-	                                                     (int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x04u),
-	                                                     (int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x06u)});
+	    &primitiveContext->viewMatrix,
+	    (SlipView3DVec32){(int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+	                      (int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+	                      (int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET)});
 	if (!SlipDraw3D_ProjectIndex(context->vertexRecords, context->vertexRecordCount, (uint16_t)pushedDword,
 	                             TrackView_TransformVertex, primitiveContext, &project) ||
 	    !SlipTrackWorld_MaterialStateStore((uint32_t)project.world.x, (uint32_t)project.world.y,
 	                                       (uint32_t)project.world.z, (uint32_t)transformedOrigin.x,
 	                                       (uint32_t)transformedOrigin.y, (uint32_t)transformedOrigin.z,
 	                                       &materialPlaneState)) {
-		context->failureAddress = 0x00019746u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PROJECT_INDEX;
 		context->failed = true;
 		return false;
 	}
@@ -3407,7 +3807,7 @@ static bool TrackView_PrepareMaterialState(TrackViewRawBspContext *context,
 }
 
 static int32_t TrackView_ShapeArithmeticShiftRight(int32_t value, uint16_t shift) {
-	const uint32_t count = (uint32_t)shift & 0x1fu;
+	const uint32_t count = shift & SLIP_DWORD_SHIFT_COUNT_MASK;
 
 	if (count == 0u) {
 		return value;
@@ -3472,31 +3872,40 @@ static bool TrackView_DrawGpuWorldTexture(TrackViewRawBspContext *context,
 	SlipDraw3DPolygonStatusVisit statusVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	/* Use immutable model vertices/UVs, not the DOS clipped draw ring. */
 	uint32_t count = countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
-	uint32_t uvOffset = (countAndFlags & SLIP_PRIMITIVE_VERTEX_NORMALS) ? count * 8 : count * 2;
-	SlipRaceGpuWorldPoint points[128];
+	uint32_t uvOffset = (countAndFlags & SLIP_PRIMITIVE_VERTEX_NORMALS)
+	                        ? count * (SLIP_SERIALIZED_INDEX_BYTES + SLIP_SERIALIZED_NORMAL_BYTES)
+	                        : count * SLIP_SERIALIZED_INDEX_BYTES;
+	SlipRaceGpuWorldPoint points[SLIP_GPU_WORLD_TEXTURE_VERTEX_CAPACITY];
 	SlipDraw3DPolygonStatus status;
 	*rejected = false;
-	if (count > 128 || recordBytesRemaining < 12u + uvOffset + count * 4u ||
-	    !SlipDraw3D_PolygonStatus(context->vertexRecords, context->vertexRecordCount, primitiveRecord + 12,
-	                              recordBytesRemaining - 12, countAndFlags, context->projectState,
-	                              TrackView_TransformVertex, TrackView_PrimitiveProjectMask, (void *)primitiveContext,
-	                              statusVisits, sizeof(statusVisits) / sizeof(statusVisits[0]), &status))
+	if (count > SLIP_GPU_WORLD_TEXTURE_VERTEX_CAPACITY ||
+	    recordBytesRemaining <
+	        SLIP_PRIMITIVE_HEADER_BYTES + uvOffset + count * SLIP_SERIALIZED_TEXTURE_COORDINATE_BYTES ||
+	    !SlipDraw3D_PolygonStatus(
+	        context->vertexRecords, context->vertexRecordCount, primitiveRecord + SLIP_PRIMITIVE_HEADER_BYTES,
+	        recordBytesRemaining - SLIP_PRIMITIVE_HEADER_BYTES, countAndFlags, context->projectState,
+	        TrackView_TransformVertex, TrackView_PrimitiveProjectMask, (void *)primitiveContext, statusVisits,
+	        sizeof(statusVisits) / sizeof(statusVisits[0]), &status))
 		return false;
 	if (status.clipClassification == -1) {
 		*rejected = true;
 		return true;
 	}
 	for (uint32_t i = 0; i < count; i++) {
-		uint16_t index = SlipBytes_ReadLE16(primitiveRecord + 12 + i * 2);
+		uint16_t index =
+		    SlipBytes_ReadLE16(primitiveRecord + SLIP_PRIMITIVE_HEADER_BYTES + i * SLIP_SERIALIZED_INDEX_BYTES);
 		if (index >= context->vertexRecordCount)
 			return false;
 		SlipDraw3DVertexRecord *r = &context->vertexRecords[index];
 		SlipDraw3D_ProjectVertex(r, context->projectState, TrackView_TransformVertex, TrackView_ProjectScreenPrimary,
 		                         TrackView_ProjectScreenSecondary, (void *)primitiveContext);
-		points[i] = (SlipRaceGpuWorldPoint){.source = {r->sourceX, r->sourceY, r->sourceZ},
-		                                    .view = r->world,
-		                                    .u = SlipBytes_ReadLE16(primitiveRecord + 12 + uvOffset + i * 4),
-		                                    .v = SlipBytes_ReadLE16(primitiveRecord + 12 + uvOffset + i * 4 + 2)};
+		points[i] = (SlipRaceGpuWorldPoint){
+		    .source = {r->sourceX, r->sourceY, r->sourceZ},
+		    .view = r->world,
+		    .u = SlipBytes_ReadLE16(primitiveRecord + SLIP_PRIMITIVE_HEADER_BYTES + uvOffset +
+		                            i * SLIP_SERIALIZED_TEXTURE_COORDINATE_BYTES),
+		    .v = SlipBytes_ReadLE16(primitiveRecord + SLIP_PRIMITIVE_HEADER_BYTES + uvOffset +
+		                            i * SLIP_SERIALIZED_TEXTURE_COORDINATE_BYTES + sizeof(uint16_t))};
 	}
 	SlipResourcePayload texture = {0};
 	if (!TrackView_LockResourceHandlePayload(context->resourceRegistry, textureHandle, &texture))
@@ -3510,7 +3919,7 @@ static bool TrackView_CompleteTexturedCallback(TrackViewRawBspContext *context, 
                                                bool rejected, bool *handled, uint32_t *callbackResult, bool *carryOut) {
 	context->rendererFlags = savedRenderFlags;
 	*handled = true;
-	*callbackResult = savedRenderFlags & 0xffffu;
+	*callbackResult = savedRenderFlags & UINT16_MAX;
 	*carryOut = rejected;
 	return true;
 }
@@ -3534,7 +3943,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
                                                   uint16_t normalY, uint16_t normalZ, uint16_t materialIndex,
                                                   bool *handled, bool *fallbackLow, uint32_t *callbackResult,
                                                   bool *carryOut) {
-	SlipDraw3DPerspectiveDepthVisit depthVisits[64];
+	SlipDraw3DPerspectiveDepthVisit depthVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	SlipDraw3DPerspectiveDepth depthResult;
 
 	if (context == NULL || primitiveContext == NULL || primitiveRecord == NULL || handled == NULL ||
@@ -3547,10 +3956,10 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 	}
 	*callbackResult = 0;
 	*carryOut = false;
-	context->directCallbackActiveBranchMask |= 0x00000020u;
-	context->failureAddress = 0x00038795u;
+	context->directCallbackActiveBranchMask |= SLIP_TRACK_CALLBACK_HIGH_TEXTURED_PATH;
+	context->failureAddress = TRACK_VIEW_DIAGNOSTIC_HIGH_TEXTURED_CALLBACK;
 	++context->directCallbackHighTexturedPathCount;
-	if (materialIndex & 0x8000u) {
+	if (materialIndex & SLIP_TRC_PRIMITIVE_MATERIAL_UNRESOLVED) {
 		materialIndex = 0;
 	}
 	if (!primitiveContext->shapePath) {
@@ -3570,12 +3979,13 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 	if (!primitiveContext->shapePath) {
 
 		if (context->projectState == NULL ||
-		    !SlipDraw3D_PerspectiveDepth(context->vertexRecords, context->vertexRecordCount, primitiveRecord + 0x0cu,
-		                                 recordBytesRemaining - 0x0cu, countAndFlags,
+		    !SlipDraw3D_PerspectiveDepth(context->vertexRecords, context->vertexRecordCount,
+		                                 primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+		                                 recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, countAndFlags,
 		                                 context->projectState->inverseProjectionScale, TrackView_TransformVertex,
 		                                 (void *)primitiveContext, depthVisits,
 		                                 sizeof(depthVisits) / sizeof(depthVisits[0]), &depthResult)) {
-			context->failureAddress = 0x00019354u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_TEXTURED_PERSPECTIVE_DEPTH;
 			context->failed = true;
 			return false;
 		}
@@ -3603,7 +4013,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 		SlipDraw3DTexturedDispatchPoint texturedDispatchPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 		SlipDraw3DTexturedDispatchVisit texturedDispatchVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 		SlipDraw3DTexturedDispatch texturedDispatch;
-		uint8_t standalonePointBuffer[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT * 0x20u];
+		uint8_t standalonePointBuffer[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT * sizeof(RasterTexturedPoint)];
 		uint8_t *texturedPointBuffer = standalonePointBuffer;
 		size_t texturedPointBufferBytes = sizeof(standalonePointBuffer);
 		if (context->hostRenderer != NULL) {
@@ -3632,7 +4042,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 		    !SlipDraw3D_TexturedEmitGate(context->materialTable, context->materialTableBytes, context->drawStateRecord,
 		                                 dispatchRenderFlags, countAndFlags, normalX, normalY, normalZ, materialIndex,
 		                                 context->materialFrameIndex, &texturedEmitGate)) {
-			context->failureAddress = 0x00019e0du;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_TEXTURED_EMIT_GATE;
 			context->failed = true;
 			return false;
 		}
@@ -3654,7 +4064,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 				context->rendererFlags = savedRenderFlags;
 				return true;
 			}
-			context->failureAddress = 0x00019eafu;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_TEXTURED_DISPATCH_FALLBACK;
 			context->failed = true;
 			return false;
 		}
@@ -3669,15 +4079,17 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 			                                          carryOut);
 		}
 		if (!SlipDraw3D_BuildTexturedRingExecute(
-		        context->drawRecordPool, context->vertexRecords, context->vertexRecordCount, primitiveRecord + 0x0cu,
-		        recordBytesRemaining - 0x0cu, countAndFlags, texturedEmitGate.textureHandle, context->projectState,
-		        TrackView_TransformVertex, TrackView_PrimitiveProjectMask, TrackView_ProjectScreenPrimary,
-		        TrackView_ProjectScreenSecondary, (void *)primitiveContext, postPlaneArgs.hasPostPlanes,
-		        postPlaneArgs.planeBase, postPlaneArgs.planeBytes, postPlaneArgs.planeHeadOffset,
-		        postPlaneArgs.limitXMin, postPlaneArgs.limitXMax, postPlaneArgs.limitYMin, postPlaneArgs.limitYMax,
-		        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, texturedClipFlagVisits,
-		        sizeof(texturedClipFlagVisits) / sizeof(texturedClipFlagVisits[0]), texturedPostBoundsVisits,
-		        sizeof(texturedPostBoundsVisits) / sizeof(texturedPostBoundsVisits[0]), texturedPostClipRecordVisits,
+		        context->drawRecordPool, context->vertexRecords, context->vertexRecordCount,
+		        primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+		        recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, countAndFlags, texturedEmitGate.textureHandle,
+		        context->projectState, TrackView_TransformVertex, TrackView_PrimitiveProjectMask,
+		        TrackView_ProjectScreenPrimary, TrackView_ProjectScreenSecondary, (void *)primitiveContext,
+		        postPlaneArgs.hasPostPlanes, postPlaneArgs.planeBase, postPlaneArgs.planeBytes,
+		        postPlaneArgs.planeHeadOffset, postPlaneArgs.limitXMin, postPlaneArgs.limitXMax,
+		        postPlaneArgs.limitYMin, postPlaneArgs.limitYMax, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
+		        texturedClipFlagVisits, sizeof(texturedClipFlagVisits) / sizeof(texturedClipFlagVisits[0]),
+		        texturedPostBoundsVisits, sizeof(texturedPostBoundsVisits) / sizeof(texturedPostBoundsVisits[0]),
+		        texturedPostClipRecordVisits,
 		        sizeof(texturedPostClipRecordVisits) / sizeof(texturedPostClipRecordVisits[0]),
 		        texturedPostClipPlaneVisits,
 		        sizeof(texturedPostClipPlaneVisits) / sizeof(texturedPostClipPlaneVisits[0]), statusVisits,
@@ -3686,7 +4098,9 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 			if (g_vehicleViewDumpDiagnostics) {
 				uint8_t *const debugRecordPoolBytes = SlipDraw3D_RecordPoolBytes(context->drawRecordPool);
 				const size_t debugRecordPoolBytesCount = SlipDraw3D_RecordPoolByteSize();
-				static const uint32_t debugOffsets[] = {0x00u, 0x3cu, 0x78u, 0xb4u, 0xf0u};
+				static const uint32_t debugOffsets[] = {
+				    0, SLIP_DRAW3D_LINKED_DRAW_RECORD_SIZE, 2 * SLIP_DRAW3D_LINKED_DRAW_RECORD_SIZE,
+				    3 * SLIP_DRAW3D_LINKED_DRAW_RECORD_SIZE, 4 * SLIP_DRAW3D_LINKED_DRAW_RECORD_SIZE};
 				size_t debugOffsetIndex;
 
 				fprintf(
@@ -3747,11 +4161,12 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 						fprintf(stderr,
 						        "  record off=0x%08x xyz=%d,%d,%d screen=%d,%d flags=0x%08x depth=%d next=0x%08x "
 						        "prev=0x%08x\n",
-						        debugOffset, (int32_t)SlipBytes_ReadLE32(debugRecord + 0x00u),
-						        (int32_t)SlipBytes_ReadLE32(debugRecord + 0x04u),
-						        (int32_t)SlipBytes_ReadLE32(debugRecord + 0x08u),
-						        (int32_t)SlipBytes_ReadLE32(debugRecord + 0x0cu),
-						        (int32_t)SlipBytes_ReadLE32(debugRecord + 0x10u),
+						        debugOffset,
+						        (int32_t)SlipBytes_ReadLE32(debugRecord + offsetof(SlipDraw3DDrawRecord, world.x)),
+						        (int32_t)SlipBytes_ReadLE32(debugRecord + offsetof(SlipDraw3DDrawRecord, world.y)),
+						        (int32_t)SlipBytes_ReadLE32(debugRecord + offsetof(SlipDraw3DDrawRecord, world.z)),
+						        (int32_t)SlipBytes_ReadLE32(debugRecord + offsetof(SlipDraw3DDrawRecord, screenX)),
+						        (int32_t)SlipBytes_ReadLE32(debugRecord + offsetof(SlipDraw3DDrawRecord, screenY)),
 						        SlipBytes_ReadLE32(debugRecord + SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET),
 						        (int32_t)SlipBytes_ReadLE32(debugRecord + SLIP_DRAW3D_VERTEX_RECORD_DEPTH_OFFSET),
 						        SlipBytes_ReadLE32(debugRecord + SLIP_DRAW3D_RECORD_NEXT_OFFSET),
@@ -3834,7 +4249,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 		        TRACK_VIEW_DIAGNOSTIC_POINT_BUFFER_BASE, texturedDispatchPoints,
 		        sizeof(texturedDispatchPoints) / sizeof(texturedDispatchPoints[0]), texturedDispatchVisits,
 		        sizeof(texturedDispatchVisits) / sizeof(texturedDispatchVisits[0]), &texturedDispatch)) {
-			context->failureAddress = 0x0001ae47u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 			context->failed = true;
 			return false;
 		}
@@ -3861,14 +4276,14 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 			++context->directCallbackHighTexturedDispatchCount;
 			if (!TrackView_WriteTexturedPointBuffer(texturedDispatchPoints, texturedDispatch.pointCount,
 			                                        texturedPointBuffer, texturedPointBufferBytes)) {
-				context->failureAddress = 0x0001ae47u;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 				context->failed = true;
 				return false;
 			}
 			if (context->resourceRegistry == NULL ||
 			    !TrackView_LockResourceHandlePayload(context->resourceRegistry, texturedDispatch.textureHandle,
 			                                         &texturePayload)) {
-				context->failureAddress = 0x000248a5u;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_LOCK_TEXTURE_PAYLOAD;
 				context->failed = true;
 				return false;
 			}
@@ -3881,14 +4296,16 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 				                                          callbackResult, carryOut);
 			}
 
-			if (texturePayload.size < 4u) {
-				context->failureAddress = 0x0001ae47u;
+			if (texturePayload.size < SLIP_SPRITE_HEIGHT_OFFSET + sizeof(uint16_t)) {
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 				context->failed = true;
 				return false;
 			}
 			if ((texturedDispatch.calledTransparentPerspectiveRasterizer ||
 			     texturedDispatch.calledTransparentAffineRasterizer) &&
-			    texturePayload.size >= 0x0au && SlipBytes_ReadLE16(texturePayload.data + 0x08u) != 0xffffu) {
+			    texturePayload.size >= SLIP_SPRITE_TRANSPARENT_COLOUR_END &&
+			    SlipBytes_ReadLE16(texturePayload.data + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET) !=
+			        SLIP_SPRITE_NO_TRANSPARENT_COLOUR) {
 
 				TrackView_UnlockResourceHandlePayload(context->resourceRegistry, texturedDispatch.textureHandle);
 				(void)TrackView_LockResourceHandlePayload(context->resourceRegistry, texturedDispatch.textureHandle,
@@ -3896,7 +4313,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 			}
 			{
 				const uint16_t textureWidth = SlipBytes_ReadLE16(texturePayload.data);
-				const uint16_t textureHeight = SlipBytes_ReadLE16(texturePayload.data + 2u);
+				const uint16_t textureHeight = SlipBytes_ReadLE16(texturePayload.data + SLIP_SPRITE_HEIGHT_OFFSET);
 				const uint8_t **textureRows = NULL;
 
 				if (textureHeight != 0u) {
@@ -3904,7 +4321,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 				}
 				if (textureWidth == 0u || textureHeight == 0u || textureRows == NULL) {
 					free(textureRows);
-					context->failureAddress = 0x0002d91au;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_TEXTURE_ROW_TABLE;
 					context->failed = true;
 					return false;
 				}
@@ -3914,7 +4331,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					if (!Raster_BuildTextureRowTable(texturePayload.data, texturePayload.size, rowScroll, textureRows,
 					                                 textureHeight, &rowTable)) {
 						free(textureRows);
-						context->failureAddress = 0x0002d91au;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_TEXTURE_ROW_TABLE;
 						context->failed = true;
 						return false;
 					}
@@ -3927,8 +4344,10 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					haveScreenBefore = true;
 				}
 				if (texturedDispatch.calledOpaqueAffineRasterizer ||
-				    (texturedDispatch.calledTransparentAffineRasterizer && texturePayload.size >= 0x0au &&
-				     SlipBytes_ReadLE16(texturePayload.data + 0x08u) != 0xffffu)) {
+				    (texturedDispatch.calledTransparentAffineRasterizer &&
+				     texturePayload.size >= SLIP_SPRITE_TRANSPARENT_COLOUR_END &&
+				     SlipBytes_ReadLE16(texturePayload.data + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET) !=
+				         SLIP_SPRITE_NO_TRANSPARENT_COLOUR)) {
 					RasterAffineTexturedEntryScanVisit affineEntryVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 					RasterAffineTexturedEntrySetup affineEntry;
 
@@ -3938,7 +4357,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					        (uint32_t)texturedDispatch.pointCount, affineEntryVisits,
 					        sizeof(affineEntryVisits) / sizeof(affineEntryVisits[0]), &affineEntry)) {
 						free(textureRows);
-						context->failureAddress = 0x00030600u;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_AFFINE_TEXTURED_ENTRY;
 						context->failed = true;
 						return false;
 					}
@@ -3950,7 +4369,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 
 						if (affineEntry.topY < 0 || (size_t)affineEntry.topY >= SLIPSTREAM_SCREEN_HEIGHT) {
 							free(textureRows);
-							context->failureAddress = 0x0003072eu;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_AFFINE_HORIZONTAL_SPAN;
 							context->failed = true;
 							return false;
 						}
@@ -3968,7 +4387,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 						horizontalState.textureRowBytes = textureWidth;
 						if (!Raster_DrawAffineHorizontalSpan(&horizontalState, &horizontal)) {
 							free(textureRows);
-							context->failureAddress = 0x0003072eu;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_AFFINE_HORIZONTAL_SPAN;
 							context->failed = true;
 							return false;
 						}
@@ -3996,12 +4415,13 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 						                                    affineEntry.topRightPointOffset,
 						                                affineEntry.topY, affineEntry.bottomY, &rightStep)) {
 							free(textureRows);
-							context->failureAddress = 0x000316d3u;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_AFFINE_EDGE_STEPS;
 							context->failed = true;
 							return false;
 						}
 						if (!leftStep.carryOut && !rightStep.carryOut) {
-							loopVisits = (RasterAffineScanlineLoopVisit *)calloc(512u, sizeof(*loopVisits));
+							loopVisits = (RasterAffineScanlineLoopVisit *)calloc(SLIP_TEXTURED_RASTER_VISIT_CAPACITY,
+							                                                     sizeof(*loopVisits));
 							memset(&loopState, 0, sizeof(loopState));
 							loopState.screenRows = g_screenRowPtrs;
 							loopState.screenRowCount = SLIPSTREAM_SCREEN_HEIGHT;
@@ -4036,10 +4456,11 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 							loopState.rightXFraction = rightStep.xFraction;
 							loopState.rightRemaining = rightStep.remaining;
 							if (loopVisits == NULL ||
-							    !Raster_DrawAffineScanlineLoop(&loopState, loopVisits, 512u, &loop)) {
+							    !Raster_DrawAffineScanlineLoop(&loopState, loopVisits,
+							                                   SLIP_TEXTURED_RASTER_VISIT_CAPACITY, &loop)) {
 								free(loopVisits);
 								free(textureRows);
-								context->failureAddress = 0x00030676u;
+								context->failureAddress = TRACK_VIEW_DIAGNOSTIC_AFFINE_SCANLINE_LOOP;
 								context->failed = true;
 								return false;
 							}
@@ -4067,7 +4488,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					        (uint32_t)texturedDispatch.pointCount, perspectiveEntryVisits,
 					        sizeof(perspectiveEntryVisits) / sizeof(perspectiveEntryVisits[0]), &perspectiveEntry)) {
 						free(textureRows);
-						context->failureAddress = 0x000308e2u;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PERSPECTIVE_TEXTURED_ENTRY;
 						context->failed = true;
 						return false;
 					}
@@ -4077,7 +4498,8 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 						RasterOpaquePerspectiveTexturedPolygon opaque;
 						RasterOpaquePerspectiveTexturedPolygonState opaqueState;
 
-						opaqueVisits = (RasterOpaquePerspectiveTexturedVisit *)calloc(512u, sizeof(*opaqueVisits));
+						opaqueVisits = (RasterOpaquePerspectiveTexturedVisit *)calloc(
+						    SLIP_TEXTURED_RASTER_VISIT_CAPACITY, sizeof(*opaqueVisits));
 						memset(&opaqueState, 0, sizeof(opaqueState));
 						opaqueState.screenRows = g_screenRowPtrs;
 						opaqueState.screenRowCount = SLIPSTREAM_SCREEN_HEIGHT;
@@ -4100,14 +4522,16 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 						opaqueState.pointBufferEnd =
 						    TRACK_VIEW_DIAGNOSTIC_POINT_BUFFER_BASE + perspectiveEntry.endPointOffset;
 						if (opaqueVisits == NULL ||
-						    !Raster_DrawOpaquePerspectiveTexturedPolygon(&opaqueState, opaqueVisits, 512u, &opaque)) {
+						    !Raster_DrawOpaquePerspectiveTexturedPolygon(
+						        &opaqueState, opaqueVisits, SLIP_TEXTURED_RASTER_VISIT_CAPACITY, &opaque)) {
 							free(opaqueVisits);
 							free(textureRows);
-							context->failureAddress = 0x00030978u;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OPAQUE_PERSPECTIVE_POLYGON;
 							context->failed = true;
 							return false;
 						}
-						TrackView_DumpOpaquePerspective(recordOffset, &opaque, opaqueVisits, 512u);
+						TrackView_DumpOpaquePerspective(recordOffset, &opaque, opaqueVisits,
+						                                SLIP_TEXTURED_RASTER_VISIT_CAPACITY);
 						context->directCallbackHighPixelsWrittenCount += (uint32_t)opaque.pixelsWritten;
 						free(opaqueVisits);
 					} else if (perspectiveEntry.jumpMaskedPerspectivePolygon) {
@@ -4115,8 +4539,8 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 						RasterMaskedPerspectiveTexturedPolygon masked;
 						RasterMaskedPerspectiveTexturedPolygonState maskedState;
 
-						maskedVisits =
-						    (RasterMaskedPerspectiveTexturedPolygonVisit *)calloc(512u, sizeof(*maskedVisits));
+						maskedVisits = (RasterMaskedPerspectiveTexturedPolygonVisit *)calloc(
+						    SLIP_TEXTURED_RASTER_VISIT_CAPACITY, sizeof(*maskedVisits));
 						memset(&maskedState, 0, sizeof(maskedState));
 						maskedState.screenRows = g_screenRowPtrs;
 						maskedState.screenRowCount = SLIPSTREAM_SCREEN_HEIGHT;
@@ -4131,17 +4555,20 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 						maskedState.textureRowCount = textureHeight;
 						maskedState.textureRowBytes = textureWidth;
 						if (maskedVisits == NULL ||
-						    !Raster_DrawMaskedPerspectiveTexturedPolygon(&maskedState, maskedVisits, 512u, &masked)) {
+						    !Raster_DrawMaskedPerspectiveTexturedPolygon(
+						        &maskedState, maskedVisits, SLIP_TEXTURED_RASTER_VISIT_CAPACITY, &masked)) {
 							if (maskedVisits != NULL) {
-								TrackView_DumpMaskedRaster(recordOffset, &masked, maskedVisits, 512u);
+								TrackView_DumpMaskedRaster(recordOffset, &masked, maskedVisits,
+								                           SLIP_TEXTURED_RASTER_VISIT_CAPACITY);
 							}
 							free(maskedVisits);
 							free(textureRows);
-							context->failureAddress = 0x0002dc2fu;
+							context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MASKED_PERSPECTIVE_POLYGON;
 							context->failed = true;
 							return false;
 						}
-						TrackView_DumpMaskedRaster(recordOffset, &masked, maskedVisits, 512u);
+						TrackView_DumpMaskedRaster(recordOffset, &masked, maskedVisits,
+						                           SLIP_TEXTURED_RASTER_VISIT_CAPACITY);
 						context->directCallbackHighPixelsWrittenCount += (uint32_t)masked.pixelsWritten;
 						free(maskedVisits);
 					}
@@ -4150,7 +4577,8 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					RasterMaskedPerspectiveTexturedPolygon masked;
 					RasterMaskedPerspectiveTexturedPolygonState maskedState;
 
-					maskedVisits = (RasterMaskedPerspectiveTexturedPolygonVisit *)calloc(512u, sizeof(*maskedVisits));
+					maskedVisits = (RasterMaskedPerspectiveTexturedPolygonVisit *)calloc(
+					    SLIP_TEXTURED_RASTER_VISIT_CAPACITY, sizeof(*maskedVisits));
 					memset(&maskedState, 0, sizeof(maskedState));
 					maskedState.screenRows = g_screenRowPtrs;
 					maskedState.screenRowCount = SLIPSTREAM_SCREEN_HEIGHT;
@@ -4166,17 +4594,20 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					maskedState.textureRowBytes = textureWidth;
 					++context->directCallbackHighRasterEntryCount;
 					if (maskedVisits == NULL ||
-					    !Raster_DrawMaskedPerspectiveTexturedPolygon(&maskedState, maskedVisits, 512u, &masked)) {
+					    !Raster_DrawMaskedPerspectiveTexturedPolygon(&maskedState, maskedVisits,
+					                                                 SLIP_TEXTURED_RASTER_VISIT_CAPACITY, &masked)) {
 						if (maskedVisits != NULL) {
-							TrackView_DumpMaskedRaster(recordOffset, &masked, maskedVisits, 512u);
+							TrackView_DumpMaskedRaster(recordOffset, &masked, maskedVisits,
+							                           SLIP_TEXTURED_RASTER_VISIT_CAPACITY);
 						}
 						free(maskedVisits);
 						free(textureRows);
-						context->failureAddress = 0x0002dc2fu;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MASKED_PERSPECTIVE_POLYGON;
 						context->failed = true;
 						return false;
 					}
-					TrackView_DumpMaskedRaster(recordOffset, &masked, maskedVisits, 512u);
+					TrackView_DumpMaskedRaster(recordOffset, &masked, maskedVisits,
+					                           SLIP_TEXTURED_RASTER_VISIT_CAPACITY);
 					context->directCallbackHighPixelsWrittenCount += (uint32_t)masked.pixelsWritten;
 					free(maskedVisits);
 				} else if (texturedDispatch.calledTransparentAffineRasterizer) {
@@ -4184,7 +4615,8 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					RasterOpaqueAffineTexturedPolygon opaqueAffine;
 					RasterOpaqueAffineTexturedPolygonState opaqueAffineState;
 
-					opaqueAffineVisits = (RasterOpaqueAffineTexturedVisit *)calloc(512u, sizeof(*opaqueAffineVisits));
+					opaqueAffineVisits = (RasterOpaqueAffineTexturedVisit *)calloc(SLIP_TEXTURED_RASTER_VISIT_CAPACITY,
+					                                                               sizeof(*opaqueAffineVisits));
 					memset(&opaqueAffineState, 0, sizeof(opaqueAffineState));
 					opaqueAffineState.screenRows = g_screenRowPtrs;
 					opaqueAffineState.screenRowCount = SLIPSTREAM_SCREEN_HEIGHT;
@@ -4201,11 +4633,11 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					opaqueAffineState.rowScroll = rowScroll;
 					++context->directCallbackHighRasterEntryCount;
 					if (opaqueAffineVisits == NULL ||
-					    !Raster_DrawOpaqueAffineTexturedPolygon(&opaqueAffineState, opaqueAffineVisits, 512u,
-					                                            &opaqueAffine)) {
+					    !Raster_DrawOpaqueAffineTexturedPolygon(&opaqueAffineState, opaqueAffineVisits,
+					                                            SLIP_TEXTURED_RASTER_VISIT_CAPACITY, &opaqueAffine)) {
 						free(opaqueAffineVisits);
 						free(textureRows);
-						context->failureAddress = 0x00030e48u;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_OPAQUE_AFFINE_POLYGON;
 						context->failed = true;
 						return false;
 					}
@@ -4213,7 +4645,7 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 					free(opaqueAffineVisits);
 				} else {
 					free(textureRows);
-					context->failureAddress = 0x0001ae47u;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 					context->failed = true;
 					return false;
 				}
@@ -4326,7 +4758,7 @@ static SlipDraw3DVec32 TrackView_MaterialScreenMidpoint(uint32_t sourceX, uint32
 }
 
 static void TrackView_StoreMaterialSeedVertex(SlipDraw3DVertexRecord *record, SlipDraw3DVec32 worldPosition) {
-	record->flags = 1u;
+	record->flags = SLIP_VERTEX_TRANSFORMED;
 	record->world.x = worldPosition.x;
 	record->world.y = worldPosition.y;
 	record->world.z = worldPosition.z;
@@ -4334,9 +4766,9 @@ static void TrackView_StoreMaterialSeedVertex(SlipDraw3DVertexRecord *record, Sl
 
 static void TrackView_StoreMaterialScreenVertex(SlipDraw3DVertexRecord *record, const SlipDraw3DProjectState *state,
                                                 int32_t screenX, int32_t screenY) {
-	uint32_t clipFlags = 0x2u;
+	uint32_t clipFlags = SLIP_VERTEX_PROJECTED;
 
-	record->flags = 5u;
+	record->flags = SLIP_VERTEX_TRANSFORMED_AND_DEPTH_CLASSIFIED;
 	record->screenX = screenX;
 	record->screenY = screenY;
 	if (state == NULL) {
@@ -4344,23 +4776,24 @@ static void TrackView_StoreMaterialScreenVertex(SlipDraw3DVertexRecord *record, 
 	}
 
 	if (screenX < state->minX) {
-		clipFlags |= 0x8u;
+		clipFlags |= SLIP_CLIP_LEFT;
 	}
 
 	if (screenX > state->maxX) {
-		clipFlags |= 0x10u;
+		clipFlags |= SLIP_CLIP_RIGHT;
 	}
 
 	if (screenY < state->minY) {
-		clipFlags |= 0x20u;
+		clipFlags |= SLIP_CLIP_TOP;
 	}
 
 	if (screenY > state->maxY) {
-		clipFlags |= 0x40u;
+		clipFlags |= SLIP_CLIP_BOTTOM;
 	}
-	if ((clipFlags & 0x78u) != 0 && screenX < 0x3ffe && screenY < 0x3ffe && screenX > (int32_t)0xffffc002 &&
-	    screenY > (int32_t)0xffffc002) {
-		clipFlags |= 0x200u;
+	if ((clipFlags & SLIP_CLIP_SCREEN) != 0 && screenX < SLIP_SCREEN_CLIP_COORDINATE_LIMIT &&
+	    screenY < SLIP_SCREEN_CLIP_COORDINATE_LIMIT && screenX > -SLIP_SCREEN_CLIP_COORDINATE_LIMIT &&
+	    screenY > -SLIP_SCREEN_CLIP_COORDINATE_LIMIT) {
+		clipFlags |= SLIP_VERTEX_SCREEN_CLIP_IN_RANGE;
 	}
 	record->flags |= clipFlags;
 }
@@ -4369,11 +4802,11 @@ static uint16_t TrackView_MaterialColorStep(const uint8_t *materialRecord, size_
                                             uint32_t materialColor, int32_t colorDelta) {
 	uint32_t steppedColor = materialColor + (uint32_t)colorDelta;
 
-	if (materialRecord == NULL || materialRecordBytes < 0x54u) {
+	if (materialRecord == NULL || materialRecordBytes < SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE) {
 		return (uint16_t)steppedColor;
 	}
-	if (steppedColor < SlipBytes_ReadLE32(materialRecord + 0x10u)) {
-		steppedColor = SlipBytes_ReadLE32(materialRecord + 0x50u);
+	if (steppedColor < SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, rampStart))) {
+		steppedColor = SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, importedMaterialByte));
 	}
 	return (uint16_t)steppedColor;
 }
@@ -4402,12 +4835,15 @@ static bool TrackView_MaterialPair(const uint8_t *materialTable, size_t material
 	    lookup.carryOut) {
 		return false;
 	}
-	materialRecordOffset = 4u + (size_t)lookup.materialRecordOffset;
-	if (materialRecordOffset > materialTableBytes || materialTableBytes - materialRecordOffset < 0x18u) {
+	materialRecordOffset = SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES + (size_t)lookup.materialRecordOffset;
+	if (materialRecordOffset > materialTableBytes ||
+	    materialTableBytes - materialRecordOffset < offsetof(SlipDraw3DMaterialRecord, rampEnd) + sizeof(uint32_t)) {
 		return false;
 	}
-	*rampStartOut = SlipBytes_ReadLE32(materialTable + materialRecordOffset + 0x10u);
-	*rampEndOut = SlipBytes_ReadLE32(materialTable + materialRecordOffset + 0x14u);
+	*rampStartOut =
+	    SlipBytes_ReadLE32(materialTable + materialRecordOffset + offsetof(SlipDraw3DMaterialRecord, rampStart));
+	*rampEndOut =
+	    SlipBytes_ReadLE32(materialTable + materialRecordOffset + offsetof(SlipDraw3DMaterialRecord, rampEnd));
 	return true;
 }
 
@@ -4422,11 +4858,13 @@ static bool TrackView_MaterialValue(const uint8_t *materialTable, size_t materia
 	    lookup.carryOut) {
 		return false;
 	}
-	materialRecordOffset = 4u + (size_t)lookup.materialRecordOffset;
-	if (materialRecordOffset > materialTableBytes || materialTableBytes - materialRecordOffset < 0x54u) {
+	materialRecordOffset = SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES + (size_t)lookup.materialRecordOffset;
+	if (materialRecordOffset > materialTableBytes ||
+	    materialTableBytes - materialRecordOffset < SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE) {
 		return false;
 	}
-	*materialValueOut = SlipBytes_ReadLE32(materialTable + materialRecordOffset + 0x50u);
+	*materialValueOut = SlipBytes_ReadLE32(materialTable + materialRecordOffset +
+	                                       offsetof(SlipDraw3DMaterialRecord, importedMaterialByte));
 	return true;
 }
 
@@ -4509,10 +4947,10 @@ static void TrackView_MaterialProjectScreenSecondary(SlipDraw3DVec32 world, int3
 static const uint8_t *TrackView_IndependentSetupTriangleQuadsData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0004109eu) {
+	if (dosAddress < TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0004109eu;
+	offset = dosAddress - TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewIndependentSetupTriangleQuadsData)) {
 		return NULL;
 	}
@@ -4525,10 +4963,10 @@ static const uint8_t *TrackView_IndependentSetupTriangleQuadsData(uint32_t dosAd
 static const uint8_t *TrackView_RoadLinePolygonsData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x00041584u) {
+	if (dosAddress < TRACK_VIEW_ROAD_LINE_POLYGONS_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x00041584u;
+	offset = dosAddress - TRACK_VIEW_ROAD_LINE_POLYGONS_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewRoadLinePolygonsData)) {
 		return NULL;
 	}
@@ -4541,10 +4979,10 @@ static const uint8_t *TrackView_RoadLinePolygonsData(uint32_t dosAddress, size_t
 static const uint8_t *TrackView_ShadedTriangleQuadsData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x00040dc2u) {
+	if (dosAddress < TRACK_VIEW_SHADED_TRIANGLE_QUADS_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x00040dc2u;
+	offset = dosAddress - TRACK_VIEW_SHADED_TRIANGLE_QUADS_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewShadedTriangleQuadsData)) {
 		return NULL;
 	}
@@ -4557,10 +4995,10 @@ static const uint8_t *TrackView_ShadedTriangleQuadsData(uint32_t dosAddress, siz
 static const uint8_t *TrackView_SharedSetupTriangleQuadsData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x00040f6cu) {
+	if (dosAddress < TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x00040f6cu;
+	offset = dosAddress - TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewSharedSetupTriangleQuadsData)) {
 		return NULL;
 	}
@@ -4573,10 +5011,10 @@ static const uint8_t *TrackView_SharedSetupTriangleQuadsData(uint32_t dosAddress
 static const uint8_t *TrackView_SecondaryColorQuadsData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0004133eu) {
+	if (dosAddress < TRACK_VIEW_SECONDARY_COLOR_QUADS_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0004133eu;
+	offset = dosAddress - TRACK_VIEW_SECONDARY_COLOR_QUADS_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewSecondaryColorQuadsData)) {
 		return NULL;
 	}
@@ -4733,10 +5171,10 @@ static const uint8_t kTrackViewMaterialFamilyData[] = {
 static const uint8_t *TrackView_AnimatedOrangeDashesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0003f6c0u) {
+	if (dosAddress < TRACK_VIEW_ANIMATED_ORANGE_DASHES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0003f6c0u;
+	offset = dosAddress - TRACK_VIEW_ANIMATED_ORANGE_DASHES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewMaterialFamilyData)) {
 		return NULL;
 	}
@@ -4749,10 +5187,10 @@ static const uint8_t *TrackView_AnimatedOrangeDashesData(uint32_t dosAddress, si
 static const uint8_t *TrackView_AnimatedFloorLightDashesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0003faf8u) {
+	if (dosAddress < TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0003faf8u;
+	offset = dosAddress - TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewAnimatedFloorLightDashesData)) {
 		return NULL;
 	}
@@ -4765,10 +5203,10 @@ static const uint8_t *TrackView_AnimatedFloorLightDashesData(uint32_t dosAddress
 static const uint8_t *TrackView_ThreeLineDiagonalData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0004027cu) {
+	if (dosAddress < TRACK_VIEW_THREE_LINE_DIAGONAL_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0004027cu;
+	offset = dosAddress - TRACK_VIEW_THREE_LINE_DIAGONAL_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewThreeLineDiagonalData)) {
 		return NULL;
 	}
@@ -4781,10 +5219,10 @@ static const uint8_t *TrackView_ThreeLineDiagonalData(uint32_t dosAddress, size_
 static const uint8_t *TrackView_SevenLineFrameAlternateData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0004034cu) {
+	if (dosAddress < TRACK_VIEW_SEVEN_LINE_FRAME_ALTERNATE_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0004034cu;
+	offset = dosAddress - TRACK_VIEW_SEVEN_LINE_FRAME_ALTERNATE_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewSevenLineFrameAlternateData)) {
 		return NULL;
 	}
@@ -4797,10 +5235,10 @@ static const uint8_t *TrackView_SevenLineFrameAlternateData(uint32_t dosAddress,
 static const uint8_t *TrackView_FiveLineFrameData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x000403d8u) {
+	if (dosAddress < TRACK_VIEW_FIVE_LINE_FRAME_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x000403d8u;
+	offset = dosAddress - TRACK_VIEW_FIVE_LINE_FRAME_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewFiveLineFrameData)) {
 		return NULL;
 	}
@@ -4813,10 +5251,10 @@ static const uint8_t *TrackView_FiveLineFrameData(uint32_t dosAddress, size_t *b
 static const uint8_t *TrackView_CageFiveLinesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x00040464u) {
+	if (dosAddress < TRACK_VIEW_CAGE_FIVE_LINES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x00040464u;
+	offset = dosAddress - TRACK_VIEW_CAGE_FIVE_LINES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewCageFiveLinesData)) {
 		return NULL;
 	}
@@ -4829,10 +5267,10 @@ static const uint8_t *TrackView_CageFiveLinesData(uint32_t dosAddress, size_t *b
 static const uint8_t *TrackView_CageSixteenLinesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x000404e4u) {
+	if (dosAddress < TRACK_VIEW_CAGE_SIXTEEN_LINES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x000404e4u;
+	offset = dosAddress - TRACK_VIEW_CAGE_SIXTEEN_LINES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewCageSixteenLinesData)) {
 		return NULL;
 	}
@@ -4845,10 +5283,10 @@ static const uint8_t *TrackView_CageSixteenLinesData(uint32_t dosAddress, size_t
 static const uint8_t *TrackView_ShadedTenLinesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x00040580u) {
+	if (dosAddress < TRACK_VIEW_SHADED_TEN_LINES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x00040580u;
+	offset = dosAddress - TRACK_VIEW_SHADED_TEN_LINES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewShadedTenLinesData)) {
 		return NULL;
 	}
@@ -4861,10 +5299,10 @@ static const uint8_t *TrackView_ShadedTenLinesData(uint32_t dosAddress, size_t *
 static const uint8_t *TrackView_DepthDetailedDarkLinesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	size_t offset;
 
-	if (dosAddress < 0x000406f8u) {
+	if (dosAddress < TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x000406f8u;
+	offset = dosAddress - TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewDepthDetailedDarkLinesData)) {
 		return NULL;
 	}
@@ -4877,10 +5315,10 @@ static const uint8_t *TrackView_DepthDetailedDarkLinesData(uint32_t dosAddress, 
 static const uint8_t *TrackView_AnimatedEightPolygonsData(uint32_t dosAddress, size_t *bytesRemaining) {
 	size_t offset;
 
-	if (dosAddress < 0x0004092cu) {
+	if (dosAddress < TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0004092cu;
+	offset = dosAddress - TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewAnimatedEightPolygonsData)) {
 		return NULL;
 	}
@@ -4893,10 +5331,10 @@ static const uint8_t *TrackView_AnimatedEightPolygonsData(uint32_t dosAddress, s
 static const uint8_t *TrackView_QuadOutlineData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x000416d4u) {
+	if (dosAddress < TRACK_VIEW_QUAD_OUTLINE_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x000416d4u;
+	offset = dosAddress - TRACK_VIEW_QUAD_OUTLINE_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewQuadOutlineData)) {
 		return NULL;
 	}
@@ -4909,10 +5347,10 @@ static const uint8_t *TrackView_QuadOutlineData(uint32_t dosAddress, size_t *byt
 static const uint8_t *TrackView_TwoConnectedLinesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0004173cu) {
+	if (dosAddress < TRACK_VIEW_TWO_CONNECTED_LINES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0004173cu;
+	offset = dosAddress - TRACK_VIEW_TWO_CONNECTED_LINES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewTwoConnectedLinesData)) {
 		return NULL;
 	}
@@ -4925,10 +5363,10 @@ static const uint8_t *TrackView_TwoConnectedLinesData(uint32_t dosAddress, size_
 static const uint8_t *TrackView_TwoCornerLinesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x00041798u) {
+	if (dosAddress < TRACK_VIEW_TWO_CORNER_LINES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x00041798u;
+	offset = dosAddress - TRACK_VIEW_TWO_CORNER_LINES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewTwoCornerLinesData)) {
 		return NULL;
 	}
@@ -4941,10 +5379,10 @@ static const uint8_t *TrackView_TwoCornerLinesData(uint32_t dosAddress, size_t *
 static const uint8_t *TrackView_CageSevenLinesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0004017cu) {
+	if (dosAddress < TRACK_VIEW_CAGE_SEVEN_LINES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0004017cu;
+	offset = dosAddress - TRACK_VIEW_CAGE_SEVEN_LINES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewCageSevenLinesData)) {
 		return NULL;
 	}
@@ -4957,10 +5395,10 @@ static const uint8_t *TrackView_CageSevenLinesData(uint32_t dosAddress, size_t *
 static const uint8_t *TrackView_SevenLineFrameData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x000402e4u) {
+	if (dosAddress < TRACK_VIEW_SEVEN_LINE_FRAME_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x000402e4u;
+	offset = dosAddress - TRACK_VIEW_SEVEN_LINE_FRAME_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewSevenLineFrameData)) {
 		return NULL;
 	}
@@ -4973,10 +5411,10 @@ static const uint8_t *TrackView_SevenLineFrameData(uint32_t dosAddress, size_t *
 static const uint8_t *TrackView_ThreeLineStripData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x00040208u) {
+	if (dosAddress < TRACK_VIEW_THREE_LINE_STRIP_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x00040208u;
+	offset = dosAddress - TRACK_VIEW_THREE_LINE_STRIP_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewThreeLineStripData)) {
 		return NULL;
 	}
@@ -4989,10 +5427,10 @@ static const uint8_t *TrackView_ThreeLineStripData(uint32_t dosAddress, size_t *
 static const uint8_t *TrackView_ShadedQuadsData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x00040ba4u) {
+	if (dosAddress < TRACK_VIEW_SHADED_QUADS_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x00040ba4u;
+	offset = dosAddress - TRACK_VIEW_SHADED_QUADS_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewShadedQuadsData)) {
 		return NULL;
 	}
@@ -5005,10 +5443,10 @@ static const uint8_t *TrackView_ShadedQuadsData(uint32_t dosAddress, size_t *byt
 static const uint8_t *TrackView_SecondaryColorPolygonsWithLinesData(uint32_t dosAddress, size_t *bytesRemaining) {
 	uint32_t offset;
 
-	if (dosAddress < 0x0004124au) {
+	if (dosAddress < TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_DATA_TOKEN) {
 		return NULL;
 	}
-	offset = dosAddress - 0x0004124au;
+	offset = dosAddress - TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_DATA_TOKEN;
 	if (offset >= sizeof(kTrackViewSecondaryColorPolygonsWithLinesData)) {
 		return NULL;
 	}
@@ -5036,16 +5474,18 @@ static bool TrackView_MaterialColorTriplet(const TrackViewRawBspContext *context
 	materialTable = context->exactMaterialTable != NULL ? context->exactMaterialTable : context->materialTable;
 	materialTableBytes =
 	    context->exactMaterialTable != NULL ? context->exactMaterialTableBytes : context->materialTableBytes;
-	if (materialTable == NULL || materialTableBytes < 4u) {
+	if (materialTable == NULL || materialTableBytes < SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES) {
 		return false;
 	}
-	materialIndex = (uint16_t)(materialIdentifier & 0x7fffu);
+	materialIndex = (uint16_t)(materialIdentifier & SLIP_DRAW3D_MATERIAL_INDEX_MASK);
 	if (materialIndex < SlipBytes_ReadLE16(materialTable)) {
-		materialRecordOffset = 4u + (size_t)materialIndex * 0x54u;
+		materialRecordOffset =
+		    SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES + (size_t)materialIndex * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
 	} else {
-		materialRecordOffset = 4u;
+		materialRecordOffset = SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 	}
-	if (materialRecordOffset > materialTableBytes || materialTableBytes - materialRecordOffset < 0x54u) {
+	if (materialRecordOffset > materialTableBytes ||
+	    materialTableBytes - materialRecordOffset < SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE) {
 		return false;
 	}
 	materialRecord = materialTable + materialRecordOffset;
@@ -5057,17 +5497,17 @@ static bool TrackView_MaterialColorTriplet(const TrackViewRawBspContext *context
 	if (depthBlend.fadeBlendQ14 != 0u && SlipDraw3D_fadeStart != 0u) {
 		const uint32_t fadeBlendQ14 = depthBlend.fadeBlendQ14;
 
-		if (fadeBlendQ14 == 0x4000u) {
+		if (fadeBlendQ14 == SLIP_Q14_ONE) {
 			shadeQ14 = SlipDraw3D_fadeColour;
 		} else {
 			const int32_t delta = (int32_t)SlipDraw3D_fadeColour - (int32_t)shadeQ14;
-			const int32_t scaled = (delta * (int32_t)(int16_t)(uint16_t)fadeBlendQ14) >> 14;
+			const int32_t scaled = (delta * (int32_t)(int16_t)(uint16_t)fadeBlendQ14) >> SLIP_Q14_FRACTION_BITS;
 			const int32_t blended = (int32_t)shadeQ14 + scaled;
 
 			if (blended < 0) {
 				shadeQ14 = 0;
-			} else if (blended > 0x4000) {
-				shadeQ14 = 0x4000u;
+			} else if (blended > SLIP_Q14_ONE) {
+				shadeQ14 = SLIP_Q14_ONE;
 			} else {
 				shadeQ14 = (uint32_t)blended;
 			}
@@ -5082,8 +5522,8 @@ static bool TrackView_MaterialColorTriplet(const TrackViewRawBspContext *context
 		uint16_t productHighWord;
 
 		if (context->limitEnabled == 0u) {
-			rampStart = SlipBytes_ReadLE32(materialRecord + 0x10u);
-			rampEnd = SlipBytes_ReadLE32(materialRecord + 0x14u);
+			rampStart = SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, rampStart));
+			rampEnd = SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, rampEnd));
 		} else {
 			rampStart = context->limitStart;
 			rampEnd = context->limitEnd;
@@ -5091,19 +5531,21 @@ static bool TrackView_MaterialColorTriplet(const TrackViewRawBspContext *context
 		rampDelta = rampEnd - rampStart;
 		product = (uint32_t)(uint16_t)rampDelta * (uint32_t)(uint16_t)shadeQ14;
 		productLowWord = (uint16_t)product;
-		productHighWord = (uint16_t)(product >> 16);
+		productHighWord = (uint16_t)(product >> SLIP_WORD_BITS);
 
-		color = (rampDelta & 0xffff0000u) | (uint16_t)((productLowWord >> 14) | (productHighWord << 2));
+		color = (rampDelta & SLIP_MATERIAL_RAMP_UPPER_WORD_MASK) |
+		        (uint16_t)((productLowWord >> SLIP_Q14_FRACTION_BITS) | (productHighWord << SLIP_Q14_WORD_HIGH_SHIFT));
 		color += rampStart;
 	}
 	*colorOut = (uint16_t)color;
 	*darkerColorOut = (uint16_t)(color - 1u);
 	*lighterColorOut = (uint16_t)(color + 1u);
-	if (color - 1u < SlipBytes_ReadLE32(materialRecord + 0x10u)) {
-		*darkerColorOut = (uint16_t)SlipBytes_ReadLE32(materialRecord + 0x50u);
+	if (color - 1u < SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, rampStart))) {
+		*darkerColorOut =
+		    (uint16_t)SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, importedMaterialByte));
 	}
-	if (color + 1u > SlipBytes_ReadLE32(materialRecord + 0x14u)) {
-		*lighterColorOut = (uint16_t)SlipBytes_ReadLE32(materialRecord + 0x14u);
+	if (color + 1u > SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, rampEnd))) {
+		*lighterColorOut = (uint16_t)SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, rampEnd));
 	}
 	return true;
 }
@@ -5112,7 +5554,7 @@ static bool TrackView_MaterialSetupVertices(TrackViewRawBspContext *context,
                                             TrackViewPrimitiveCallbackContext *primitiveContext,
                                             const uint8_t *setupList, size_t setupListBytes,
                                             const uint8_t *seedIndexStream, size_t seedIndexStreamBytes) {
-	SlipDraw3DVec32 seedWorld[16];
+	SlipDraw3DVec32 seedWorld[SLIP_MATERIAL_SETUP_SEED_CAPACITY];
 	SlipDraw3DBuildVertexRecords build;
 	uint16_t seedCount;
 	uint16_t derivedCount;
@@ -5123,15 +5565,16 @@ static bool TrackView_MaterialSetupVertices(TrackViewRawBspContext *context,
 	size_t seedIndex;
 
 	if (context == NULL || primitiveContext == NULL || setupList == NULL || seedIndexStream == NULL ||
-	    setupListBytes < 4u) {
+	    setupListBytes < SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES) {
 		return false;
 	}
 	seedCount = SlipBytes_ReadLE16(setupList);
-	derivedCount = SlipBytes_ReadLE16(setupList + 2u);
+	derivedCount = SlipBytes_ReadLE16(setupList + SLIP_MATERIAL_VERTEX_SETUP_DERIVED_COUNT_OFFSET);
 	if (seedCount == 0 || seedCount > sizeof(seedWorld) / sizeof(seedWorld[0]) ||
-	    seedIndexStreamBytes < (size_t)seedCount * 2u ||
+	    seedIndexStreamBytes < (size_t)seedCount * SLIP_MATERIAL_VERTEX_INDEX_BYTES ||
 
-	    setupListBytes - 4u < (size_t)derivedCount * 4u + 2u) {
+	    setupListBytes - SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES <
+	        (size_t)derivedCount * SLIP_MATERIAL_MIDPOINT_RECORD_BYTES + SLIP_MATERIAL_VERTEX_SETUP_TRAILING_BYTES) {
 		if (g_vehicleViewDumpDiagnostics) {
 			fprintf(stderr,
 			        "track_view_material_setup_fail_0003f32a stage=header seeds=%u derived=%u setup_bytes=%zu "
@@ -5142,7 +5585,8 @@ static bool TrackView_MaterialSetupVertices(TrackViewRawBspContext *context,
 	}
 	for (seedIndex = 0; seedIndex < (size_t)seedCount; ++seedIndex) {
 		SlipDraw3DProjectIndex project;
-		const uint16_t seedVertexIndex = SlipBytes_ReadLE16(seedIndexStream + seedIndex * 2u);
+		const uint16_t seedVertexIndex =
+		    SlipBytes_ReadLE16(seedIndexStream + seedIndex * SLIP_MATERIAL_VERTEX_INDEX_BYTES);
 
 		if (!SlipDraw3D_ProjectIndex(context->vertexRecords, context->vertexRecordCount, seedVertexIndex,
 		                             TrackView_TransformVertex, primitiveContext, &project)) {
@@ -5168,8 +5612,11 @@ static bool TrackView_MaterialSetupVertices(TrackViewRawBspContext *context,
 		return false;
 	}
 	cursorAfterLoad = context->vertexBufferCursor;
-	if (!TrackView_BuildVertexRecords(context, 0x0003f37du, setupList + 4u, setupListBytes - 4u, derivedCount, 4,
-	                                  TrackView_MaterialMidpoint, TrackView_MaterialSourcePoint, &build)) {
+	if (!TrackView_BuildVertexRecords(context, TRACK_VIEW_DIAGNOSTIC_BUILD_MATERIAL_MIDPOINTS,
+	                                  setupList + SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES,
+	                                  setupListBytes - SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES, derivedCount,
+	                                  SLIP_MATERIAL_MIDPOINT_RECORD_BYTES, TrackView_MaterialMidpoint,
+	                                  TrackView_MaterialSourcePoint, &build)) {
 		if (g_vehicleViewDumpDiagnostics) {
 			fprintf(
 			    stderr,
@@ -5177,10 +5624,18 @@ static bool TrackView_MaterialSetupVertices(TrackViewRawBspContext *context,
 			    "cursor_after_load=0x%08x cursor=0x%08x records=%zu words=%04x,%04x,%04x,%04x\n",
 			    (unsigned)seedCount, (unsigned)derivedCount, (unsigned)nextRecordIndex, cursorBeforeLoad,
 			    cursorAfterLoad, context->vertexBufferCursor, context->vertexRecordCount,
-			    setupListBytes >= 6u ? SlipBytes_ReadLE16(setupList + 4u) : 0u,
-			    setupListBytes >= 8u ? SlipBytes_ReadLE16(setupList + 6u) : 0u,
-			    setupListBytes >= 10u ? SlipBytes_ReadLE16(setupList + 8u) : 0u,
-			    setupListBytes >= 12u ? SlipBytes_ReadLE16(setupList + 10u) : 0u);
+			    setupListBytes >= SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES + 1 * sizeof(uint16_t)
+			        ? SlipBytes_ReadLE16(setupList + SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES)
+			        : 0u,
+			    setupListBytes >= SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES + 2 * sizeof(uint16_t)
+			        ? SlipBytes_ReadLE16(setupList + SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES + 1 * sizeof(uint16_t))
+			        : 0u,
+			    setupListBytes >= SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES + 3 * sizeof(uint16_t)
+			        ? SlipBytes_ReadLE16(setupList + SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES + 2 * sizeof(uint16_t))
+			        : 0u,
+			    setupListBytes >= SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES + 4 * sizeof(uint16_t)
+			        ? SlipBytes_ReadLE16(setupList + SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES + 3 * sizeof(uint16_t))
+			        : 0u);
 		}
 		return false;
 	}
@@ -5192,17 +5647,21 @@ static bool TrackView_MaterialSetupVertices(TrackViewRawBspContext *context,
 	if (g_vehicleViewDumpDiagnostics) {
 		uint16_t dumpCount = (uint16_t)(seedCount + derivedCount);
 
-		if (dumpCount > 16u) {
-			dumpCount = 16u;
+		if (dumpCount > SLIP_MATERIAL_SETUP_DIAGNOSTIC_RECORD_LIMIT) {
+			dumpCount = SLIP_MATERIAL_SETUP_DIAGNOSTIC_RECORD_LIMIT;
 		}
 		fprintf(stderr,
 		        "track_view_material_setup_done_0003f32a seeds=%u derived=%u dump=%u bp=%u cursor_before=0x%08x "
 		        "cursor_after_load=0x%08x cursor_after_build=0x%08x seed_words=%04x,%04x,%04x\n",
 		        (unsigned)seedCount, (unsigned)derivedCount, (unsigned)dumpCount, (unsigned)nextRecordIndex,
 		        cursorBeforeLoad, cursorAfterLoad, context->vertexBufferCursor,
-		        seedIndexStreamBytes >= 2u ? SlipBytes_ReadLE16(seedIndexStream) : 0u,
-		        seedIndexStreamBytes >= 4u ? SlipBytes_ReadLE16(seedIndexStream + 2u) : 0u,
-		        seedIndexStreamBytes >= 6u ? SlipBytes_ReadLE16(seedIndexStream + 4u) : 0u);
+		        seedIndexStreamBytes >= SLIP_SERIALIZED_INDEX_BYTES ? SlipBytes_ReadLE16(seedIndexStream) : 0u,
+		        seedIndexStreamBytes >= 2 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? SlipBytes_ReadLE16(seedIndexStream + SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u,
+		        seedIndexStreamBytes >= 3 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? SlipBytes_ReadLE16(seedIndexStream + 2 * SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u);
 		for (uint16_t vertexIndex = 0; vertexIndex < dumpCount; ++vertexIndex) {
 			const SlipDraw3DVertexRecord *const record = &context->vertexRecords[vertexIndex];
 
@@ -5211,14 +5670,14 @@ static bool TrackView_MaterialSetupVertices(TrackViewRawBspContext *context,
 			        "source=%04x,%04x,%04x\n",
 			        (unsigned)vertexIndex, SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET),
 			        (int32_t)SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET),
-			        (int32_t)SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET + 4u),
-			        (int32_t)SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET + 8u),
+			        (int32_t)SlipBytes_ReadLE32(record->bytes + offsetof(SlipDraw3DVertexRecord, world.y)),
+			        (int32_t)SlipBytes_ReadLE32(record->bytes + offsetof(SlipDraw3DVertexRecord, world.z)),
 			        (int32_t)SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET),
-			        (int32_t)SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET + 4u),
+			        (int32_t)SlipBytes_ReadLE32(record->bytes + offsetof(SlipDraw3DVertexRecord, screenY)),
 			        (int32_t)SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_DEPTH_OFFSET),
 			        SlipBytes_ReadLE16(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET),
-			        SlipBytes_ReadLE16(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET + 2u),
-			        SlipBytes_ReadLE16(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET + 4u));
+			        SlipBytes_ReadLE16(record->bytes + offsetof(SlipDraw3DVertexRecord, sourceY)),
+			        SlipBytes_ReadLE16(record->bytes + offsetof(SlipDraw3DVertexRecord, sourceZ)));
 		}
 	}
 	return true;
@@ -5230,7 +5689,7 @@ static bool TrackView_MaterialSetupScreenVertices(TrackViewRawBspContext *contex
                                                   const uint8_t *seedIndexStream, size_t seedIndexStreamBytes,
                                                   uint32_t depth) {
 	SlipDraw3DBuildVertexRecords build;
-	int32_t screenPairs[16][2];
+	int32_t screenPairs[SLIP_MATERIAL_SETUP_SEED_CAPACITY][2];
 	uint16_t seedCount;
 	uint16_t derivedCount;
 	uint32_t currentRecordIndex;
@@ -5238,21 +5697,21 @@ static bool TrackView_MaterialSetupScreenVertices(TrackViewRawBspContext *contex
 	size_t seedIndex;
 
 	if (context == NULL || primitiveContext == NULL || setupList == NULL || seedIndexStream == NULL ||
-	    context->projectState == NULL || setupListBytes < 4u) {
+	    context->projectState == NULL || setupListBytes < SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES) {
 		return false;
 	}
 
-	if ((int32_t)depth < 0x000a6cc0) {
+	if ((int32_t)depth < SLIP_MATERIAL_PERSPECTIVE_DEPTH_THRESHOLD) {
 		return TrackView_MaterialSetupVertices(context, primitiveContext, setupList, setupListBytes, seedIndexStream,
 		                                       seedIndexStreamBytes);
 	}
 	seedCount = SlipBytes_ReadLE16(setupList);
-	derivedCount = SlipBytes_ReadLE16(setupList + 2u);
+	derivedCount = SlipBytes_ReadLE16(setupList + SLIP_MATERIAL_VERTEX_SETUP_DERIVED_COUNT_OFFSET);
 	if (seedCount == 0 || seedCount > sizeof(screenPairs) / sizeof(screenPairs[0]) ||
-	    seedIndexStreamBytes < (size_t)seedCount * 2u ||
-	    setupListBytes - 4u <
+	    seedIndexStreamBytes < (size_t)seedCount * SLIP_MATERIAL_VERTEX_INDEX_BYTES ||
+	    setupListBytes - SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES <
 
-	        (size_t)derivedCount * 4u + 2u) {
+	        (size_t)derivedCount * SLIP_MATERIAL_MIDPOINT_RECORD_BYTES + SLIP_MATERIAL_VERTEX_SETUP_TRAILING_BYTES) {
 		if (g_vehicleViewDumpDiagnostics) {
 			fprintf(stderr,
 			        "track_view_material_setup_fail_0003f3c4 stage=header seeds=%u derived=%u setup_bytes=%zu "
@@ -5263,7 +5722,8 @@ static bool TrackView_MaterialSetupScreenVertices(TrackViewRawBspContext *contex
 	}
 
 	for (seedIndex = 0; seedIndex < (size_t)seedCount; ++seedIndex) {
-		const uint16_t seedVertexIndex = SlipBytes_ReadLE16(seedIndexStream + seedIndex * 2u);
+		const uint16_t seedVertexIndex =
+		    SlipBytes_ReadLE16(seedIndexStream + seedIndex * SLIP_MATERIAL_VERTEX_INDEX_BYTES);
 		SlipDraw3DVertexRecord *record;
 		uint32_t flags;
 
@@ -5282,7 +5742,7 @@ static bool TrackView_MaterialSetupScreenVertices(TrackViewRawBspContext *contex
 		screenPairs[seedIndex][0] =
 		    (int32_t)SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET);
 		screenPairs[seedIndex][1] =
-		    (int32_t)SlipBytes_ReadLE32(record->bytes + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET + 4u);
+		    (int32_t)SlipBytes_ReadLE32(record->bytes + offsetof(SlipDraw3DVertexRecord, screenY));
 	}
 
 	currentRecordIndex = SlipDraw3D_CurrentStateRecordIndex(context->recordIndex);
@@ -5295,8 +5755,11 @@ static bool TrackView_MaterialSetupScreenVertices(TrackViewRawBspContext *contex
 		return false;
 	}
 
-	if (!TrackView_BuildVertexRecords(context, 0x0003f408u, setupList + 4u, setupListBytes - 4u, derivedCount, 4,
-	                                  TrackView_MaterialScreenMidpoint, TrackView_MaterialSourcePoint, &build)) {
+	if (!TrackView_BuildVertexRecords(context, TRACK_VIEW_DIAGNOSTIC_BUILD_MATERIAL_SCREEN_MIDPOINTS,
+	                                  setupList + SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES,
+	                                  setupListBytes - SLIP_MATERIAL_VERTEX_SETUP_HEADER_BYTES, derivedCount,
+	                                  SLIP_MATERIAL_MIDPOINT_RECORD_BYTES, TrackView_MaterialScreenMidpoint,
+	                                  TrackView_MaterialSourcePoint, &build)) {
 		if (g_vehicleViewDumpDiagnostics) {
 			fprintf(
 			    stderr, "track_view_material_setup_fail_0003f3c4 stage=build seeds=%u derived=%u bp=%u cursor=0x%08x\n",
@@ -5345,7 +5808,7 @@ static bool TrackView_ExecuteActiveMaterialEmitPath(TrackViewRawBspContext *cont
 	}
 	*carryOut = false;
 	transform = context->transform;
-	if (materialColor == 0xffffu) {
+	if (materialColor == SLIP_MATERIAL_NO_POLYGON_COLOUR) {
 		*carryOut = true;
 		return true;
 	}
@@ -5363,7 +5826,7 @@ static bool TrackView_ExecuteActiveMaterialEmitPath(TrackViewRawBspContext *cont
 	        sizeof(postClipRecordVisits) / sizeof(postClipRecordVisits[0]), postClipPlaneVisits,
 	        sizeof(postClipPlaneVisits) / sizeof(postClipPlaneVisits[0]), activeVisits,
 	        sizeof(activeVisits) / sizeof(activeVisits[0]), &activeMaterial)) {
-		context->failureAddress = 0x0001c0a1u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_ACTIVE_MATERIAL_EMIT;
 		context->failed = true;
 		return false;
 	}
@@ -5379,10 +5842,16 @@ static bool TrackView_ExecuteActiveMaterialEmitPath(TrackViewRawBspContext *cont
 		        activeMaterial.build.allFlagsBeforeDispatch, activeMaterial.build.allMaskedNonzero ? 1u : 0u,
 		        activeMaterial.build.calledClipDepth ? 1u : 0u, activeMaterial.build.calledClipScreen ? 1u : 0u,
 		        (unsigned)activeMaterial.build.visitCount,
-		        indexStreamBytes >= 2u ? SlipBytes_ReadLE16(indexStream) : 0u,
-		        indexStreamBytes >= 4u ? SlipBytes_ReadLE16(indexStream + 2u) : 0u,
-		        indexStreamBytes >= 6u ? SlipBytes_ReadLE16(indexStream + 4u) : 0u,
-		        indexStreamBytes >= 8u ? SlipBytes_ReadLE16(indexStream + 6u) : 0u);
+		        indexStreamBytes >= SLIP_SERIALIZED_INDEX_BYTES ? SlipBytes_ReadLE16(indexStream) : 0u,
+		        indexStreamBytes >= 2 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? SlipBytes_ReadLE16(indexStream + SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u,
+		        indexStreamBytes >= 3 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? SlipBytes_ReadLE16(indexStream + 2 * SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u,
+		        indexStreamBytes >= 4 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? SlipBytes_ReadLE16(indexStream + 3 * SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u);
 		for (size_t visitIndex = 0; visitIndex < activeMaterial.build.visitCount &&
 		                            visitIndex < sizeof(activeVisits) / sizeof(activeVisits[0]);
 		     ++visitIndex) {
@@ -5400,18 +5869,18 @@ static bool TrackView_ExecuteActiveMaterialEmitPath(TrackViewRawBspContext *cont
 			        ? (int32_t)SlipBytes_ReadLE32(activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET)
 			        : 0,
 			    activeRecord != NULL
-			        ? (int32_t)SlipBytes_ReadLE32(activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET + 4u)
+			        ? (int32_t)SlipBytes_ReadLE32(activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, world.y))
 			        : 0,
 			    activeRecord != NULL
-			        ? (int32_t)SlipBytes_ReadLE32(activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_WORLD_OFFSET + 8u)
+			        ? (int32_t)SlipBytes_ReadLE32(activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, world.z))
 			        : 0,
 			    activeRecord != NULL ? SlipBytes_ReadLE16(activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET)
 			                         : 0,
 			    activeRecord != NULL
-			        ? SlipBytes_ReadLE16(activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET + 2u)
+			        ? SlipBytes_ReadLE16(activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, sourceY))
 			        : 0,
 			    activeRecord != NULL
-			        ? SlipBytes_ReadLE16(activeRecord->bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET + 4u)
+			        ? SlipBytes_ReadLE16(activeRecord->bytes + offsetof(SlipDraw3DVertexRecord, sourceZ))
 			        : 0);
 		}
 	}
@@ -5430,7 +5899,7 @@ static bool TrackView_ExecuteActiveMaterialEmitPath(TrackViewRawBspContext *cont
 	                                  SLIP_DRAW3D_RECORD_NEXT_OFFSET, flatPoints,
 	                                  sizeof(flatPoints) / sizeof(flatPoints[0]), &flatRing)) {
 		free(screenBeforeMaterialFlat);
-		context->failureAddress = 0x0001ae47u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 		context->failed = true;
 		return false;
 	}
@@ -5471,8 +5940,8 @@ static bool TrackView_ExecuteLinePairMaterialEmitPath(TrackViewRawBspContext *co
 	bool haveScreenBeforeMaterialLine = false;
 	SlipDraw3DRasterPoint flatPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 
-	if (context == NULL || materialContext == NULL || indexStream == NULL || indexStreamBytes < 4u ||
-	    carryOut == NULL) {
+	if (context == NULL || materialContext == NULL || indexStream == NULL ||
+	    indexStreamBytes < 2 * SLIP_SERIALIZED_INDEX_BYTES || carryOut == NULL) {
 		return false;
 	}
 	*carryOut = false;
@@ -5483,7 +5952,7 @@ static bool TrackView_ExecuteLinePairMaterialEmitPath(TrackViewRawBspContext *co
 	                                     indexStream, indexStreamBytes, materialColor, context->projectState, transform,
 	                                     TrackView_MaterialProjectScreenPrimary,
 	                                     TrackView_MaterialProjectScreenSecondary, materialContext, &linePair)) {
-		context->failureAddress = 0x0001bcaau;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_LINE_PAIR;
 		context->failed = true;
 		return false;
 	}
@@ -5504,7 +5973,7 @@ static bool TrackView_ExecuteLinePairMaterialEmitPath(TrackViewRawBspContext *co
 	                                  SLIP_DRAW3D_RECORD_NEXT_OFFSET, flatPoints,
 	                                  sizeof(flatPoints) / sizeof(flatPoints[0]), &flatRing)) {
 		free(screenBeforeMaterialLine);
-		context->failureAddress = 0x0001ae47u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 		context->failed = true;
 		return false;
 	}
@@ -5518,8 +5987,11 @@ static bool TrackView_ExecuteLinePairMaterialEmitPath(TrackViewRawBspContext *co
 		        "indices=%u,%u flag=%u\n",
 		        materialColor, linePair.activeHeadOffsetOut, linePair.carryOut ? 1u : 0u,
 		        (unsigned)flatRing.dispatch.kind, (unsigned)flatRing.pointCount, flatRing.rasterized ? 1u : 0u,
-		        (unsigned)SlipBytes_ReadLE16(indexStream), (unsigned)SlipBytes_ReadLE16(indexStream + 2u),
-		        indexStreamBytes >= 6u ? (unsigned)SlipBytes_ReadLE16(indexStream + 4u) : 0u);
+		        (unsigned)SlipBytes_ReadLE16(indexStream),
+		        (unsigned)SlipBytes_ReadLE16(indexStream + SLIP_SERIALIZED_INDEX_BYTES),
+		        indexStreamBytes >= 3 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? (unsigned)SlipBytes_ReadLE16(indexStream + 2 * SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u);
 		if (haveScreenBeforeMaterialLine) {
 			TrackView_DumpRecordDamage(linePair.activeHeadOffsetOut, linePair.build.materialDitherBits,
 			                           screenBeforeMaterialLine);
@@ -5547,7 +6019,7 @@ static bool TrackView_BuildMaterialCaptureRing(TrackViewRawBspContext *context,
 	                                 sizeof(returnVisits) / sizeof(returnVisits[0]), &returnActive) ||
 	    !SlipDraw3D_MaterialGate(context->materialTable, context->materialTableBytes, materialIndex,
 	                             context->rendererFlags, countAndFlags, indexStream, indexStreamBytes, &materialGate)) {
-		context->failureAddress = 0x0001ba7du;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_GATE;
 		context->failed = true;
 		return false;
 	}
@@ -5571,7 +6043,7 @@ static bool TrackView_BuildMaterialCaptureRing(TrackViewRawBspContext *context,
 		        (const void *)materialGate.materialRecord, context, TrackView_DrawStateLightVector(context), normalX,
 		        normalY, polygonVertexCount, context->vertexRecords, context->vertexRecordCount, indexStream,
 		        indexStreamBytes, countAndFlags, context->projectState, context->transform, materialContext, &color)) {
-			context->failureAddress = 0x0001cce9u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_NORMAL_COLOUR;
 			context->failed = true;
 			return false;
 		}
@@ -5579,7 +6051,7 @@ static bool TrackView_BuildMaterialCaptureRing(TrackViewRawBspContext *context,
 		                             context->materialTableBytes -
 		                                 (size_t)(materialGate.materialRecord - context->materialTable),
 		                             countAndFlags, color, &regularSetup)) {
-			context->failureAddress = 0x0001bbb1u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_REGULAR_MATERIAL_SETUP;
 			context->failed = true;
 			return false;
 		}
@@ -5596,13 +6068,13 @@ static bool TrackView_BuildMaterialCaptureRing(TrackViewRawBspContext *context,
 		        sizeof(postBoundsVisits) / sizeof(postBoundsVisits[0]), postClipRecordVisits,
 		        sizeof(postClipRecordVisits) / sizeof(postClipRecordVisits[0]), postClipPlaneVisits,
 		        sizeof(postClipPlaneVisits) / sizeof(postClipPlaneVisits[0]), &solidRing)) {
-			context->failureAddress = 0x0001bc0cu;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_SOLID_RING;
 			context->failed = true;
 			return false;
 		}
 		return true;
 	}
-	context->failureAddress = 0x0001ba7du;
+	context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_GATE;
 	context->failed = true;
 	return false;
 }
@@ -5622,22 +6094,28 @@ static bool TrackView_MaterialBegin(TrackViewRawBspContext *context, TrackViewMa
 		        "track_view_material_begin_entry_0003f53b state=0x%08x eax=0x%08x bp=%u dx=0x%04x "
 		        "words=%04x,%04x,%04x,%04x plane=%08x,%08x,%08x,%08x,%08x,%08x light=%08x,%08x,%08x\n",
 		        context->materialDispatchState, postPlaneSourceOffset, (unsigned)countAndFlags, (unsigned)materialColor,
-		        indexStreamBytes >= 2u ? SlipBytes_ReadLE16(indexStream) : 0u,
-		        indexStreamBytes >= 4u ? SlipBytes_ReadLE16(indexStream + 2u) : 0u,
-		        indexStreamBytes >= 6u ? SlipBytes_ReadLE16(indexStream + 4u) : 0u,
-		        indexStreamBytes >= 8u ? SlipBytes_ReadLE16(indexStream + 6u) : 0u, context->materialPlanePointX,
-		        context->materialPlanePointY, context->materialPlanePointZ, context->materialPlaneNormalX,
-		        context->materialPlaneNormalY, context->materialPlaneNormalZ, context->cameraLightX,
-		        context->cameraLightY, context->cameraLightZ);
+		        indexStreamBytes >= SLIP_SERIALIZED_INDEX_BYTES ? SlipBytes_ReadLE16(indexStream) : 0u,
+		        indexStreamBytes >= 2 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? SlipBytes_ReadLE16(indexStream + SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u,
+		        indexStreamBytes >= 3 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? SlipBytes_ReadLE16(indexStream + 2 * SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u,
+		        indexStreamBytes >= 4 * SLIP_SERIALIZED_INDEX_BYTES
+		            ? SlipBytes_ReadLE16(indexStream + 3 * SLIP_SERIALIZED_INDEX_BYTES)
+		            : 0u,
+		        context->materialPlanePointX, context->materialPlanePointY, context->materialPlanePointZ,
+		        context->materialPlaneNormalX, context->materialPlaneNormalY, context->materialPlaneNormalZ,
+		        context->cameraLightX, context->cameraLightY, context->cameraLightZ);
 	}
 	if (context->materialDispatchState == 0) {
-		if (materialColor == 0xffffu) {
+		if (materialColor == SLIP_MATERIAL_NO_POLYGON_COLOUR) {
 			return true;
 		}
 		return TrackView_ExecuteActiveMaterialEmitPath(context, materialContext, indexStream, indexStreamBytes,
 		                                               countAndFlags, materialColor, carryOut);
 	}
-	if (materialColor != 0xffffu) {
+	if (materialColor != SLIP_MATERIAL_NO_POLYGON_COLOUR) {
 		if (!TrackView_ExecuteActiveMaterialEmitPath(context, materialContext, indexStream, indexStreamBytes,
 		                                             countAndFlags, materialColor, &polygonRejected)) {
 			return false;
@@ -5660,7 +6138,7 @@ static bool TrackView_MaterialBegin(TrackViewRawBspContext *context, TrackViewMa
 		        context->materialPlanePointY, context->materialPlanePointZ, (uint16_t)context->materialPlaneNormalX,
 		        (uint16_t)context->materialPlaneNormalY, (uint16_t)context->materialPlaneNormalZ, context->cameraLightX,
 		        context->cameraLightY, context->cameraLightZ, visits, sizeof(visits) / sizeof(visits[0]), &capture)) {
-			context->failureAddress = 0x0001ab34u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_CAPTURE_POST_PLANE_RING;
 			context->failed = true;
 			return false;
 		}
@@ -5687,7 +6165,8 @@ static bool TrackView_MaterialBegin(TrackViewRawBspContext *context, TrackViewMa
 			        postPlaneSourceOffset, capture.carryOut ? 1u : 0u, (uint16_t)capture.planeLightDot,
 			        capture.postPlaneHeadIn, capture.postPlaneHeadOut, capture.activeHeadIn, capture.activeHeadOut,
 			        (unsigned)capture.visitCount, capture.anyEdgeDelta);
-			for (size_t diagnosticIndex = 0; diagnosticIndex < capture.visitCount && diagnosticIndex < 16u;
+			for (size_t diagnosticIndex = 0;
+			     diagnosticIndex < capture.visitCount && diagnosticIndex < SLIP_POST_PLANE_DIAGNOSTIC_VISIT_LIMIT;
 			     ++diagnosticIndex) {
 				const SlipDraw3DPostPlaneCaptureVisit *const visit = &visits[diagnosticIndex];
 
@@ -5705,7 +6184,7 @@ static bool TrackView_MaterialBegin(TrackViewRawBspContext *context, TrackViewMa
 		if (capture.carryOut) {
 			return true;
 		}
-		context->materialDeferredFlag = 0xffffffffu;
+		context->materialDeferredFlag = UINT32_MAX;
 		if (g_vehicleViewDumpDiagnostics) {
 			fprintf(stderr, "track_view_material_begin_0003f53b eax=0x%08x head=0x%08x bounds=%d,%d..%d,%d visits=%u\n",
 			        postPlaneSourceOffset, context->postPlaneHead, context->postLimitXMin, context->postLimitYMin,
@@ -5726,8 +6205,8 @@ static bool TrackView_ExecuteInlineReplayTail(TrackViewRawBspContext *context,
 	SlipDraw3DPostPlaneCaptureVisit captureVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	SlipDraw3DPostPlaneCapture capture;
 
-	if (context == NULL || primitiveContext == NULL || primitiveRecord == NULL || recordBytesRemaining < 0x0eu ||
-	    skippedByCapture == NULL) {
+	if (context == NULL || primitiveContext == NULL || primitiveRecord == NULL ||
+	    recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END || skippedByCapture == NULL) {
 		return false;
 	}
 	*skippedByCapture = false;
@@ -5743,15 +6222,18 @@ static bool TrackView_ExecuteInlineReplayTail(TrackViewRawBspContext *context,
 		return true;
 	}
 	shadeRecord = TrackView_MaterialRecord(context->materialTable, context->materialTableBytes, materialIndex);
-	shadeValue = shadeRecord != NULL ? SlipBytes_ReadLE32(shadeRecord + 0x50u) : 0;
+	shadeValue = shadeRecord != NULL
+	                 ? SlipBytes_ReadLE32(shadeRecord + offsetof(SlipDraw3DMaterialRecord, importedMaterialByte))
+	                 : 0;
 	rotatedNormal = SlipView3D_TransformPosition16(
-	    &primitiveContext->viewMatrix, (SlipView3DVec32){(int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x02u),
-	                                                     (int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x04u),
-	                                                     (int16_t)SlipBytes_ReadLE16(primitiveRecord + 0x06u)});
+	    &primitiveContext->viewMatrix,
+	    (SlipView3DVec32){(int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+	                      (int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+	                      (int16_t)SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET)});
 	if (!SlipDraw3D_ProjectIndex(context->vertexRecords, context->vertexRecordCount,
-	                             SlipBytes_ReadLE16(primitiveRecord + 0x0cu), TrackView_TransformVertex,
-	                             primitiveContext, &project)) {
-		context->failureAddress = 0x00019746u;
+	                             SlipBytes_ReadLE16(primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
+	                             TrackView_TransformVertex, primitiveContext, &project)) {
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_PROJECT_INDEX;
 		context->failed = true;
 		return false;
 	}
@@ -5760,7 +6242,7 @@ static bool TrackView_ExecuteInlineReplayTail(TrackViewRawBspContext *context,
 	        (uint32_t)project.world.y, (uint32_t)project.world.z, (uint16_t)rotatedNormal.x, (uint16_t)rotatedNormal.y,
 	        (uint16_t)rotatedNormal.z, context->cameraLightX, context->cameraLightY, context->cameraLightZ,
 	        captureVisits, sizeof(captureVisits) / sizeof(captureVisits[0]), &capture)) {
-		context->failureAddress = 0x0001ab34u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_CAPTURE_POST_PLANE_RING;
 		context->failed = true;
 		return false;
 	}
@@ -5793,7 +6275,7 @@ static bool TrackView_ExecuteInlineReplayTail(TrackViewRawBspContext *context,
 
 		if (!SlipDraw3D_ReleasePostPlaneRing(context->drawRecordPool, context->postPlaneHead, releaseVisits,
 		                                     sizeof(releaseVisits) / sizeof(releaseVisits[0]), &release)) {
-			context->failureAddress = 0x0001abb5u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RELEASE_POST_PLANE_RING;
 			context->failed = true;
 			return false;
 		}
@@ -5803,7 +6285,7 @@ static bool TrackView_ExecuteInlineReplayTail(TrackViewRawBspContext *context,
 }
 
 bool TrackView_ExecuteReplay(TrackViewRawBspContext *context) {
-	SlipTrackWorldReplayListVisit replayVisits[10];
+	SlipTrackWorldReplayListVisit replayVisits[SLIP_TRACK_REPLAY_OBJECT_CAPACITY];
 	SlipTrackWorldReplayList replay;
 
 	if (context == NULL) {
@@ -5813,7 +6295,7 @@ bool TrackView_ExecuteReplay(TrackViewRawBspContext *context) {
 		{
 			if (!SlipTrackWorld_ReplayList(context->replayCount, context->replayList, context->replayListBytes, 0, 0,
 			                               replayVisits, sizeof(replayVisits) / sizeof(replayVisits[0]), &replay)) {
-				context->failureAddress = 0x0003977au;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_REPLAY_LIST;
 				context->failed = true;
 				return false;
 			}
@@ -5835,7 +6317,7 @@ bool TrackView_ExecuteReplay(TrackViewRawBspContext *context) {
 					bool objectRecordInBounds = false;
 
 					if (context->objectTable != NULL && objectPosition <= context->objectTableBytes &&
-					    context->objectTableBytes - objectPosition >= 0xaeu) {
+					    context->objectTableBytes - objectPosition >= SLIP_OBJECT_DOS_STRIDE) {
 						const SlipObject *const objectRecord =
 						    &context->objectTable[objectPosition / SLIP_OBJECT_DOS_STRIDE];
 
@@ -5865,7 +6347,7 @@ bool TrackView_ExecuteReplay(TrackViewRawBspContext *context) {
 
 				if (object->drawCallback != NULL && !object->drawCallback(context, objectOffset)) {
 					TrackView_ApplyLoadedDrawState(context, savedState);
-					context->failureAddress = 0x00011eecu;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_REPLAY_OBJECT_DRAW;
 					context->failed = true;
 					return false;
 				}
@@ -5893,7 +6375,7 @@ static bool TrackView_MaterialEnd(TrackViewRawBspContext *context) {
 	}
 	if (!SlipDraw3D_ReleasePostPlaneRing(context->drawRecordPool, context->postPlaneHead, visits,
 	                                     sizeof(visits) / sizeof(visits[0]), &release)) {
-		context->failureAddress = 0x0001abb5u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RELEASE_POST_PLANE_RING;
 		context->failed = true;
 		return false;
 	}
@@ -5929,7 +6411,7 @@ static bool TrackView_ExecuteMaterialLineHandler(TrackViewRawBspContext *context
 	}
 	*carryOut = false;
 
-	if ((int32_t)depth > 0x0129da00) {
+	if ((int32_t)depth > SLIP_MATERIAL_LINES_MAXIMUM_DEPTH) {
 		return true;
 	}
 	setupList = handlerData(setupListAddress, &setupBytes);
@@ -5952,13 +6434,15 @@ static bool TrackView_ExecuteMaterialLineHandler(TrackViewRawBspContext *context
 	if (!TrackView_MaterialColorTriplet(context, materialIndex, depth, &color, &darker, &lighter)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0001a1c8u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_COLOUR_TRIPLET;
 		context->failed = true;
 		return false;
 	}
 	materialContext =
 	    (TrackViewMaterialMidpointContext){context->vertexRecords, context->vertexRecordCount, primitiveContext};
-	if (lineListBytes < 2u || lineListBytes - 2u < (size_t)SlipBytes_ReadLE16(lineList) * 4u) {
+	if (lineListBytes < SLIP_MATERIAL_LINE_LIST_HEADER_BYTES ||
+	    lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES <
+	        (size_t)SlipBytes_ReadLE16(lineList) * SLIP_MATERIAL_LINE_PAIR_BYTES) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
 		context->failureAddress = lineFailureAddress;
@@ -5966,10 +6450,13 @@ static bool TrackView_ExecuteMaterialLineHandler(TrackViewRawBspContext *context
 		return false;
 	}
 	for (uint16_t lineIndex = 0; lineIndex < SlipBytes_ReadLE16(lineList); ++lineIndex) {
-		const uint8_t *const line = lineList + 2u + (size_t)lineIndex * 4u;
+		const uint8_t *const line =
+		    lineList + SLIP_MATERIAL_LINE_LIST_HEADER_BYTES + (size_t)lineIndex * SLIP_MATERIAL_LINE_PAIR_BYTES;
 
-		if (!TrackView_ExecuteLinePairMaterialEmitPath(
-		        context, &materialContext, line, lineListBytes - 2u - (size_t)lineIndex * 4u, color, &lineRejected)) {
+		if (!TrackView_ExecuteLinePairMaterialEmitPath(context, &materialContext, line,
+		                                               lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES -
+		                                                   (size_t)lineIndex * SLIP_MATERIAL_LINE_PAIR_BYTES,
+		                                               color, &lineRejected)) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
 			return false;
@@ -5990,18 +6477,21 @@ static bool TrackView_DrawThreeLineStripMaterial(TrackViewRawBspContext *context
                                                  TrackViewPrimitiveCallbackContext *primitiveContext,
                                                  const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                  uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            materialIndex, depth, TrackView_ThreeLineStripData, 0x0004021eu,
-	                                            0x00040208u, 0x0003f3c4u, 0x000401ebu, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TrackView_ThreeLineStripData, TRACK_VIEW_THREE_LINE_STRIP_SETUP_TOKEN, TRACK_VIEW_THREE_LINE_STRIP_DATA_TOKEN,
+	    TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP, TRACK_VIEW_THREE_LINE_STRIP_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawThreeLineDiagonalMaterial(TrackViewRawBspContext *context,
                                                     TrackViewPrimitiveCallbackContext *primitiveContext,
                                                     const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                     uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            materialIndex, depth, TrackView_ThreeLineDiagonalData, 0x0004028au,
-	                                            0x0004027cu, 0x0003f3c4u, 0x0004025fu, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TrackView_ThreeLineDiagonalData, TRACK_VIEW_THREE_LINE_DIAGONAL_SETUP_TOKEN,
+	    TRACK_VIEW_THREE_LINE_DIAGONAL_DATA_TOKEN, TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP,
+	    TRACK_VIEW_THREE_LINE_DIAGONAL_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawSevenLineFrameAlternateMaterial(TrackViewRawBspContext *context,
@@ -6009,18 +6499,21 @@ static bool TrackView_DrawSevenLineFrameAlternateMaterial(TrackViewRawBspContext
                                                           const uint8_t *recordIndexStream,
                                                           size_t recordIndexStreamBytes, uint16_t materialIndex,
                                                           uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            materialIndex, depth, TrackView_SevenLineFrameAlternateData,
-	                                            0x0004036au, 0x0004034cu, 0x0003f3c4u, 0x0004032fu, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TrackView_SevenLineFrameAlternateData, TRACK_VIEW_SEVEN_LINE_FRAME_ALTERNATE_SETUP_TOKEN,
+	    TRACK_VIEW_SEVEN_LINE_FRAME_ALTERNATE_DATA_TOKEN, TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP,
+	    TRACK_VIEW_SEVEN_LINE_FRAME_ALTERNATE_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawFiveLineFrameMaterial(TrackViewRawBspContext *context,
                                                 TrackViewPrimitiveCallbackContext *primitiveContext,
                                                 const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                 uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            materialIndex, depth, TrackView_FiveLineFrameData, 0x000403f6u,
-	                                            0x000403d8u, 0x0003f3c4u, 0x000403bbu, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TrackView_FiveLineFrameData, TRACK_VIEW_FIVE_LINE_FRAME_SETUP_TOKEN, TRACK_VIEW_FIVE_LINE_FRAME_DATA_TOKEN,
+	    TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP, TRACK_VIEW_FIVE_LINE_FRAME_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawCageFiveLinesMaterial(TrackViewRawBspContext *context,
@@ -6029,9 +6522,10 @@ static bool TrackView_DrawCageFiveLinesMaterial(TrackViewRawBspContext *context,
                                                 uint16_t materialIndex, uint32_t depth, bool *carryOut) {
 
 	(void)materialIndex;
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            TrackView_MaterialHandle(context), depth, TrackView_CageFiveLinesData,
-	                                            0x0004047au, 0x00040464u, 0x0003f3c4u, 0x00040447u, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, TrackView_MaterialHandle(context), depth,
+	    TrackView_CageFiveLinesData, TRACK_VIEW_CAGE_FIVE_LINES_SETUP_TOKEN, TRACK_VIEW_CAGE_FIVE_LINES_DATA_TOKEN,
+	    TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP, TRACK_VIEW_CAGE_FIVE_LINES_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawCageSixteenLinesMaterial(TrackViewRawBspContext *context,
@@ -6042,34 +6536,40 @@ static bool TrackView_DrawCageSixteenLinesMaterial(TrackViewRawBspContext *conte
 	(void)materialIndex;
 	return TrackView_ExecuteMaterialLineHandler(
 	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, TrackView_MaterialHandle(context), depth,
-	    TrackView_CageSixteenLinesData, 0x000404fau, 0x000404e4u, 0x0003f3c4u, 0x000404c7u, carryOut);
+	    TrackView_CageSixteenLinesData, TRACK_VIEW_CAGE_SIXTEEN_LINES_SETUP_TOKEN,
+	    TRACK_VIEW_CAGE_SIXTEEN_LINES_DATA_TOKEN, TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP,
+	    TRACK_VIEW_CAGE_SIXTEEN_LINES_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawQuadOutlineMaterial(TrackViewRawBspContext *context,
                                               TrackViewPrimitiveCallbackContext *primitiveContext,
                                               const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                               uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            materialIndex, depth, TrackView_QuadOutlineData, 0x000416e6u,
-	                                            0x000416d4u, 0x0003f3c4u, 0x000416b5u, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TrackView_QuadOutlineData, TRACK_VIEW_QUAD_OUTLINE_SETUP_TOKEN, TRACK_VIEW_QUAD_OUTLINE_DATA_TOKEN,
+	    TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP, TRACK_VIEW_QUAD_OUTLINE_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawTwoConnectedLinesMaterial(TrackViewRawBspContext *context,
                                                     TrackViewPrimitiveCallbackContext *primitiveContext,
                                                     const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                     uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            materialIndex, depth, TrackView_TwoConnectedLinesData, 0x00041746u,
-	                                            0x0004173cu, 0x0003f3c4u, 0x0004171fu, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TrackView_TwoConnectedLinesData, TRACK_VIEW_TWO_CONNECTED_LINES_SETUP_TOKEN,
+	    TRACK_VIEW_TWO_CONNECTED_LINES_DATA_TOKEN, TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP,
+	    TRACK_VIEW_TWO_CONNECTED_LINES_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawTwoCornerLinesMaterial(TrackViewRawBspContext *context,
                                                  TrackViewPrimitiveCallbackContext *primitiveContext,
                                                  const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                  uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            materialIndex, depth, TrackView_TwoCornerLinesData, 0x000417a2u,
-	                                            0x00041798u, 0x0003f3c4u, 0x0004177bu, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TrackView_TwoCornerLinesData, TRACK_VIEW_TWO_CORNER_LINES_SETUP_TOKEN, TRACK_VIEW_TWO_CORNER_LINES_DATA_TOKEN,
+	    TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP, TRACK_VIEW_TWO_CORNER_LINES_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_ExecuteMaterialTwoColorLineHandler(TrackViewRawBspContext *context,
@@ -6095,7 +6595,7 @@ static bool TrackView_ExecuteMaterialTwoColorLineHandler(TrackViewRawBspContext 
 	}
 	*carryOut = false;
 
-	if ((int32_t)depth > 0x0017d400) {
+	if ((int32_t)depth > SLIP_MATERIAL_TWO_COLOUR_LINES_MAXIMUM_DEPTH) {
 		return true;
 	}
 
@@ -6115,27 +6615,32 @@ static bool TrackView_ExecuteMaterialTwoColorLineHandler(TrackViewRawBspContext 
 	                                     recordIndexStreamBytes)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f32au;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
 	materialContext =
 	    (TrackViewMaterialMidpointContext){context->vertexRecords, context->vertexRecordCount, primitiveContext};
-	if (lineListBytes < 2u || lineListBytes - 2u < (size_t)SlipBytes_ReadLE16(lineList) * 6u) {
+	if (lineListBytes < SLIP_MATERIAL_LINE_LIST_HEADER_BYTES ||
+	    lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES <
+	        (size_t)SlipBytes_ReadLE16(lineList) * SLIP_MATERIAL_COLOURED_LINE_BYTES) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003fd7du;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_TWO_COLOUR_LINE_LIST;
 		context->failed = true;
 		return false;
 	}
 	for (uint16_t lineIndex = 0; lineIndex < SlipBytes_ReadLE16(lineList); ++lineIndex) {
-		const uint8_t *const line = lineList + 2u + (size_t)lineIndex * 6u;
+		const uint8_t *const line =
+		    lineList + SLIP_MATERIAL_LINE_LIST_HEADER_BYTES + (size_t)lineIndex * SLIP_MATERIAL_COLOURED_LINE_BYTES;
 
-		const uint16_t lineColor = SlipBytes_ReadLE16(line + 4u) != 0 ? darker : lighter;
+		const uint16_t lineColor =
+		    SlipBytes_ReadLE16(line + SLIP_MATERIAL_COLOURED_LINE_SELECTOR_OFFSET) != 0 ? darker : lighter;
 
 		if (!TrackView_ExecuteLinePairMaterialEmitPath(context, &materialContext, line,
-		                                               lineListBytes - 2u - (size_t)lineIndex * 6u, lineColor,
-		                                               &lineRejected)) {
+		                                               lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES -
+		                                                   (size_t)lineIndex * SLIP_MATERIAL_COLOURED_LINE_BYTES,
+		                                               lineColor, &lineRejected)) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
 			return false;
@@ -6156,8 +6661,9 @@ static bool TrackView_DrawTwoColorSixteenLineFrameMaterial(TrackViewRawBspContex
                                                            size_t recordIndexStreamBytes, uint16_t materialIndex,
                                                            uint32_t depth, bool *carryOut) {
 	return TrackView_ExecuteMaterialTwoColorLineHandler(context, primitiveContext, recordIndexStream,
-	                                                    recordIndexStreamBytes, materialIndex, depth, 0x0003fd90u,
-	                                                    0x0003fdf2u, carryOut);
+	                                                    recordIndexStreamBytes, materialIndex, depth,
+	                                                    TRACK_VIEW_TWO_COLOUR_SIXTEEN_LINE_FRAME_LINES_TOKEN,
+	                                                    TRACK_VIEW_TWO_COLOUR_SIXTEEN_LINE_FRAME_SETUP_TOKEN, carryOut);
 }
 
 static bool TrackView_DrawTwoColorFiveLineSharedFrameMaterial(TrackViewRawBspContext *context,
@@ -6165,9 +6671,9 @@ static bool TrackView_DrawTwoColorFiveLineSharedFrameMaterial(TrackViewRawBspCon
                                                               const uint8_t *recordIndexStream,
                                                               size_t recordIndexStreamBytes, uint16_t materialIndex,
                                                               uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialTwoColorLineHandler(context, primitiveContext, recordIndexStream,
-	                                                    recordIndexStreamBytes, materialIndex, depth, 0x0003ff0cu,
-	                                                    0x0003ffb0u, carryOut);
+	return TrackView_ExecuteMaterialTwoColorLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TRACK_VIEW_TWO_COLOUR_SHARED_FRAME_LINES_TOKEN, TRACK_VIEW_TWO_COLOUR_SHARED_FRAME_SETUP_TOKEN, carryOut);
 }
 
 static bool TrackView_DrawTwoColorFiveLineSharedFrameAlternateMaterial(
@@ -6175,8 +6681,9 @@ static bool TrackView_DrawTwoColorFiveLineSharedFrameAlternateMaterial(
     const uint8_t *recordIndexStream, size_t recordIndexStreamBytes, uint16_t materialIndex, uint32_t depth,
     bool *carryOut) {
 	return TrackView_ExecuteMaterialTwoColorLineHandler(context, primitiveContext, recordIndexStream,
-	                                                    recordIndexStreamBytes, materialIndex, depth, 0x0003ff90u,
-	                                                    0x0003ffb0u, carryOut);
+	                                                    recordIndexStreamBytes, materialIndex, depth,
+	                                                    TRACK_VIEW_TWO_COLOUR_SHARED_FRAME_ALTERNATE_LINES_TOKEN,
+	                                                    TRACK_VIEW_TWO_COLOUR_SHARED_FRAME_SETUP_TOKEN, carryOut);
 }
 
 static bool TrackView_DrawTwoColorFiveLineCrossFrameMaterial(TrackViewRawBspContext *context,
@@ -6184,9 +6691,9 @@ static bool TrackView_DrawTwoColorFiveLineCrossFrameMaterial(TrackViewRawBspCont
                                                              const uint8_t *recordIndexStream,
                                                              size_t recordIndexStreamBytes, uint16_t materialIndex,
                                                              uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialTwoColorLineHandler(context, primitiveContext, recordIndexStream,
-	                                                    recordIndexStreamBytes, materialIndex, depth, 0x00040054u,
-	                                                    0x000400f8u, carryOut);
+	return TrackView_ExecuteMaterialTwoColorLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TRACK_VIEW_TWO_COLOUR_CROSS_FRAME_LINES_TOKEN, TRACK_VIEW_TWO_COLOUR_CROSS_FRAME_SETUP_TOKEN, carryOut);
 }
 
 static bool TrackView_DrawTwoColorFiveLineCrossFrameInverseMaterial(TrackViewRawBspContext *context,
@@ -6195,9 +6702,9 @@ static bool TrackView_DrawTwoColorFiveLineCrossFrameInverseMaterial(TrackViewRaw
                                                                     size_t recordIndexStreamBytes,
                                                                     uint16_t materialIndex, uint32_t depth,
                                                                     bool *carryOut) {
-	return TrackView_ExecuteMaterialTwoColorLineHandler(context, primitiveContext, recordIndexStream,
-	                                                    recordIndexStreamBytes, materialIndex, depth, 0x000400d8u,
-	                                                    0x000400f8u, carryOut);
+	return TrackView_ExecuteMaterialTwoColorLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TRACK_VIEW_TWO_COLOUR_CROSS_FRAME_INVERSE_LINES_TOKEN, TRACK_VIEW_TWO_COLOUR_CROSS_FRAME_SETUP_TOKEN, carryOut);
 }
 
 static bool TrackView_ExecuteMaterialFarPath(TrackViewRawBspContext *context,
@@ -6211,7 +6718,7 @@ static bool TrackView_ExecuteMaterialFarPath(TrackViewRawBspContext *context,
 	uint16_t lighterColor;
 
 	if (!TrackView_MaterialColorTriplet(context, materialIndex, depth, &color, &darkerColor, &lighterColor)) {
-		context->failureAddress = 0x0001a290u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FAR_MATERIAL_COLOUR_TRIPLET;
 		context->failed = true;
 		return false;
 	}
@@ -6249,8 +6756,8 @@ static bool TrackView_DrawShadedTenLinesMaterial(TrackViewRawBspContext *context
 	    TrackView_MaterialColorStep(context->materialRecord, context->materialRecordBytes, context->materialColor, 1);
 	darker =
 	    TrackView_MaterialColorStep(context->materialRecord, context->materialRecordBytes, context->materialColor, -1);
-	lineList = TrackView_ShadedTenLinesData(0x00040580u, &lineListBytes);
-	setupList = TrackView_ShadedTenLinesData(0x000405e2u, &setupBytes);
+	lineList = TrackView_ShadedTenLinesData(TRACK_VIEW_SHADED_TEN_LINES_DATA_TOKEN, &lineListBytes);
+	setupList = TrackView_ShadedTenLinesData(TRACK_VIEW_SHADED_TEN_LINES_SETUP_LIST_TOKEN, &setupBytes);
 	if (lineList == NULL || setupList == NULL) {
 		return false;
 	}
@@ -6261,27 +6768,32 @@ static bool TrackView_DrawShadedTenLinesMaterial(TrackViewRawBspContext *context
 	                                     recordIndexStreamBytes)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f32au;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
 	materialContext =
 	    (TrackViewMaterialMidpointContext){context->vertexRecords, context->vertexRecordCount, primitiveContext};
-	if (lineListBytes < 2u || lineListBytes - 2u < (size_t)SlipBytes_ReadLE16(lineList) * 6u) {
+	if (lineListBytes < SLIP_MATERIAL_LINE_LIST_HEADER_BYTES ||
+	    lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES <
+	        (size_t)SlipBytes_ReadLE16(lineList) * SLIP_MATERIAL_COLOURED_LINE_BYTES) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x00040554u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_SHADED_TEN_LINES_LIST;
 		context->failed = true;
 		return false;
 	}
 
 	for (lineIndex = 0; lineIndex < SlipBytes_ReadLE16(lineList); ++lineIndex) {
-		const uint8_t *const line = lineList + 2u + (size_t)lineIndex * 6u;
-		const uint16_t lineColor = SlipBytes_ReadLE16(line + 4u) != 0u ? darker : lighter;
+		const uint8_t *const line =
+		    lineList + SLIP_MATERIAL_LINE_LIST_HEADER_BYTES + (size_t)lineIndex * SLIP_MATERIAL_COLOURED_LINE_BYTES;
+		const uint16_t lineColor =
+		    SlipBytes_ReadLE16(line + SLIP_MATERIAL_COLOURED_LINE_SELECTOR_OFFSET) != 0u ? darker : lighter;
 
 		if (!TrackView_ExecuteLinePairMaterialEmitPath(context, &materialContext, line,
-		                                               lineListBytes - 2u - (size_t)lineIndex * 6u, lineColor,
-		                                               &lineRejected)) {
+		                                               lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES -
+		                                                   (size_t)lineIndex * SLIP_MATERIAL_COLOURED_LINE_BYTES,
+		                                               lineColor, &lineRejected)) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
 			return false;
@@ -6319,12 +6831,15 @@ static bool TrackView_DrawDepthDetailedDarkLinesMaterial(TrackViewRawBspContext 
 	}
 	*carryOut = false;
 
-	if ((int32_t)depth > 0x003b9200) {
+	if ((int32_t)depth > SLIP_MATERIAL_DARK_LINES_MAXIMUM_DEPTH) {
 		return true;
 	}
-	setupList = TrackView_DepthDetailedDarkLinesData(0x00040754u, &setupBytes);
-	mainLineList = TrackView_DepthDetailedDarkLinesData(0x000406f8u, &mainLineListBytes);
-	nearDetailLineList = TrackView_DepthDetailedDarkLinesData(0x00040722u, &nearDetailLineListBytes);
+	setupList =
+	    TrackView_DepthDetailedDarkLinesData(TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_SETUP_LIST_TOKEN, &setupBytes);
+	mainLineList =
+	    TrackView_DepthDetailedDarkLinesData(TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_DATA_TOKEN, &mainLineListBytes);
+	nearDetailLineList = TrackView_DepthDetailedDarkLinesData(
+	    TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_NEAR_DETAIL_LINE_LIST_TOKEN, &nearDetailLineListBytes);
 	if (setupList == NULL || mainLineList == NULL || nearDetailLineList == NULL) {
 		return false;
 	}
@@ -6335,7 +6850,7 @@ static bool TrackView_DrawDepthDetailedDarkLinesMaterial(TrackViewRawBspContext 
 	                                           recordIndexStreamBytes, depth)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f3c4u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
@@ -6344,42 +6859,50 @@ static bool TrackView_DrawDepthDetailedDarkLinesMaterial(TrackViewRawBspContext 
 	    TrackView_MaterialColorStep(context->materialRecord, context->materialRecordBytes, context->materialColor, -1);
 	materialContext =
 	    (TrackViewMaterialMidpointContext){context->vertexRecords, context->vertexRecordCount, primitiveContext};
-	if (mainLineListBytes < 2u || mainLineListBytes - 2u < (size_t)SlipBytes_ReadLE16(mainLineList) * 4u) {
+	if (mainLineListBytes < SLIP_MATERIAL_LINE_LIST_HEADER_BYTES ||
+	    mainLineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES <
+	        (size_t)SlipBytes_ReadLE16(mainLineList) * SLIP_MATERIAL_LINE_PAIR_BYTES) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x000406f8u;
+		context->failureAddress = TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_DATA_TOKEN;
 		context->failed = true;
 		return false;
 	}
 
 	for (lineIndex = 0; lineIndex < SlipBytes_ReadLE16(mainLineList); ++lineIndex) {
-		const uint8_t *const mainLine = mainLineList + 2u + (size_t)lineIndex * 4u;
+		const uint8_t *const mainLine =
+		    mainLineList + SLIP_MATERIAL_LINE_LIST_HEADER_BYTES + (size_t)lineIndex * SLIP_MATERIAL_LINE_PAIR_BYTES;
 		bool lineRejected;
 
 		if (!TrackView_ExecuteLinePairMaterialEmitPath(context, &materialContext, mainLine,
-		                                               mainLineListBytes - 2u - (size_t)lineIndex * 4u, lineColor,
-		                                               &lineRejected)) {
+		                                               mainLineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES -
+		                                                   (size_t)lineIndex * SLIP_MATERIAL_LINE_PAIR_BYTES,
+		                                               lineColor, &lineRejected)) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
 			return false;
 		}
 	}
 
-	if ((int32_t)depth <= 0x000007a0) {
-		if (nearDetailLineListBytes < 2u ||
-		    nearDetailLineListBytes - 2u < (size_t)SlipBytes_ReadLE16(nearDetailLineList) * 4u) {
+	if ((int32_t)depth <= SLIP_MATERIAL_DARK_LINES_DETAIL_DEPTH) {
+		if (nearDetailLineListBytes < SLIP_MATERIAL_LINE_LIST_HEADER_BYTES ||
+		    nearDetailLineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES <
+		        (size_t)SlipBytes_ReadLE16(nearDetailLineList) * SLIP_MATERIAL_LINE_PAIR_BYTES) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
-			context->failureAddress = 0x00040722u;
+			context->failureAddress = TRACK_VIEW_DEPTH_DETAILED_DARK_LINES_NEAR_DETAIL_LINE_LIST_TOKEN;
 			context->failed = true;
 			return false;
 		}
 		for (lineIndex = 0; lineIndex < SlipBytes_ReadLE16(nearDetailLineList); ++lineIndex) {
-			const uint8_t *const detailLine = nearDetailLineList + 2u + (size_t)lineIndex * 4u;
+			const uint8_t *const detailLine = nearDetailLineList + SLIP_MATERIAL_LINE_LIST_HEADER_BYTES +
+			                                  (size_t)lineIndex * SLIP_MATERIAL_LINE_PAIR_BYTES;
 			bool lineRejected;
 
 			if (!TrackView_ExecuteLinePairMaterialEmitPath(context, &materialContext, detailLine,
-			                                               nearDetailLineListBytes - 2u - (size_t)lineIndex * 4u,
+			                                               nearDetailLineListBytes -
+			                                                   SLIP_MATERIAL_LINE_LIST_HEADER_BYTES -
+			                                                   (size_t)lineIndex * SLIP_MATERIAL_LINE_PAIR_BYTES,
 			                                               lineColor, &lineRejected)) {
 				context->vertexRecords = savedVertexRecords;
 				context->vertexBufferCursor = savedVertexBufferCursor;
@@ -6400,8 +6923,15 @@ static bool TrackView_DrawAnimatedEightPolygonsMaterial(TrackViewRawBspContext *
                                                         TrackViewPrimitiveCallbackContext *primitiveContext,
                                                         const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                         uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	static const uint32_t kPolygonAddresses[8] = {0x0004092cu, 0x00040936u, 0x00040940u, 0x0004094au,
-	                                              0x00040954u, 0x0004095eu, 0x00040968u, 0x00040972u};
+	static const uint32_t kPolygonAddresses[SLIP_MATERIAL_ANIMATED_POLYGON_COUNT] = {
+	    TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN,
+	    TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN + 1 * SLIP_MATERIAL_ANIMATED_QUAD_BYTES,
+	    TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN + 2 * SLIP_MATERIAL_ANIMATED_QUAD_BYTES,
+	    TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN + 3 * SLIP_MATERIAL_ANIMATED_QUAD_BYTES,
+	    TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN + 4 * SLIP_MATERIAL_ANIMATED_QUAD_BYTES,
+	    TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN + 5 * SLIP_MATERIAL_ANIMATED_QUAD_BYTES,
+	    TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN + 6 * SLIP_MATERIAL_ANIMATED_QUAD_BYTES,
+	    TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_DATA_TOKEN + 7 * SLIP_MATERIAL_ANIMATED_QUAD_BYTES};
 	const uint8_t *setupList;
 	size_t setupBytes;
 	SlipDraw3DVertexRecord *savedVertexRecords;
@@ -6417,7 +6947,7 @@ static bool TrackView_DrawAnimatedEightPolygonsMaterial(TrackViewRawBspContext *
 	}
 	*carryOut = false;
 
-	if ((int32_t)depth > 0x0020c380) {
+	if ((int32_t)depth > SLIP_MATERIAL_ANIMATED_POLYGONS_MAXIMUM_DEPTH) {
 		return true;
 	}
 
@@ -6425,7 +6955,7 @@ static bool TrackView_DrawAnimatedEightPolygonsMaterial(TrackViewRawBspContext *
 	    TrackView_MaterialColorStep(context->materialRecord, context->materialRecordBytes, context->materialColor, -1);
 	lighter =
 	    TrackView_MaterialColorStep(context->materialRecord, context->materialRecordBytes, context->materialColor, 1);
-	setupList = TrackView_AnimatedEightPolygonsData(0x0004097cu, &setupBytes);
+	setupList = TrackView_AnimatedEightPolygonsData(TRACK_VIEW_ANIMATED_EIGHT_POLYGONS_SETUP_LIST_TOKEN, &setupBytes);
 	if (setupList == NULL) {
 		return false;
 	}
@@ -6436,29 +6966,29 @@ static bool TrackView_DrawAnimatedEightPolygonsMaterial(TrackViewRawBspContext *
 	                                     recordIndexStreamBytes)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f32au;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
 	materialContext =
 	    (TrackViewMaterialMidpointContext){context->vertexRecords, context->vertexRecordCount, primitiveContext};
 
-	for (polygonIndex = 0; polygonIndex < 8u; ++polygonIndex) {
+	for (polygonIndex = 0; polygonIndex < SLIP_MATERIAL_ANIMATED_POLYGON_COUNT; ++polygonIndex) {
 		const uint8_t *polygon;
 		size_t polygonBytes;
 		bool polygonRejected;
 
 		polygon = TrackView_AnimatedEightPolygonsData(kPolygonAddresses[polygonIndex], &polygonBytes);
-		if (polygon == NULL || polygonBytes < 2u) {
+		if (polygon == NULL || polygonBytes < sizeof(uint16_t)) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
 			context->failureAddress = kPolygonAddresses[polygonIndex];
 			context->failed = true;
 			return false;
 		}
-		if (!TrackView_ExecuteActiveMaterialEmitPath(context, &materialContext, polygon + 2u, polygonBytes - 2u,
-		                                             SlipBytes_ReadLE16(polygon), (uint16_t)g_materialAnimLerp,
-		                                             &polygonRejected)) {
+		if (!TrackView_ExecuteActiveMaterialEmitPath(context, &materialContext, polygon + sizeof(uint16_t),
+		                                             polygonBytes - sizeof(uint16_t), SlipBytes_ReadLE16(polygon),
+		                                             (uint16_t)g_materialAnimLerp, &polygonRejected)) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
 			return false;
@@ -6495,7 +7025,7 @@ static bool TrackView_DrawAnimatedOrangeDashesMaterial(TrackViewRawBspContext *c
 	}
 	*carryOut = false;
 
-	if ((int32_t)depth > 0x0020c380) {
+	if ((int32_t)depth > SLIP_MATERIAL_ANIMATED_POLYGONS_MAXIMUM_DEPTH) {
 		return true;
 	}
 
@@ -6508,7 +7038,7 @@ static bool TrackView_DrawAnimatedOrangeDashesMaterial(TrackViewRawBspContext *c
 		baseColor = 0;
 		litColor = 0;
 	}
-	setupList = TrackView_AnimatedOrangeDashesData(0x0003f810u, &setupBytes);
+	setupList = TrackView_AnimatedOrangeDashesData(TRACK_VIEW_ANIMATED_ORANGE_DASHES_SETUP_LIST_TOKEN, &setupBytes);
 	if (setupList == NULL) {
 		return false;
 	}
@@ -6519,16 +7049,18 @@ static bool TrackView_DrawAnimatedOrangeDashesMaterial(TrackViewRawBspContext *c
 	                                           recordIndexStreamBytes, depth)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f3c4u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
 	materialContext =
 	    (TrackViewMaterialMidpointContext){context->vertexRecords, context->vertexRecordCount, primitiveContext};
 
-	phase = ((g_materialAnimAccumulator & 0x1fffu) ^ 0x1fffu) >> 11;
-	for (pairIndex = 0; pairIndex < 4u; ++pairIndex) {
-		const uint32_t mainDashPairAddress = 0x0003f6c0u + pairIndex * 8u;
+	phase = ((g_materialAnimAccumulator & SLIP_MATERIAL_DASH_ACCUMULATOR_MASK) ^ SLIP_MATERIAL_DASH_ACCUMULATOR_MASK) >>
+	        SLIP_MATERIAL_DASH_PHASE_SHIFT;
+	for (pairIndex = 0; pairIndex < SLIP_MATERIAL_DASH_PHASE_COUNT; ++pairIndex) {
+		const uint32_t mainDashPairAddress =
+		    TRACK_VIEW_ANIMATED_ORANGE_DASHES_DATA_TOKEN + pairIndex * SLIP_MATERIAL_DASH_PAIR_BYTES;
 		const uint8_t *const mainDashPair = TrackView_AnimatedOrangeDashesData(mainDashPairAddress, NULL);
 		const uint16_t mainDashColor = phase == pairIndex ? (uint16_t)litColor : (uint16_t)baseColor;
 		uint32_t mainListIndex;
@@ -6537,21 +7069,23 @@ static bool TrackView_DrawAnimatedOrangeDashesMaterial(TrackViewRawBspContext *c
 		if (mainDashPair == NULL) {
 			return false;
 		}
-		for (mainListIndex = 0; mainListIndex < 2u; ++mainListIndex) {
-			const uint32_t mainListAddress = SlipBytes_ReadLE32(mainDashPair + mainListIndex * 4u);
+		for (mainListIndex = 0; mainListIndex < SLIP_MATERIAL_DASH_LISTS_PER_PAIR; ++mainListIndex) {
+			const uint32_t mainListAddress =
+			    SlipBytes_ReadLE32(mainDashPair + mainListIndex * SLIP_MATERIAL_DASH_LIST_ADDRESS_BYTES);
 			size_t mainListBytes;
 			const uint8_t *const mainPolygonList = TrackView_AnimatedOrangeDashesData(mainListAddress, &mainListBytes);
 
-			if (mainPolygonList == NULL || mainListBytes < 2u) {
+			if (mainPolygonList == NULL || mainListBytes < SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES) {
 				context->vertexRecords = savedVertexRecords;
 				context->vertexBufferCursor = savedVertexBufferCursor;
-				context->failureAddress = 0x0003f630u;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_ORANGE_DASH_MAIN_LIST;
 				context->failed = true;
 				return false;
 			}
-			if (!TrackView_ExecuteActiveMaterialEmitPath(context, &materialContext, mainPolygonList + 2u,
-			                                             mainListBytes - 2u, SlipBytes_ReadLE16(mainPolygonList),
-			                                             mainDashColor, &polygonRejected)) {
+			if (!TrackView_ExecuteActiveMaterialEmitPath(
+			        context, &materialContext, mainPolygonList + SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES,
+			        mainListBytes - SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES, SlipBytes_ReadLE16(mainPolygonList),
+			        mainDashColor, &polygonRejected)) {
 				context->vertexRecords = savedVertexRecords;
 				context->vertexBufferCursor = savedVertexBufferCursor;
 				return false;
@@ -6559,33 +7093,37 @@ static bool TrackView_DrawAnimatedOrangeDashesMaterial(TrackViewRawBspContext *c
 		}
 	}
 
-	if (context->detailLevel == 3u) {
-		for (pairIndex = 0; pairIndex < 8u; ++pairIndex) {
-			const uint32_t detailDashPairAddress = 0x0003f6e0u + pairIndex * 8u;
+	if (context->detailLevel == SLIP_RENDER_FULL_DETAIL_LEVEL) {
+		for (pairIndex = 0; pairIndex < SLIP_MATERIAL_DASH_DETAIL_PAIR_COUNT; ++pairIndex) {
+			const uint32_t detailDashPairAddress =
+			    TRACK_VIEW_ORANGE_DASH_DETAIL_PAIRS_DATA_TOKEN + pairIndex * SLIP_MATERIAL_DASH_PAIR_BYTES;
 			const uint8_t *const detailDashPair = TrackView_AnimatedOrangeDashesData(detailDashPairAddress, NULL);
 
-			const uint16_t detailDashColor = phase == (pairIndex & 3u) ? (uint16_t)litColor : (uint16_t)baseColor;
+			const uint16_t detailDashColor =
+			    phase == (pairIndex & SLIP_MATERIAL_DASH_PHASE_MASK) ? (uint16_t)litColor : (uint16_t)baseColor;
 			uint32_t detailListIndex;
 			bool polygonRejected;
 
 			if (detailDashPair == NULL) {
 				return false;
 			}
-			for (detailListIndex = 0; detailListIndex < 2u; ++detailListIndex) {
-				const uint32_t detailListAddress = SlipBytes_ReadLE32(detailDashPair + detailListIndex * 4u);
+			for (detailListIndex = 0; detailListIndex < SLIP_MATERIAL_DASH_LISTS_PER_PAIR; ++detailListIndex) {
+				const uint32_t detailListAddress =
+				    SlipBytes_ReadLE32(detailDashPair + detailListIndex * SLIP_MATERIAL_DASH_LIST_ADDRESS_BYTES);
 				size_t detailListBytes;
 				const uint8_t *const detailPolygonList =
 				    TrackView_AnimatedOrangeDashesData(detailListAddress, &detailListBytes);
 
-				if (detailPolygonList == NULL || detailListBytes < 2u) {
+				if (detailPolygonList == NULL || detailListBytes < SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES) {
 					context->vertexRecords = savedVertexRecords;
 					context->vertexBufferCursor = savedVertexBufferCursor;
-					context->failureAddress = 0x0003f697u;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_ORANGE_DASH_DETAIL_LIST;
 					context->failed = true;
 					return false;
 				}
 				if (!TrackView_ExecuteActiveMaterialEmitPath(
-				        context, &materialContext, detailPolygonList + 2u, detailListBytes - 2u,
+				        context, &materialContext, detailPolygonList + SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES,
+				        detailListBytes - SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES,
 				        SlipBytes_ReadLE16(detailPolygonList), detailDashColor, &polygonRejected)) {
 					context->vertexRecords = savedVertexRecords;
 					context->vertexBufferCursor = savedVertexBufferCursor;
@@ -6630,13 +7168,14 @@ static bool TrackView_DrawAnimatedFloorLightDashesMaterial(TrackViewRawBspContex
 	}
 	*carryOut = false;
 
-	if ((int32_t)depth > 0x001a0fe0) {
+	if ((int32_t)depth > SLIP_MATERIAL_FLOOR_LIGHTS_MAXIMUM_DEPTH) {
 		return true;
 	}
-	blobBase = TrackView_AnimatedFloorLightDashesData(0x0003faf8u, &blobBytes);
-	polygon = TrackView_AnimatedFloorLightDashesData(0x0003faf8u, &polygonBytes);
-	entryTable = TrackView_AnimatedFloorLightDashesData(0x0003fb00u, NULL);
-	setupList = TrackView_AnimatedFloorLightDashesData(0x0003fbe0u, &setupBytes);
+	blobBase = TrackView_AnimatedFloorLightDashesData(TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_DATA_TOKEN, &blobBytes);
+	polygon = TrackView_AnimatedFloorLightDashesData(TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_DATA_TOKEN, &polygonBytes);
+	entryTable = TrackView_AnimatedFloorLightDashesData(TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_ENTRY_TABLE_TOKEN, NULL);
+	setupList =
+	    TrackView_AnimatedFloorLightDashesData(TRACK_VIEW_ANIMATED_FLOOR_LIGHT_DASHES_SETUP_LIST_TOKEN, &setupBytes);
 	if (blobBase == NULL || polygon == NULL || entryTable == NULL || setupList == NULL) {
 		return false;
 	}
@@ -6653,44 +7192,49 @@ static bool TrackView_DrawAnimatedFloorLightDashesMaterial(TrackViewRawBspContex
 	                                           recordIndexStreamBytes, depth)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f3c4u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
 	materialContext =
 	    (TrackViewMaterialMidpointContext){context->vertexRecords, context->vertexRecordCount, primitiveContext};
 
-	if (!TrackView_MaterialBegin(context, &materialContext, polygon, polygonBytes, 0, 4, 0xffffu, &materialRejected) ||
+	if (!TrackView_MaterialBegin(context, &materialContext, polygon, polygonBytes, 0, SLIP_POLYGON_RECTANGLE_VERTICES,
+	                             SLIP_MATERIAL_NO_POLYGON_COLOUR, &materialRejected) ||
 	    !TrackView_MaterialEnd(context)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
 		return false;
 	}
 
-	litIndex = ((g_materialAnimAccumulator & 0x1fffu) ^ 0x1fffu) >> 11;
-	for (iteration = 0; iteration < 8u; ++iteration) {
-		const uint8_t *const entry = entryTable + (size_t)iteration * 8u;
-		const uint32_t maskedIteration = iteration & 0x3u;
+	litIndex =
+	    ((g_materialAnimAccumulator & SLIP_MATERIAL_DASH_ACCUMULATOR_MASK) ^ SLIP_MATERIAL_DASH_ACCUMULATOR_MASK) >>
+	    SLIP_MATERIAL_DASH_PHASE_SHIFT;
+	for (iteration = 0; iteration < SLIP_MATERIAL_DASH_DETAIL_PAIR_COUNT; ++iteration) {
+		const uint8_t *const entry = entryTable + (size_t)iteration * SLIP_MATERIAL_DASH_PAIR_BYTES;
+		const uint32_t maskedIteration = iteration & SLIP_MATERIAL_DASH_PHASE_MASK;
 
 		const uint16_t color = (uint16_t)(litIndex == maskedIteration ? litColor : baseColor);
 		uint32_t pointerIndex;
 
-		for (pointerIndex = 0; pointerIndex < 2u; ++pointerIndex) {
-			const uint32_t listAddress = SlipBytes_ReadLE32(entry + pointerIndex * 4u);
+		for (pointerIndex = 0; pointerIndex < SLIP_MATERIAL_DASH_LISTS_PER_PAIR; ++pointerIndex) {
+			const uint32_t listAddress =
+			    SlipBytes_ReadLE32(entry + pointerIndex * SLIP_MATERIAL_DASH_LIST_ADDRESS_BYTES);
 			size_t listBytes;
 			const uint8_t *const list = TrackView_AnimatedFloorLightDashesData(listAddress, &listBytes);
 			uint16_t countAndFlags;
 
-			if (list == NULL || listBytes < 2u) {
+			if (list == NULL || listBytes < SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES) {
 				context->vertexRecords = savedVertexRecords;
 				context->vertexBufferCursor = savedVertexBufferCursor;
-				context->failureAddress = 0x0003fac9u;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLOOR_LIGHT_DASH_LIST;
 				context->failed = true;
 				return false;
 			}
 			countAndFlags = SlipBytes_ReadLE16(list);
-			if (!TrackView_ExecuteActiveMaterialEmitPath(context, &materialContext, list + 2u, listBytes - 2u,
-			                                             countAndFlags, color, &polygonRejected)) {
+			if (!TrackView_ExecuteActiveMaterialEmitPath(
+			        context, &materialContext, list + SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES,
+			        listBytes - SLIP_MATERIAL_POLYGON_LIST_HEADER_BYTES, countAndFlags, color, &polygonRejected)) {
 				context->vertexRecords = savedVertexRecords;
 				context->vertexBufferCursor = savedVertexBufferCursor;
 				return false;
@@ -6712,9 +7256,10 @@ static bool TrackView_DrawSevenLineFrameMaterial(TrackViewRawBspContext *context
                                                  TrackViewPrimitiveCallbackContext *primitiveContext,
                                                  const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                  uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            materialIndex, depth, TrackView_SevenLineFrameData, 0x000402f2u,
-	                                            0x000402e4u, 0x0003f3c4u, 0x000402c7u, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
+	    TrackView_SevenLineFrameData, TRACK_VIEW_SEVEN_LINE_FRAME_SETUP_TOKEN, TRACK_VIEW_SEVEN_LINE_FRAME_DATA_TOKEN,
+	    TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP, TRACK_VIEW_SEVEN_LINE_FRAME_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_DrawCageSevenLinesMaterial(TrackViewRawBspContext *context,
@@ -6723,9 +7268,10 @@ static bool TrackView_DrawCageSevenLinesMaterial(TrackViewRawBspContext *context
                                                  uint16_t materialIndex, uint32_t depth, bool *carryOut) {
 
 	(void)materialIndex;
-	return TrackView_ExecuteMaterialLineHandler(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
-	                                            TrackView_MaterialHandle(context), depth, TrackView_CageSevenLinesData,
-	                                            0x0004019au, 0x0004017cu, 0x0003f3c4u, 0x0004015du, carryOut);
+	return TrackView_ExecuteMaterialLineHandler(
+	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, TrackView_MaterialHandle(context), depth,
+	    TrackView_CageSevenLinesData, TRACK_VIEW_CAGE_SEVEN_LINES_SETUP_TOKEN, TRACK_VIEW_CAGE_SEVEN_LINES_DATA_TOKEN,
+	    TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP, TRACK_VIEW_CAGE_SEVEN_LINES_DIAGNOSTIC_DRAW, carryOut);
 }
 
 static bool TrackView_ExecuteMaterialPolygonHandler(
@@ -6761,7 +7307,7 @@ static bool TrackView_ExecuteMaterialPolygonHandler(
 		return false;
 	}
 	*carryOut = false;
-	if ((int32_t)depth > 0x0029b300) {
+	if ((int32_t)depth > SLIP_MATERIAL_POLYGONS_MAXIMUM_DEPTH) {
 		(void)farPathAddress;
 		return TrackView_ExecuteMaterialFarPath(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
 		                                        materialIndex, depth, secondaryDetailCountAndFlags, carryOut);
@@ -6781,7 +7327,7 @@ static bool TrackView_ExecuteMaterialPolygonHandler(
 	                                                          recordIndexStream, recordIndexStreamBytes)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f32au;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
@@ -6790,7 +7336,7 @@ static bool TrackView_ExecuteMaterialPolygonHandler(
 	                                    &secondaryLighter)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0001a1c8u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_COLOUR_TRIPLET;
 		context->failed = true;
 		return false;
 	}
@@ -6798,7 +7344,7 @@ static bool TrackView_ExecuteMaterialPolygonHandler(
 	                                                           recordIndexStream, recordIndexStreamBytes)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f32au;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
@@ -6817,7 +7363,9 @@ static bool TrackView_ExecuteMaterialPolygonHandler(
 		context->vertexBufferCursor = savedVertexBufferCursor;
 		return false;
 	}
-	if (lineListBytes < 2u || lineListBytes - 2u < (size_t)SlipBytes_ReadLE16(lineList) * 6u) {
+	if (lineListBytes < SLIP_MATERIAL_LINE_LIST_HEADER_BYTES ||
+	    lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES <
+	        (size_t)SlipBytes_ReadLE16(lineList) * SLIP_MATERIAL_COLOURED_LINE_BYTES) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
 		context->failureAddress = lineFailureAddress;
@@ -6825,12 +7373,15 @@ static bool TrackView_ExecuteMaterialPolygonHandler(
 		return false;
 	}
 	for (uint16_t lineIndex = 0; lineIndex < SlipBytes_ReadLE16(lineList); ++lineIndex) {
-		const uint8_t *const line = lineList + 2u + (size_t)lineIndex * 6u;
-		const uint16_t lineColor = SlipBytes_ReadLE16(line + 4u) != 0u ? darker : lighter;
+		const uint8_t *const line =
+		    lineList + SLIP_MATERIAL_LINE_LIST_HEADER_BYTES + (size_t)lineIndex * SLIP_MATERIAL_COLOURED_LINE_BYTES;
+		const uint16_t lineColor =
+		    SlipBytes_ReadLE16(line + SLIP_MATERIAL_COLOURED_LINE_SELECTOR_OFFSET) != 0u ? darker : lighter;
 
 		if (!TrackView_ExecuteLinePairMaterialEmitPath(context, &materialContext, line,
-		                                               lineListBytes - 2u - (size_t)lineIndex * 6u, lineColor,
-		                                               &lineRejected)) {
+		                                               lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES -
+		                                                   (size_t)lineIndex * SLIP_MATERIAL_COLOURED_LINE_BYTES,
+		                                               lineColor, &lineRejected)) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
 			return false;
@@ -6853,8 +7404,14 @@ static bool TrackView_DrawIndependentSetupTriangleQuadsMaterial(TrackViewRawBspC
                                                                 uint32_t depth, bool *carryOut) {
 	return TrackView_ExecuteMaterialPolygonHandler(
 	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
-	    TrackView_IndependentSetupTriangleQuadsData, TrackView_IndependentSetupTriangleQuadsData, 0x000410deu,
-	    0x000410a0u, 0x000410a8u, 0x000410aeu, 0x000410b8u, 3, false, 0x00041080u, 0x0004104au, carryOut);
+	    TrackView_IndependentSetupTriangleQuadsData, TrackView_IndependentSetupTriangleQuadsData,
+	    TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_SETUP_TOKEN,
+	    TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_SECONDARY_BASE_TOKEN,
+	    TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_SECONDARY_DETAIL_TOKEN,
+	    TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_PRIMARY_TOKEN,
+	    TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_LINES_TOKEN, 3, false,
+	    TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_DIAGNOSTIC_FAR_PATH,
+	    TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_DIAGNOSTIC_LINES, carryOut);
 }
 
 static bool TrackView_DrawShadedQuadsMaterial(TrackViewRawBspContext *context,
@@ -6863,8 +7420,10 @@ static bool TrackView_DrawShadedQuadsMaterial(TrackViewRawBspContext *context,
                                               uint16_t materialIndex, uint32_t depth, bool *carryOut) {
 	return TrackView_ExecuteMaterialPolygonHandler(
 	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
-	    TrackView_ShadedQuadsData, TrackView_ShadedQuadsData, 0x00040c18u, 0x00040ba4u, 0x00040bacu, 0x00040bb4u,
-	    0x00040bbcu, 4, true, 0x00040b84u, 0x00040b4eu, carryOut);
+	    TrackView_ShadedQuadsData, TrackView_ShadedQuadsData, TRACK_VIEW_SHADED_QUADS_SETUP_TOKEN,
+	    TRACK_VIEW_SHADED_QUADS_DATA_TOKEN, TRACK_VIEW_SHADED_QUADS_SECONDARY_DETAIL_TOKEN,
+	    TRACK_VIEW_SHADED_QUADS_PRIMARY_TOKEN, TRACK_VIEW_SHADED_QUADS_LINES_TOKEN, 4, true,
+	    TRACK_VIEW_SHADED_QUADS_DIAGNOSTIC_FAR_PATH, TRACK_VIEW_SHADED_QUADS_DIAGNOSTIC_LINES, carryOut);
 }
 
 static bool TrackView_DrawShadedTriangleQuadsMaterial(TrackViewRawBspContext *context,
@@ -6873,8 +7432,11 @@ static bool TrackView_DrawShadedTriangleQuadsMaterial(TrackViewRawBspContext *co
                                                       uint16_t materialIndex, uint32_t depth, bool *carryOut) {
 	return TrackView_ExecuteMaterialPolygonHandler(
 	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
-	    TrackView_ShadedTriangleQuadsData, TrackView_ShadedTriangleQuadsData, 0x00040dfeu, 0x00040dc2u, 0x00040dcau,
-	    0x00040dd0u, 0x00040dd8u, 3, false, 0x00040da2u, 0x00040d6cu, carryOut);
+	    TrackView_ShadedTriangleQuadsData, TrackView_ShadedTriangleQuadsData,
+	    TRACK_VIEW_SHADED_TRIANGLE_QUADS_SETUP_TOKEN, TRACK_VIEW_SHADED_TRIANGLE_QUADS_DATA_TOKEN,
+	    TRACK_VIEW_SHADED_TRIANGLE_QUADS_SECONDARY_DETAIL_TOKEN, TRACK_VIEW_SHADED_TRIANGLE_QUADS_PRIMARY_TOKEN,
+	    TRACK_VIEW_SHADED_TRIANGLE_QUADS_LINES_TOKEN, 3, false, TRACK_VIEW_SHADED_TRIANGLE_QUADS_DIAGNOSTIC_FAR_PATH,
+	    TRACK_VIEW_SHADED_TRIANGLE_QUADS_DIAGNOSTIC_LINES, carryOut);
 }
 
 static bool TrackView_DrawSharedSetupTriangleQuadsMaterial(TrackViewRawBspContext *context,
@@ -6884,15 +7446,22 @@ static bool TrackView_DrawSharedSetupTriangleQuadsMaterial(TrackViewRawBspContex
                                                            uint32_t depth, bool *carryOut) {
 	return TrackView_ExecuteMaterialPolygonHandler(
 	    context, primitiveContext, recordIndexStream, recordIndexStreamBytes, materialIndex, depth,
-	    TrackView_SharedSetupTriangleQuadsData, TrackView_ShadedTriangleQuadsData, 0x00040dfeu, 0x00040f6cu,
-	    0x00040f74u, 0x00040f7au, 0x00040f84u, 3, false, 0x00040f4cu, 0x00040f16u, carryOut);
+	    TrackView_SharedSetupTriangleQuadsData, TrackView_ShadedTriangleQuadsData,
+	    TRACK_VIEW_SHADED_TRIANGLE_QUADS_SETUP_TOKEN, TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_DATA_TOKEN,
+	    TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_SECONDARY_DETAIL_TOKEN,
+	    TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_PRIMARY_TOKEN, TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_LINES_TOKEN, 3,
+	    false, TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_DIAGNOSTIC_FAR_PATH,
+	    TRACK_VIEW_SHARED_SETUP_TRIANGLE_QUADS_DIAGNOSTIC_LINES, carryOut);
 }
 
 static bool TrackView_DrawRoadLinePolygonsMaterial(TrackViewRawBspContext *context,
                                                    TrackViewPrimitiveCallbackContext *primitiveContext,
                                                    const uint8_t *recordIndexStream, size_t recordIndexStreamBytes,
                                                    uint16_t materialIndex, uint32_t depth, bool *carryOut) {
-	static const uint32_t kPolygonAddresses[5] = {0x0004159cu, 0x000415a4u, 0x00041584u, 0x0004158cu, 0x00041594u};
+	static const uint32_t kPolygonAddresses[] = {
+	    TRACK_VIEW_ROAD_SURFACE_POLYGON_TOKEN, TRACK_VIEW_ROAD_DARK_SURFACE_POLYGON_TOKEN,
+	    TRACK_VIEW_ROAD_FIRST_LINE_POLYGON_TOKEN, TRACK_VIEW_ROAD_SECOND_LINE_POLYGON_TOKEN,
+	    TRACK_VIEW_ROAD_THIRD_LINE_POLYGON_TOKEN};
 	const uint8_t *setupList;
 	size_t setupBytes;
 	SlipDraw3DVertexRecord *savedVertexRecords;
@@ -6914,11 +7483,11 @@ static bool TrackView_DrawRoadLinePolygonsMaterial(TrackViewRawBspContext *conte
 	}
 	*carryOut = false;
 
-	if ((int32_t)depth > 0x001656c0) {
+	if ((int32_t)depth > SLIP_MATERIAL_ROAD_LINES_MAXIMUM_DEPTH) {
 		return TrackView_ExecuteMaterialFarPath(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
 		                                        materialIndex, depth, 4, carryOut);
 	}
-	setupList = TrackView_RoadLinePolygonsData(0x000415acu, &setupBytes);
+	setupList = TrackView_RoadLinePolygonsData(TRACK_VIEW_ROAD_LINE_POLYGONS_SETUP_LIST_TOKEN, &setupBytes);
 	if (setupList == NULL) {
 		return false;
 	}
@@ -6947,7 +7516,7 @@ static bool TrackView_DrawRoadLinePolygonsMaterial(TrackViewRawBspContext *conte
 	                                           recordIndexStreamBytes, depth)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f3c4u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_SCREEN_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
@@ -6956,13 +7525,13 @@ static bool TrackView_DrawRoadLinePolygonsMaterial(TrackViewRawBspContext *conte
 	                                    &roadLineLighter)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0001a1c8u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_COLOUR_TRIPLET;
 		context->failed = true;
 		return false;
 	}
 	materialContext =
 	    (TrackViewMaterialMidpointContext){context->vertexRecords, context->vertexRecordCount, primitiveContext};
-	for (polygonIndex = 0; polygonIndex < 5u; ++polygonIndex) {
+	for (polygonIndex = 0; polygonIndex < sizeof(kPolygonAddresses) / sizeof(kPolygonAddresses[0]); ++polygonIndex) {
 		const uint8_t *polygon;
 		size_t polygonBytes;
 		uint16_t polygonColor;
@@ -7033,14 +7602,17 @@ static bool TrackView_DrawSecondaryColorQuadsMaterial(TrackViewRawBspContext *co
 	}
 	*carryOut = false;
 
-	if ((int32_t)depth > 0x0029b300) {
+	if ((int32_t)depth > SLIP_MATERIAL_POLYGONS_MAXIMUM_DEPTH) {
 		return TrackView_ExecuteMaterialFarPath(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
 		                                        materialIndex, depth, 4, carryOut);
 	}
-	setupList = TrackView_SecondaryColorQuadsData(0x00041356u, &setupBytes);
-	secondaryBasePolygon = TrackView_SecondaryColorQuadsData(0x0004133eu, &secondaryBasePolygonBytes);
-	secondaryDetailPolygon = TrackView_SecondaryColorQuadsData(0x00041346u, &secondaryDetailPolygonBytes);
-	primaryPolygon = TrackView_SecondaryColorQuadsData(0x0004134eu, &primaryPolygonBytes);
+	setupList = TrackView_SecondaryColorQuadsData(TRACK_VIEW_SECONDARY_COLOR_QUADS_SETUP_LIST_TOKEN, &setupBytes);
+	secondaryBasePolygon =
+	    TrackView_SecondaryColorQuadsData(TRACK_VIEW_SECONDARY_COLOR_QUADS_DATA_TOKEN, &secondaryBasePolygonBytes);
+	secondaryDetailPolygon = TrackView_SecondaryColorQuadsData(
+	    TRACK_VIEW_SECONDARY_COLOR_QUADS_SECONDARY_DETAIL_POLYGON_TOKEN, &secondaryDetailPolygonBytes);
+	primaryPolygon =
+	    TrackView_SecondaryColorQuadsData(TRACK_VIEW_SECONDARY_COLOR_QUADS_PRIMARY_POLYGON_TOKEN, &primaryPolygonBytes);
 	if (setupList == NULL || secondaryBasePolygon == NULL || secondaryDetailPolygon == NULL || primaryPolygon == NULL) {
 		return false;
 	}
@@ -7051,7 +7623,7 @@ static bool TrackView_DrawSecondaryColorQuadsMaterial(TrackViewRawBspContext *co
 	                                     recordIndexStreamBytes)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f32au;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
@@ -7060,7 +7632,7 @@ static bool TrackView_DrawSecondaryColorQuadsMaterial(TrackViewRawBspContext *co
 	                                    &secondaryLighter)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0001a1c8u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_COLOUR_TRIPLET;
 		context->failed = true;
 		return false;
 	}
@@ -7118,22 +7690,27 @@ static bool TrackView_DrawSecondaryColorPolygonsWithLinesMaterial(TrackViewRawBs
 		return false;
 	}
 	*carryOut = false;
-	if ((int32_t)depth > 0x0029b300) {
+	if ((int32_t)depth > SLIP_MATERIAL_POLYGONS_MAXIMUM_DEPTH) {
 		return TrackView_ExecuteMaterialFarPath(context, primitiveContext, recordIndexStream, recordIndexStreamBytes,
 		                                        materialIndex, depth, 3, carryOut);
 	}
 	if (!TrackView_MaterialColorTriplet(context, materialIndex, depth, &color, &darker, &lighter) ||
 	    !TrackView_MaterialColorTriplet(context, context->materialDepthIndex, depth, &secondaryColor, &secondaryDarker,
 	                                    &secondaryLighter)) {
-		context->failureAddress = 0x0001a1c8u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_COLOUR_TRIPLET;
 		context->failed = true;
 		return false;
 	}
-	setupList = TrackView_IndependentSetupTriangleQuadsData(0x000410deu, &setupBytes);
-	secondaryBasePolygon = TrackView_SecondaryColorPolygonsWithLinesData(0x0004124cu, &secondaryBasePolygonBytes);
-	secondaryDetailPolygon = TrackView_SecondaryColorPolygonsWithLinesData(0x00041254u, &secondaryDetailPolygonBytes);
-	primaryPolygon = TrackView_SecondaryColorPolygonsWithLinesData(0x0004125au, &primaryPolygonBytes);
-	lineList = TrackView_SecondaryColorPolygonsWithLinesData(0x00041264u, &lineListBytes);
+	setupList = TrackView_IndependentSetupTriangleQuadsData(TRACK_VIEW_INDEPENDENT_SETUP_TRIANGLE_QUADS_SETUP_TOKEN,
+	                                                        &setupBytes);
+	secondaryBasePolygon = TrackView_SecondaryColorPolygonsWithLinesData(
+	    TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_SECONDARY_BASE_POLYGON_TOKEN, &secondaryBasePolygonBytes);
+	secondaryDetailPolygon = TrackView_SecondaryColorPolygonsWithLinesData(
+	    TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_SECONDARY_DETAIL_POLYGON_TOKEN, &secondaryDetailPolygonBytes);
+	primaryPolygon = TrackView_SecondaryColorPolygonsWithLinesData(
+	    TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_PRIMARY_POLYGON_TOKEN, &primaryPolygonBytes);
+	lineList = TrackView_SecondaryColorPolygonsWithLinesData(
+	    TRACK_VIEW_SECONDARY_COLOR_POLYGONS_WITH_LINES_LINE_LIST_TOKEN, &lineListBytes);
 	if (setupList == NULL || secondaryBasePolygon == NULL || secondaryDetailPolygon == NULL || primaryPolygon == NULL ||
 	    lineList == NULL) {
 		return false;
@@ -7144,7 +7721,7 @@ static bool TrackView_DrawSecondaryColorPolygonsWithLinesMaterial(TrackViewRawBs
 	                                     recordIndexStreamBytes)) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x0003f32au;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_VERTEX_SETUP;
 		context->failed = true;
 		return false;
 	}
@@ -7162,20 +7739,25 @@ static bool TrackView_DrawSecondaryColorPolygonsWithLinesMaterial(TrackViewRawBs
 		context->vertexBufferCursor = savedVertexBufferCursor;
 		return false;
 	}
-	if (lineListBytes < 2u || lineListBytes - 2u < (size_t)SlipBytes_ReadLE16(lineList) * 6u) {
+	if (lineListBytes < SLIP_MATERIAL_LINE_LIST_HEADER_BYTES ||
+	    lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES <
+	        (size_t)SlipBytes_ReadLE16(lineList) * SLIP_MATERIAL_COLOURED_LINE_BYTES) {
 		context->vertexRecords = savedVertexRecords;
 		context->vertexBufferCursor = savedVertexBufferCursor;
-		context->failureAddress = 0x000411f6u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_SECONDARY_COLOUR_LINE_LIST;
 		context->failed = true;
 		return false;
 	}
 	for (uint16_t lineIndex = 0; lineIndex < SlipBytes_ReadLE16(lineList); ++lineIndex) {
-		const uint8_t *const line = lineList + 2u + (size_t)lineIndex * 6u;
-		const uint16_t lineColor = SlipBytes_ReadLE16(line + 4u) != 0u ? darker : lighter;
+		const uint8_t *const line =
+		    lineList + SLIP_MATERIAL_LINE_LIST_HEADER_BYTES + (size_t)lineIndex * SLIP_MATERIAL_COLOURED_LINE_BYTES;
+		const uint16_t lineColor =
+		    SlipBytes_ReadLE16(line + SLIP_MATERIAL_COLOURED_LINE_SELECTOR_OFFSET) != 0u ? darker : lighter;
 
 		if (!TrackView_ExecuteLinePairMaterialEmitPath(context, &materialContext, line,
-		                                               lineListBytes - 2u - (size_t)lineIndex * 6u, lineColor,
-		                                               &lineRejected)) {
+		                                               lineListBytes - SLIP_MATERIAL_LINE_LIST_HEADER_BYTES -
+		                                                   (size_t)lineIndex * SLIP_MATERIAL_COLOURED_LINE_BYTES,
+		                                               lineColor, &lineRejected)) {
 			context->vertexRecords = savedVertexRecords;
 			context->vertexBufferCursor = savedVertexBufferCursor;
 			return false;
@@ -7255,32 +7837,34 @@ static bool TrackView_ExecuteExtendedMaterialDispatch(TrackViewRawBspContext *co
                                                       const uint8_t *primitiveRecord, size_t recordBytesRemaining,
                                                       uint32_t materialDispatchValue, uint16_t countAndFlags,
                                                       uint16_t materialIndex, uint8_t materialFlags, bool *carryOut) {
-	SlipDraw3DPerspectiveDepthVisit depthVisits[64];
+	SlipDraw3DPerspectiveDepthVisit depthVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	SlipDraw3DPerspectiveDepth depthResult;
 	const TrackViewMaterialHandler *dispatchTable;
 	size_t dispatchTableCount;
 	TrackViewMaterialHandler materialHandler;
-	const uint16_t polygonCountAndFlags = (uint16_t)(countAndFlags & 0x7fffu);
+	const uint16_t polygonCountAndFlags = (uint16_t)(countAndFlags & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
 	uint8_t handlerIndex;
 	bool extendedMaterial;
 
-	if (context == NULL || primitiveContext == NULL || primitiveRecord == NULL || recordBytesRemaining < 0x0cu ||
-	    carryOut == NULL) {
+	if (context == NULL || primitiveContext == NULL || primitiveRecord == NULL ||
+	    recordBytesRemaining < SLIP_TRC_PRIMITIVE_HEADER_BYTES || carryOut == NULL) {
 		return false;
 	}
 
 	if (context->projectState == NULL ||
-	    !SlipDraw3D_PerspectiveDepth(
-	        context->vertexRecords, context->vertexRecordCount, primitiveRecord + 0x0cu, recordBytesRemaining - 0x0cu,
-	        polygonCountAndFlags, context->projectState->inverseProjectionScale, TrackView_TransformVertex,
-	        primitiveContext, depthVisits, sizeof(depthVisits) / sizeof(depthVisits[0]), &depthResult)) {
-		context->failureAddress = 0x0003f2c8u;
+	    !SlipDraw3D_PerspectiveDepth(context->vertexRecords, context->vertexRecordCount,
+	                                 primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+	                                 recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, polygonCountAndFlags,
+	                                 context->projectState->inverseProjectionScale, TrackView_TransformVertex,
+	                                 primitiveContext, depthVisits, sizeof(depthVisits) / sizeof(depthVisits[0]),
+	                                 &depthResult)) {
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_EXTENDED_MATERIAL_DISPATCH;
 		context->failed = true;
 		return false;
 	}
 
-	extendedMaterial = (materialFlags & 0x80u) != 0;
-	handlerIndex = materialFlags & (extendedMaterial ? 0x7fu : 0xffu);
+	extendedMaterial = (materialFlags & SLIP_TRC_MATERIAL_EXTENDED) != 0;
+	handlerIndex = materialFlags & (extendedMaterial ? SLIP_TRC_MATERIAL_EXTENDED_INDEX_MASK : UINT8_MAX);
 	if (extendedMaterial) {
 		dispatchTable = kTrackViewExtendedMaterialHandlers;
 		dispatchTableCount = sizeof(kTrackViewExtendedMaterialHandlers) / sizeof(kTrackViewExtendedMaterialHandlers[0]);
@@ -7289,7 +7873,7 @@ static bool TrackView_ExecuteExtendedMaterialDispatch(TrackViewRawBspContext *co
 		dispatchTableCount = sizeof(kTrackViewStandardMaterialHandlers) / sizeof(kTrackViewStandardMaterialHandlers[0]);
 	}
 	if (handlerIndex >= dispatchTableCount) {
-		context->failureAddress = 0x0003f2c8u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_EXTENDED_MATERIAL_DISPATCH;
 		context->failed = true;
 		return false;
 	}
@@ -7308,12 +7892,13 @@ static bool TrackView_ExecuteExtendedMaterialDispatch(TrackViewRawBspContext *co
 	}
 	if (materialHandler == NULL) {
 		fprintf(stderr, "track_view_material_dispatch_0003f2c8 unported material=0x%02x\n", materialFlags);
-		context->failureAddress = 0x0003f2c8u;
+		context->failureAddress = TRACK_VIEW_DIAGNOSTIC_EXTENDED_MATERIAL_DISPATCH;
 		context->failed = true;
 		return false;
 	}
-	return materialHandler(context, primitiveContext, primitiveRecord + 0x0cu, recordBytesRemaining - 0x0cu,
-	                       materialIndex, depthResult.fadeDepth, carryOut);
+	return materialHandler(context, primitiveContext, primitiveRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+	                       recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, materialIndex, depthResult.fadeDepth,
+	                       carryOut);
 }
 
 SlipView3DVec32 TrackView_ChunkSourcePoint(int16_t sourceX, int16_t sourceY, int16_t sourceZ, void *userData) {
@@ -7411,16 +7996,16 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 	if (chunkDispatch.callTraversalCallback) {
 		++context->traversalCallbackCount;
 		if (context->traversalCallback == SLIP_TRACK_WORLD_TRAVERSAL_CALLBACK_COMPONENT) {
-			context->failureAddress = 0x00039a6eu;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_COMPONENT_TRAVERSAL_CALLBACK;
 			SlipTrackWorldComponentGate primitiveCallbackGate;
 			SlipDraw3DProjectIndex project;
 			SlipTrackWorldCullBounds cullBounds;
 			SlipTrackWorldComponentProject projectedPrimitiveVertex;
 			SlipTrackWorldComponentSetup setup;
-			SlipTrackWorldComponentTailVisit tailVisits[128];
+			SlipTrackWorldComponentTailVisit tailVisits[SLIP_COMPONENT_TAIL_VISIT_CAPACITY];
 			SlipTrackWorldComponentTail tail;
 			SlipDraw3DBuildVertexRecords buildVertices;
-			SlipTrackWorldPrimitiveWalkerVisit primitiveVisits[128];
+			SlipTrackWorldPrimitiveWalkerVisit primitiveVisits[SLIP_PRIMITIVE_WALKER_VISIT_CAPACITY];
 			SlipTrackWorldPrimitiveWalker primitiveWalker;
 			size_t tailVisitCount = 0;
 			const size_t recordOffset = (size_t)(chunkDispatch.callbackRecord - context->chunkBase);
@@ -7507,18 +8092,18 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 			}
 			++context->componentSetupCount;
 			if (g_vehicleViewDumpDiagnostics) {
-				fprintf(stderr,
-				        "track_view_component_setup_00039aca record=0x%zx in_flags=0x%08x out_flags=0x%08x ecx=0x%08x "
-				        "gates=%08x,%08x thresholds=%d,%d child=0x%04x store=0x%04x\n",
-				        recordOffset, context->rendererFlags, setup.drawFlags.rendererFlags, setup.componentViewZ,
-				        context->shading, context->shadingSecondary, context->componentDistance,
-				        context->componentRadius, SlipBytes_ReadLE16(chunkDispatch.callbackRecord + 0x02u),
-				        setup.shade);
+				fprintf(
+				    stderr,
+				    "track_view_component_setup_00039aca record=0x%zx in_flags=0x%08x out_flags=0x%08x ecx=0x%08x "
+				    "gates=%08x,%08x thresholds=%d,%d child=0x%04x store=0x%04x\n",
+				    recordOffset, context->rendererFlags, setup.drawFlags.rendererFlags, setup.componentViewZ,
+				    context->shading, context->shadingSecondary, context->componentDistance, context->componentRadius,
+				    SlipBytes_ReadLE16(chunkDispatch.callbackRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET), setup.shade);
 			}
 			context->rendererFlags = setup.drawFlags.rendererFlags;
 			context->processedComponentCount = setup.processedComponentCount;
 			if (!TrackView_ApplyLoadedDrawState(context, setup.drawStateIndexAfter)) {
-				context->failureAddress = 0x0001dbbeu;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_LOAD_DRAW_STATE;
 				context->failed = true;
 				return false;
 			}
@@ -7572,7 +8157,8 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 					        sourceBytes > 9u ? vertexSource[9] : 0, sourceBytes > 10u ? vertexSource[10] : 0,
 					        sourceBytes > 11u ? vertexSource[11] : 0);
 				}
-				if (!TrackView_BuildVertexRecords(context, 0x00039b7fu, tail.vertexSource,
+				if (!TrackView_BuildVertexRecords(context, TRACK_VIEW_DIAGNOSTIC_COMPONENT_BUILD_VERTEX_RECORDS,
+				                                  tail.vertexSource,
 				                                  context->componentBaseBytes - childVertexSourceOffset,
 				                                  tail.vertexCount, (int16_t)tail.vertexSourceStride,
 				                                  TrackView_TransformVertex, TrackView_SourcePoint, &buildVertices)) {
@@ -7597,7 +8183,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 				}
 				++context->primitiveWalkerCount;
 				if (primitiveWalker.directCallbackBranch) {
-					SlipTrackWorldDirectCallbackVisit directVisits[256];
+					SlipTrackWorldDirectCallbackVisit directVisits[SLIP_DIRECT_CALLBACK_VISIT_CAPACITY];
 					SlipTrackWorldDirectCallbackLoop directLoop;
 					SlipTrackWorldDirectCallbackEnvironment directEnvironment = {
 					    &setup, &tail, &primitiveWalker, projectedPrimitiveVertex.viewPosition, false};
@@ -7610,15 +8196,16 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 					        context->componentBaseBytes ||
 					    context->componentBaseBytes -
 					            (size_t)(primitiveCallbackGate.componentRecord - context->componentBase) <
-					        6u) {
-						context->failureAddress = 0x000396dau;
+					        SLIP_TRC_COMPONENT_PRIMITIVE_LIST_END) {
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_DIRECT_PRIMITIVE_LOOP;
 						context->failed = true;
 						return false;
 					}
-					directListOffset = (size_t)SlipBytes_ReadLE16(primitiveCallbackGate.componentRecord + 0x04u);
+					directListOffset =
+					    (size_t)SlipBytes_ReadLE16(primitiveCallbackGate.componentRecord + SLIP_TRACK_LINKED_OFFSET);
 					if (directListOffset > context->componentBaseBytes ||
-					    context->componentBaseBytes - directListOffset < 2u) {
-						context->failureAddress = 0x000396dau;
+					    context->componentBaseBytes - directListOffset < SLIP_TRC_TABLE_COUNT_BYTES) {
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_DIRECT_PRIMITIVE_LOOP;
 						context->failed = true;
 						return false;
 					}
@@ -7634,7 +8221,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 					        context->componentBase, context->componentBaseBytes, context->primitiveCallback,
 					        context->scaledLightX, TrackView_DirectCallback, context, &directEnvironment, NULL, 0,
 					        directVisits, sizeof(directVisits) / sizeof(directVisits[0]), &directLoop)) {
-						context->failureAddress = 0x000396dau;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_DIRECT_PRIMITIVE_LOOP;
 						context->failed = true;
 						return false;
 					}
@@ -7674,7 +8261,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 				if (!TrackView_DrawComponentActors(setup.attachmentListOffset, setup.currentRecord,
 				                                   setup.drawFlags.rendererFlags, projectedPrimitiveVertex.viewPosition,
 				                                   context)) {
-					context->failureAddress = 0x00037b46u;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_DRAW_COMPONENT_ACTORS;
 					context->failed = true;
 					return false;
 				}
@@ -7710,13 +8297,14 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 				}
 			}
 
-			if (tail.calledRestoreVertexBufferCursor && !TrackView_RestoreVertexBufferCursor(context, 0x00039c44u)) {
-				context->failureAddress = 0x0001de44u;
+			if (tail.calledRestoreVertexBufferCursor &&
+			    !TrackView_RestoreVertexBufferCursor(context, TRACK_VIEW_DIAGNOSTIC_COMPONENT_RESTORE_VERTEX_CURSOR)) {
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_RESTORE_VERTEX_CURSOR;
 				context->failed = true;
 				return false;
 			}
 			if (!TrackView_ApplyLoadedDrawState(context, tail.drawStateIndexAfter)) {
-				context->failureAddress = 0x0001dbbeu;
+				context->failureAddress = TRACK_VIEW_DIAGNOSTIC_LOAD_DRAW_STATE;
 				context->failed = true;
 				return false;
 			}
@@ -7744,7 +8332,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 		if (!SlipDraw3D_ProjectIndex(context->vertexRecords, context->vertexRecordCount,
 		                             SlipBytes_ReadLE16(chunkDispatch.callbackRecord), TrackView_ChunkTransformPoint,
 		                             &context->chunkCallbacks, &project)) {
-			context->failureAddress = 0x0001cfa8u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_CHUNK_PROJECT_INDEX;
 			context->failed = true;
 			return false;
 		}
@@ -7754,7 +8342,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 		        context->objectListBytes, context->deferredEntryActive, context->defaultTraversalGate, context->mask,
 		        context->componentBaseToken, context->componentBase, context->componentBaseBytes,
 		        context->renderContextCount, &deferredGateTrace)) {
-			context->failureAddress = 0x0003a5b6u;
+			context->failureAddress = TRACK_VIEW_DIAGNOSTIC_DEFERRED_CALLBACK_GATE;
 			context->failed = true;
 			return false;
 		}
@@ -7813,10 +8401,11 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 			}
 			++context->deferredContinuationCount;
 			objectCountBefore = *(const uint32_t *)(const void *)context->objectList;
-			deferredEntryOffset = 4u + (size_t)objectCountBefore * 0x2cu;
+			deferredEntryOffset =
+			    SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES + (size_t)objectCountBefore * SLIP_TRACK_VISIBILITY_ENTRY_BYTES;
 			if (deferredEntryOffset > context->objectListBytes ||
-			    context->objectListBytes - deferredEntryOffset < 0x2cu || recordOffset > context->chunkBaseBytes ||
-			    context->chunkBaseBytes - recordOffset < 4u) {
+			    context->objectListBytes - deferredEntryOffset < SLIP_TRACK_VISIBILITY_ENTRY_BYTES ||
+			    recordOffset > context->chunkBaseBytes || context->chunkBaseBytes - recordOffset < sizeof(uint32_t)) {
 				context->failed = true;
 				return false;
 			}
@@ -7826,7 +8415,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 				context->failed = true;
 				return false;
 			}
-			componentOffset = SlipBytes_ReadLE16(chunkDispatch.callbackRecord + 0x02u);
+			componentOffset = SlipBytes_ReadLE16(chunkDispatch.callbackRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 			if ((size_t)componentOffset > context->componentBaseBytes) {
 				context->failed = true;
 				return false;
@@ -7896,7 +8485,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 			}
 			matchedEntryOffset = (size_t)(deferredGateTrace.matchedEntry - context->objectList);
 			if (matchedEntryOffset > context->objectListBytes ||
-			    context->objectListBytes - matchedEntryOffset < 0x2cu) {
+			    context->objectListBytes - matchedEntryOffset < SLIP_TRACK_VISIBILITY_ENTRY_BYTES) {
 				context->failed = true;
 				return false;
 			}
@@ -7912,7 +8501,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 					context->failed = true;
 					return false;
 				}
-				componentOffset = SlipBytes_ReadLE16(chunkDispatch.callbackRecord + 0x02u);
+				componentOffset = SlipBytes_ReadLE16(chunkDispatch.callbackRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 				if ((size_t)componentOffset > context->componentBaseBytes) {
 					context->failed = true;
 					return false;
@@ -8013,14 +8602,15 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 				SlipTrackWorldDeferredCallbackCull cull;
 				bool trackWorldIndirectCullCarry;
 
-				if (context->chunkBaseBytes - recordOffset < 0x20u) {
+				if (context->chunkBaseBytes - recordOffset < SLIP_TRACK_CALLBACK_CULL_RADIUS_END) {
 					context->failed = true;
 					return false;
 				}
 				++context->callbackHeaderContinueCount;
 				trackWorldIndirectCullCarry = TrackView_SphereCullCallback(
 				    (SlipView3DVec32){(int32_t)header.viewX, (int32_t)header.viewY, (int32_t)header.viewZ},
-				    (int32_t)SlipBytes_ReadLE32(chunkDispatch.callbackRecord + 0x1cu), &context->frustum);
+				    (int32_t)SlipBytes_ReadLE32(chunkDispatch.callbackRecord + SLIP_TRACK_CALLBACK_CULL_RADIUS_OFFSET),
+				    &context->frustum);
 				if (!SlipTrackWorld_DeferredCallbackCull(
 				        chunkDispatch.callbackRecord, context->chunkBaseBytes - recordOffset,
 				        context->savedMaximumDepth, header.viewX, header.viewY, header.viewZ,
@@ -8037,9 +8627,11 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 					uint32_t deferredEntryAddress;
 					SlipTrackWorldDeferredCallbackWrite write;
 
-					deferredEntryOffset = 4u + (size_t)(*(const uint32_t *)(const void *)context->objectList) * 0x2cu;
+					deferredEntryOffset = SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES +
+					                      (size_t)(*(const uint32_t *)(const void *)context->objectList) *
+					                          SLIP_TRACK_VISIBILITY_ENTRY_BYTES;
 					if (deferredEntryOffset > context->objectListBytes ||
-					    context->objectListBytes - deferredEntryOffset < 0x2cu) {
+					    context->objectListBytes - deferredEntryOffset < SLIP_TRACK_VISIBILITY_ENTRY_BYTES) {
 						context->failed = true;
 						return false;
 					}
@@ -8084,7 +8676,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 				 * the chunk in memory. The port cannot reproduce those bytes,
 				 * so such a record is skipped rather than failing the frame.
 				 */
-				if (recordBytes < 0x3au) {
+				if (recordBytes < SLIP_TRK_SHAPE_WITH_FACING_BYTES) {
 					++context->truncatedRecordTransformCount;
 					return true;
 				}
@@ -8095,7 +8687,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 
 				if (transformSetup.callLoadDrawState &&
 				    !TrackView_ApplyLoadedDrawState(context, transformSetup.drawStateIndexAfterAdvance)) {
-					context->failureAddress = 0x0001dbbeu;
+					context->failureAddress = TRACK_VIEW_DIAGNOSTIC_LOAD_DRAW_STATE;
 					context->failed = true;
 					return false;
 				}
@@ -8187,7 +8779,7 @@ static bool TrackView_DispatchRecord(const uint8_t *bspNode, uint32_t recordPayl
 
 					if (drawRestore.callLoadDrawState &&
 					    !TrackView_ApplyLoadedDrawState(context, drawRestore.drawStateIndexAfterRestore)) {
-						context->failureAddress = 0x0001dbbeu;
+						context->failureAddress = TRACK_VIEW_DIAGNOSTIC_LOAD_DRAW_STATE;
 						context->failed = true;
 						return false;
 					}
@@ -8219,12 +8811,14 @@ bool TrackView_ChunkFallback(const uint8_t *chunkRecord, size_t chunkBytesRemain
 	if (block.callRecordCallback) {
 		recordOffset = (size_t)(block.recordCallbackRecord - context->chunkBase);
 
-		return TrackView_DispatchRecord(chunkRecord, (uint32_t)recordOffset, 0u, 0, context, false, false);
+		return TrackView_DispatchRecord(chunkRecord, (uint32_t)recordOffset, SLIP_TRACK_BSP_RECORD_CALLBACK_KIND, 0,
+		                                context, false, false);
 	}
 	if (block.callTraversalCallback) {
 		recordOffset = (size_t)(block.traversalCallbackRecord - context->chunkBase);
 
-		return TrackView_DispatchRecord(chunkRecord, (uint32_t)recordOffset, 2u, 0, context, true, false);
+		return TrackView_DispatchRecord(chunkRecord, (uint32_t)recordOffset, SLIP_TRACK_BSP_TRAVERSAL_CALLBACK_KIND, 0,
+		                                context, true, false);
 	}
 	return true;
 }
@@ -8274,20 +8868,20 @@ typedef struct VehicleViewMaterialTable {
 	uint8_t *expandedTable;
 	size_t expandedTableBytes;
 	uint16_t materialResourceHandle;
-	char materialName[256][17];
-	int32_t rampStart[256];
-	int32_t rampEnd[256];
-	int16_t textureTransparency[256];
-	int16_t skipFlatPolygon[256];
-	uint32_t fixedShade[256];
-	uint32_t ambientCoefficient[256];
-	uint32_t diffuseCoefficient[256];
-	uint32_t specularCoefficient[256];
-	uint32_t vertexShading[256];
-	char textureName[256][13];
-	SlipResourcePayload texturePayload[256];
-	SlipSprite texture[256];
-	bool hasTexture[256];
+	char materialName[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY][SLIP_MAT_NAME_BYTES + 1];
+	int32_t rampStart[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	int32_t rampEnd[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	int16_t textureTransparency[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	int16_t skipFlatPolygon[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	uint32_t fixedShade[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	uint32_t ambientCoefficient[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	uint32_t diffuseCoefficient[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	uint32_t specularCoefficient[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	uint32_t vertexShading[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	char textureName[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY][SLIP_MAT_TEXTURE_NAME_BYTES + 1];
+	SlipResourcePayload texturePayload[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	SlipSprite texture[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
+	bool hasTexture[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
 } VehicleViewMaterialTable;
 
 static int TrackView_VehicleViewDrawSortChild(VehicleViewRenderContext *ctx, uint32_t childIndex);
@@ -8295,7 +8889,7 @@ static int TrackView_ArticSortCallback(VehicleViewRenderContext *ctx, const Slip
 static bool TrackView_ArticDrawOne(TrackViewRawBspContext *context, uint8_t *part);
 
 static int32_t TrackView_VehicleViewArithmeticShiftRight32(int32_t value, uint32_t count) {
-	count &= 31u;
+	count &= SLIP_DWORD_SHIFT_COUNT_MASK;
 	if (count == 0) {
 		return value;
 	}
@@ -8306,7 +8900,7 @@ static int32_t TrackView_VehicleViewArithmeticShiftRight32(int32_t value, uint32
 }
 
 static int32_t TrackView_VehicleViewSignExtendShiftLeft32(int16_t value, uint32_t count) {
-	return (int32_t)((uint32_t)(int32_t)value << (count & 31u));
+	return (int32_t)((uint32_t)(int32_t)value << (count & SLIP_DWORD_SHIFT_COUNT_MASK));
 }
 
 static int32_t TrackView_VehicleViewMatrixDotProduct32(int16_t sourceX, int16_t coefficientX, int16_t sourceY,
@@ -8331,7 +8925,7 @@ static SlipDraw3DVec32 TrackView_VehicleViewTransform(uint32_t sourceX, uint32_t
 		const int16_t x = (int16_t)sourceX;
 		const int16_t y = (int16_t)sourceY;
 		const int16_t z = (int16_t)sourceZ;
-		const uint32_t shift = (uint32_t)(14 - (int32_t)ctx->shapeScaleShift);
+		const uint32_t shift = (uint32_t)(SLIP_Q14_FRACTION_BITS - (int32_t)ctx->shapeScaleShift);
 
 		transformed.x = TrackView_VehicleViewArithmeticShiftRight32(
 		    TrackView_VehicleViewMatrixDotProduct32(x, ctx->matrix.m[0], y, ctx->matrix.m[3], z, ctx->matrix.m[6]),
@@ -8390,7 +8984,7 @@ static int TrackView_ActorBuildIndexedRing(VehicleViewRenderContext *ctx, TrackV
 	uint32_t currentRecordOffset;
 	uint32_t indexStreamOffset = 0;
 	uint32_t materialInputOffset = 0;
-	uint32_t allClipFlags = 0x21f8u;
+	uint32_t allClipFlags = SLIP_CLIP_ALL;
 	uint32_t anyClipFlags = 0;
 	uint16_t loopCount;
 	SlipDraw3DVertexLighting lighting;
@@ -8398,9 +8992,9 @@ static int TrackView_ActorBuildIndexedRing(VehicleViewRenderContext *ctx, TrackV
 	if (ctx == NULL || trackContext == NULL || shape == NULL || stream == NULL || materialGate == NULL ||
 	    result == NULL || !stream->hasExtendedPayload || stream->vertexCount == 0 ||
 	    stream->vertexCount > SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT || stream->indexOffset > shape->size ||
-	    shape->size - stream->indexOffset < (size_t)stream->vertexCount * 2u ||
+	    shape->size - stream->indexOffset < (size_t)stream->vertexCount * SLIP_SERIALIZED_INDEX_BYTES ||
 	    stream->extraPayloadOffset > shape->size ||
-	    shape->size - stream->extraPayloadOffset < (size_t)stream->vertexCount * 6u) {
+	    shape->size - stream->extraPayloadOffset < (size_t)stream->vertexCount * SLIP_SERIALIZED_NORMAL_BYTES) {
 		return 0;
 	}
 
@@ -8453,20 +9047,24 @@ static int TrackView_ActorBuildIndexedRing(VehicleViewRenderContext *ctx, TrackV
 		if (currentRecord == NULL ||
 		    !SlipDraw3D_CopyIndexedRecord(currentRecord, (const uint8_t *)ctx->vertexRecords,
 		                                  ctx->vertexRecordCount * sizeof(*ctx->vertexRecords),
-		                                  shape->data + stream->indexOffset, (size_t)stream->vertexCount * 2u,
-		                                  indexStreamOffset, allClipFlags, anyClipFlags, projectFlags, &copy)) {
+		                                  shape->data + stream->indexOffset,
+		                                  (size_t)stream->vertexCount * SLIP_SERIALIZED_INDEX_BYTES, indexStreamOffset,
+		                                  allClipFlags, anyClipFlags, projectFlags, &copy)) {
 			return 0;
 		}
 
 		color = SlipDraw3D_VertexColor(
 		    (const void *)materialGate->materialRecord, &ctx->vertexRecords[vertexIndex],
 		    (int16_t)SlipBytes_ReadLE16(shape->data + stream->extraPayloadOffset + materialInputOffset),
-		    (int16_t)SlipBytes_ReadLE16(shape->data + stream->extraPayloadOffset + materialInputOffset + 2u),
-		    (int16_t)SlipBytes_ReadLE16(shape->data + stream->extraPayloadOffset + materialInputOffset + 4u),
+		    (int16_t)SlipBytes_ReadLE16(shape->data + stream->extraPayloadOffset + materialInputOffset +
+		                                SLIP_SERIALIZED_NORMAL_Y_OFFSET),
+		    (int16_t)SlipBytes_ReadLE16(shape->data + stream->extraPayloadOffset + materialInputOffset +
+		                                SLIP_SERIALIZED_NORMAL_Z_OFFSET),
 		    &lighting);
 		if (!SlipDraw3D_StoreMaterialBytes(currentRecord, shape->data + stream->extraPayloadOffset,
-		                                   (size_t)stream->vertexCount * 6u, materialInputOffset,
-		                                   materialGate->materialRecord, (uint16_t)color, &materialBytes)) {
+		                                   (size_t)stream->vertexCount * SLIP_SERIALIZED_NORMAL_BYTES,
+		                                   materialInputOffset, materialGate->materialRecord, (uint16_t)color,
+		                                   &materialBytes)) {
 			return 0;
 		}
 		allClipFlags = copy.allClipFlagsAfter;
@@ -8498,10 +9096,10 @@ static int TrackView_ActorBuildIndexedRing(VehicleViewRenderContext *ctx, TrackV
 	result->returned = true;
 	if (!SlipDraw3D_ClipDispatchExecute(
 	        recordPoolBytes, recordPoolByteSize, pool->inputActiveHeadOffset, pool->freeHeadOffset, anyClipFlags,
-	        allClipFlags, ctx->projectState.renderFlags, 4u, ctx->projectState.minZ, ctx->projectState.maxZ,
-	        ctx->projectState.minX, ctx->projectState.maxX, ctx->projectState.minY, ctx->projectState.maxY,
-	        TrackView_VehicleViewProject, TrackView_VehicleViewProject, ctx, false, NULL, 0, 0, 0, 0, 0, 0,
-	        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, clipFlagVisits, clipFlagVisitCapacity, postBoundsVisits,
+	        allClipFlags, ctx->projectState.renderFlags, SLIP_INTERPOLATE_SHADE, ctx->projectState.minZ,
+	        ctx->projectState.maxZ, ctx->projectState.minX, ctx->projectState.maxX, ctx->projectState.minY,
+	        ctx->projectState.maxY, TrackView_VehicleViewProject, TrackView_VehicleViewProject, ctx, false, NULL, 0, 0,
+	        0, 0, 0, 0, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, clipFlagVisits, clipFlagVisitCapacity, postBoundsVisits,
 	        postBoundsVisitCapacity, postClipRecordVisits, postClipRecordVisitCapacity, postClipPlaneVisits,
 	        postClipPlaneVisitCapacity, &result->dispatch)) {
 		return 0;
@@ -8520,20 +9118,21 @@ static bool TrackView_VehicleViewMaterialsFromPayload(const SlipResourcePayload 
 	uint16_t count;
 	uint16_t i;
 
-	if (payload == NULL || payload->data == NULL || materials == NULL || payload->size < 4u) {
+	if (payload == NULL || payload->data == NULL || materials == NULL || payload->size < SLIP_MAT_HEADER_BYTES) {
 		return false;
 	}
 	count = SlipBytes_ReadLE16(payload->data);
-	if (SlipBytes_ReadLE16(payload->data + 2u) != 1) {
+	if (SlipBytes_ReadLE16(payload->data + SLIP_MAT_VERSION_OFFSET) != SLIP_MAT_VERSION) {
 		return false;
 	}
-	if ((size_t)count > (payload->size - 4u) / 0x2eu) {
+	if ((size_t)count > (payload->size - SLIP_MAT_HEADER_BYTES) / SLIP_MAT_RECORD_BYTES) {
 		return false;
 	}
 
 	memset(materials, 0, sizeof(*materials));
-	materials->count = count > 256u ? 256u : count;
-	expandedTableBytes = 4u + (size_t)count * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
+	materials->count = count > SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY ? SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY : count;
+	expandedTableBytes =
+	    SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES + (size_t)count * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
 	materials->expandedTable = (uint8_t *)malloc(expandedTableBytes);
 	if (materials->expandedTable == NULL ||
 	    !SlipDraw3D_SetMaterialsNoExisting(payload->data, payload->size, 0, 1u, materials->expandedTable,
@@ -8544,41 +9143,42 @@ static bool TrackView_VehicleViewMaterialsFromPayload(const SlipResourcePayload 
 	}
 	materials->expandedTableBytes = expandedTableBytes;
 	materials->materialResourceHandle = install.storedMaterialGlobal;
-	raw = payload->data + 4u;
+	raw = payload->data + SLIP_MAT_HEADER_BYTES;
 	for (i = 0; i < materials->count; ++i) {
-		const uint8_t *const record = raw + (size_t)i * 0x2eu;
-		const uint8_t start = record[0x10u];
-		const uint8_t rawEnd = record[0x11u];
-		const uint16_t rampBits = SlipBytes_ReadLE16(record + 0x1eu);
-		const uint32_t countAdjust = rampBits < 31u ? ((uint32_t)1u << rampBits) - 1u : 0xffffffffu;
+		const uint8_t *const record = raw + (size_t)i * SLIP_MAT_RECORD_BYTES;
+		const uint8_t start = record[SLIP_MAT_RAMP_START_OFFSET];
+		const uint8_t rawEnd = record[SLIP_MAT_RAMP_END_OFFSET];
+		const uint16_t rampBits = SlipBytes_ReadLE16(record + SLIP_MAT_DITHER_BITS_OFFSET);
+		const uint32_t countAdjust =
+		    rampBits < SLIP_MAT_DITHER_SHIFT_MASK ? ((uint32_t)1u << rampBits) - 1u : UINT32_MAX;
 		uint32_t diff = (uint32_t)rawEnd - (uint32_t)start;
 		int32_t end;
 
-		memcpy(materials->materialName[i], record, 16u);
-		materials->materialName[i][16] = '\0';
-		for (uint16_t j = 0; j < 16u; ++j) {
+		memcpy(materials->materialName[i], record, SLIP_MAT_NAME_BYTES);
+		materials->materialName[i][SLIP_MAT_NAME_BYTES] = '\0';
+		for (uint16_t j = 0; j < SLIP_MAT_NAME_BYTES; ++j) {
 			if (materials->materialName[i][j] == ' ') {
 				materials->materialName[i][j] = '\0';
 				break;
 			}
 		}
-		if (diff > 0x70u) {
-			diff = 0x70u;
+		if (diff > SLIP_MAT_MAXIMUM_RAMP_RANGE) {
+			diff = SLIP_MAT_MAXIMUM_RAMP_RANGE;
 		}
 		end = (int32_t)((uint32_t)start + diff - countAdjust);
 		materials->rampStart[i] = (int32_t)(uint32_t)start;
 		materials->rampEnd[i] = end;
-		materials->textureTransparency[i] = (int16_t)(int8_t)record[0x14u];
-		materials->skipFlatPolygon[i] = (int16_t)(int8_t)record[0x15u];
-		materials->fixedShade[i] = SlipBytes_ReadLE16(record + 0x16u);
+		materials->textureTransparency[i] = (int16_t)(int8_t)record[SLIP_MAT_TRANSPARENCY_OFFSET];
+		materials->skipFlatPolygon[i] = (int16_t)(int8_t)record[SLIP_MAT_SKIP_FLAT_OFFSET];
+		materials->fixedShade[i] = SlipBytes_ReadLE16(record + SLIP_MAT_FIXED_SHADE_OFFSET);
 
-		materials->vertexShading[i] = (uint32_t)(int32_t)(int8_t)record[0x13u];
-		materials->ambientCoefficient[i] = SlipBytes_ReadLE16(record + 0x18u);
-		materials->diffuseCoefficient[i] = SlipBytes_ReadLE16(record + 0x1au);
-		materials->specularCoefficient[i] = SlipBytes_ReadLE16(record + 0x1cu);
-		memcpy(materials->textureName[i], record + 0x22u, 12u);
-		materials->textureName[i][12] = '\0';
-		for (uint16_t j = 0; j < 12u; ++j) {
+		materials->vertexShading[i] = (uint32_t)(int32_t)(int8_t)record[SLIP_MAT_VERTEX_SHADING_OFFSET];
+		materials->ambientCoefficient[i] = SlipBytes_ReadLE16(record + SLIP_MAT_AMBIENT_OFFSET);
+		materials->diffuseCoefficient[i] = SlipBytes_ReadLE16(record + SLIP_MAT_DIFFUSE_OFFSET);
+		materials->specularCoefficient[i] = SlipBytes_ReadLE16(record + SLIP_MAT_SPECULAR_OFFSET);
+		memcpy(materials->textureName[i], record + SLIP_MAT_TEXTURE_NAME_OFFSET, SLIP_MAT_TEXTURE_NAME_BYTES);
+		materials->textureName[i][SLIP_MAT_TEXTURE_NAME_BYTES] = '\0';
+		for (uint16_t j = 0; j < SLIP_MAT_TEXTURE_NAME_BYTES; ++j) {
 			if (materials->textureName[i][j] == ' ') {
 				materials->textureName[i][j] = '\0';
 				break;
@@ -8593,39 +9193,48 @@ static bool TrackView_VehicleViewMaterialsFromTrackTable(const uint8_t *expanded
 	uint32_t count;
 	uint32_t i;
 
-	if (expandedTable == NULL || materials == NULL || tableBytes < 4u) {
+	if (expandedTable == NULL || materials == NULL || tableBytes < SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES) {
 		return false;
 	}
 	count = SlipBytes_ReadLE32(expandedTable);
-	if (count == 0u || (size_t)count > (tableBytes - 4u) / 0x54u) {
+	if (count == 0u || (size_t)count > (tableBytes - SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES) /
+	                                       SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE) {
 		return false;
 	}
 	memset(materials, 0, sizeof(*materials));
-	materials->count = count > 256u ? 256u : (uint16_t)count;
+	materials->count =
+	    count > SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY ? SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY : (uint16_t)count;
 	for (i = 0; i < materials->count; ++i) {
-		const uint8_t *const record = expandedTable + 4u + (size_t)i * 0x54u;
+		const uint8_t *const record = expandedTable + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES +
+		                              (size_t)i * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
 		uint16_t j;
 
-		memcpy(materials->materialName[i], record, 16u);
-		materials->materialName[i][16] = 0;
-		for (j = 0; j < 16u; ++j) {
+		memcpy(materials->materialName[i], record, SLIP_MAT_NAME_BYTES);
+		materials->materialName[i][SLIP_MAT_NAME_BYTES] = 0;
+		for (j = 0; j < SLIP_MAT_NAME_BYTES; ++j) {
 			if (materials->materialName[i][j] == ' ') {
 				materials->materialName[i][j] = 0;
 				break;
 			}
 		}
-		materials->rampStart[i] = (int32_t)SlipBytes_ReadLE32(record + 0x10u);
-		materials->rampEnd[i] = (int32_t)SlipBytes_ReadLE32(record + 0x14u);
-		materials->textureTransparency[i] = (int16_t)SlipBytes_ReadLE16(record + 0x18u);
-		materials->skipFlatPolygon[i] = (int16_t)SlipBytes_ReadLE16(record + 0x1au);
-		materials->fixedShade[i] = SlipBytes_ReadLE32(record + 0x1cu);
-		materials->ambientCoefficient[i] = SlipBytes_ReadLE32(record + 0x20u);
-		materials->diffuseCoefficient[i] = SlipBytes_ReadLE32(record + 0x24u);
-		materials->specularCoefficient[i] = SlipBytes_ReadLE32(record + 0x28u);
-		materials->vertexShading[i] = SlipBytes_ReadLE32(record + 0x30u);
-		memcpy(materials->textureName[i], record + 0x34u, 12u);
-		materials->textureName[i][12] = 0;
-		for (j = 0; j < 12u; ++j) {
+		materials->rampStart[i] = (int32_t)SlipBytes_ReadLE32(record + offsetof(SlipDraw3DMaterialRecord, rampStart));
+		materials->rampEnd[i] = (int32_t)SlipBytes_ReadLE32(record + offsetof(SlipDraw3DMaterialRecord, rampEnd));
+		materials->textureTransparency[i] =
+		    (int16_t)SlipBytes_ReadLE16(record + offsetof(SlipDraw3DMaterialRecord, textureTransparency));
+		materials->skipFlatPolygon[i] =
+		    (int16_t)SlipBytes_ReadLE16(record + offsetof(SlipDraw3DMaterialRecord, skipFlatPolygon));
+		materials->fixedShade[i] = SlipBytes_ReadLE32(record + offsetof(SlipDraw3DMaterialRecord, fixedShade));
+		materials->ambientCoefficient[i] =
+		    SlipBytes_ReadLE32(record + offsetof(SlipDraw3DMaterialRecord, ambientCoefficient));
+		materials->diffuseCoefficient[i] =
+		    SlipBytes_ReadLE32(record + offsetof(SlipDraw3DMaterialRecord, diffuseCoefficient));
+		materials->specularCoefficient[i] =
+		    SlipBytes_ReadLE32(record + offsetof(SlipDraw3DMaterialRecord, specularCoefficient));
+		materials->vertexShading[i] = SlipBytes_ReadLE32(record + offsetof(SlipDraw3DMaterialRecord, vertexShading));
+		memcpy(materials->textureName[i], record + offsetof(SlipDraw3DMaterialRecord, textureName),
+		       SLIP_MAT_TEXTURE_NAME_BYTES);
+		materials->textureName[i][SLIP_MAT_TEXTURE_NAME_BYTES] = 0;
+		for (j = 0; j < SLIP_MAT_TEXTURE_NAME_BYTES; ++j) {
 			if (materials->textureName[i][j] == ' ') {
 				materials->textureName[i][j] = 0;
 				break;
@@ -8654,7 +9263,7 @@ static void TrackView_VehicleViewMaterialsFreeTextures(VehicleViewMaterialTable 
 static bool TrackView_LoadMaterialTexturePayload(const char *const *archives, size_t archiveCount, const char *name,
                                                  SlipResourcePayload *payload) {
 	const char *wildcard;
-	char resolvedName[13];
+	char resolvedName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 	char digit;
 
 	if (SlipResource_LoadByName(archives, archiveCount, name, payload)) {
@@ -8675,12 +9284,12 @@ static bool TrackView_LoadMaterialTexturePayload(const char *const *archives, si
 	return false;
 }
 
-int TrackView_FindNameRecord(void *user, const char name[13], uint32_t *handle) {
+int TrackView_FindNameRecord(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint32_t *handle) {
 	TrackViewResourceHandleRegistry *const registry = user;
 	if (registry->hostResources)
 		return TrackView_FindNamedResource(user, name, handle);
-	char key[13] = {0};
-	for (size_t index = 0; index < 12 && name[index] != 0; ++index)
+	char key[SLIP_RESOURCE_NAME_BUFFER_BYTES] = {0};
+	for (size_t index = 0; index < SLIP_RESOURCE_NAME_BYTES && name[index] != 0; ++index)
 		key[index] = (char)SlipResource_Uppercase((uint8_t)name[index]);
 	for (size_t index = 0; index < registry->entryCount; ++index) {
 		if (memcmp(registry->entries[index].name, key, sizeof(key)) == 0) {
@@ -8691,7 +9300,8 @@ int TrackView_FindNameRecord(void *user, const char name[13], uint32_t *handle) 
 	return 0;
 }
 
-int TrackView_FindNamedResource(void *user, const char name[13], uint32_t *resourceHandle) {
+int TrackView_FindNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES],
+                                uint32_t *resourceHandle) {
 	TrackViewResourceHandleRegistry *const registry = user;
 	uint16_t handle;
 	if (!SlipResourceHost_Find(NULL, name, &handle))
@@ -8710,10 +9320,11 @@ int TrackView_FindNamedResource(void *user, const char name[13], uint32_t *resou
 	return 1;
 }
 
-int TrackView_LoadNamedResource(void *user, const char name[13], uint32_t *resourceHandle) {
+int TrackView_LoadNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES],
+                                uint32_t *resourceHandle) {
 	TrackViewResourceHandleRegistry *const registry = (TrackViewResourceHandleRegistry *)user;
 	SlipResourcePayload payload = {0};
-	char canonicalName[13] = {0};
+	char canonicalName[SLIP_RESOURCE_NAME_BUFFER_BYTES] = {0};
 	size_t i;
 
 	if (registry == NULL || resourceHandle == NULL || name == NULL || name[0] == '\0') {
@@ -8829,7 +9440,9 @@ static void TrackView_ProjectCloudCorner(int16_t side, int16_t offset, int32_t o
 	}
 	int16_t x, y;
 	SlipDraw3D_ProjectSpriteCorner(side, offset, 0, 0, &x, &y);
-	const int32_t scaledX = originX + (int32_t)((int64_t)SlipRaceDisplay_ScaleWorldOffset(x) * 5 / 6);
+	const int32_t scaledX =
+	    originX + (int32_t)((int64_t)SlipRaceDisplay_ScaleWorldOffset(x) * SLIP_DRAW3D_SQUARE_PIXEL_SCALE_NUMERATOR /
+	                        SLIP_DRAW3D_SQUARE_PIXEL_SCALE_DENOMINATOR);
 	const int32_t scaledY = originY + SlipRaceDisplay_ScaleWorldOffset(y);
 	/* The sprite clipper takes signed words; saturate offscreen corners instead
 	 * of wrapping a very large sky
@@ -8843,7 +9456,8 @@ static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const Sli
                                       bool resourceOwned) {
 	int32_t projectedX, projectedY;
 	SlipDraw3DScreenPoint16 corners[4];
-	if (context == NULL || (!resourceOwned && (sprite == NULL || sprite->data == NULL || sprite->size < 0x10u)))
+	if (context == NULL ||
+	    (!resourceOwned && (sprite == NULL || sprite->data == NULL || sprite->size < SLIP_SPRITE_HEADER_BYTES)))
 		return false;
 
 	if (!SlipDraw3D_ProjectScreen((SlipDraw3DVec32){view.x, view.y, view.z}, context->projectState, &projectedX,
@@ -8852,7 +9466,7 @@ static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const Sli
 
 	const uint8_t *const dimensionBytes = resourceOwned ? SlipResourceHost_Lock(NULL, spriteHandle) : sprite->data;
 	const int16_t halfWidth = (int16_t)(SlipBytes_ReadLE16(dimensionBytes) >> 1);
-	const int16_t negativeHeight = (int16_t)(0u - SlipBytes_ReadLE16(dimensionBytes + 2));
+	const int16_t negativeHeight = (int16_t)(0u - SlipBytes_ReadLE16(dimensionBytes + SLIP_SPRITE_HEIGHT_OFFSET));
 	if (resourceOwned)
 		SlipResourceHost_Unlock(NULL, spriteHandle);
 	TrackView_ProjectCloudCorner((int16_t)-halfWidth, negativeHeight, projectedX, projectedY, &corners[0].x,
@@ -8880,31 +9494,34 @@ static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const Sli
 			SlipSpriteHost_effectResources.drawScaled(NULL, spriteHandle, corners[0].x, corners[0].y, corners[2].x,
 			                                          corners[2].y);
 		} else {
-			Raster_DrawSpriteScaled(sprite->data, sprite->size, sprite->data + 0x10u, sprite->size - 0x10u,
-			                        corners[0].x, corners[0].y, corners[2].x, corners[2].y);
+			Raster_DrawSpriteScaled(sprite->data, sprite->size, sprite->data + SLIP_SPRITE_HEADER_BYTES,
+			                        sprite->size - SLIP_SPRITE_HEADER_BYTES, corners[0].x, corners[0].y, corners[2].x,
+			                        corners[2].y);
 		}
 		Raster_SetClipRect(minX, minY, maxX, maxY);
 		return true;
 	}
 
 	const SlipDraw3DScreenPoint16 *points[4] = {corners, corners + 1, corners + 2, corners + 3};
-	const SlipDraw3DTextureCoordinates uv[4] = {{0, 0}, {0x4000, 0}, {0x4000, 0x4000}, {0, 0x4000}};
-	SlipDraw3DReturnActiveVisit returns[64];
+	const SlipDraw3DTextureCoordinates uv[4] = {
+	    {0, 0}, {SLIP_Q14_ONE, 0}, {SLIP_Q14_ONE, SLIP_Q14_ONE}, {0, SLIP_Q14_ONE}};
+	SlipDraw3DReturnActiveVisit returns[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	SlipDraw3DReturnActiveRing returned;
 	SlipDraw3DSpritePointTextureRingVisit ringVisits[4];
 	SlipDraw3DSpritePointTextureRing ring;
 	SlipDraw3DProjectState *const state = context->projectState;
 	const uint32_t savedFlags = context->rendererFlags;
 	context->rendererFlags |= SLIP_RENDER_MASKED_TEXTURE | SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	bool ok = SlipDraw3D_ReturnActiveRing(context->drawRecordPool, returns, 64, &returned) &&
+	bool ok = SlipDraw3D_ReturnActiveRing(context->drawRecordPool, returns, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
+	                                      &returned) &&
 	          SlipDraw3D_SpritePointTextureRing(context->drawRecordPool, points, uv, 4, spriteHandle, state->minX,
 	                                            state->maxX, state->minY, state->maxY, 0, ringVisits, 4, &ring);
 	bool rejected = ok && ring.carryOut;
 	if (ok && ring.calledClipScreen) {
-		SlipDraw3DClipFlagVisit flagVisits[64];
-		SlipDraw3DPostPlaneBoundsVisit boundsVisits[64];
-		SlipDraw3DPostPlaneClipRecordVisit recordVisits[64];
-		SlipDraw3DPostPlaneClipPlaneVisit planeVisits[64];
+		SlipDraw3DClipFlagVisit flagVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+		SlipDraw3DPostPlaneBoundsVisit boundsVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+		SlipDraw3DPostPlaneClipRecordVisit recordVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+		SlipDraw3DPostPlaneClipPlaneVisit planeVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 		SlipDraw3DScreenPlaneExecute clipped;
 		TrackViewPostPlaneArgs post = TrackView_PostPlaneArgs(context);
 		ok = SlipDraw3D_ScreenPlaneExecute(
@@ -8912,23 +9529,24 @@ static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const Sli
 		    context->drawRecordPool->inputActiveHeadOffset, context->drawRecordPool->freeHeadOffset,
 		    ring.anyFlagsBeforeDispatch, ring.mode, state->minX, state->maxX, state->minY, state->maxY,
 		    post.hasPostPlanes, post.planeBase, post.planeBytes, post.planeHeadOffset, post.limitXMin, post.limitXMax,
-		    post.limitYMin, post.limitYMax, 64, flagVisits, 64, boundsVisits, 64, recordVisits, 64, planeVisits, 64,
-		    &clipped);
+		    post.limitYMin, post.limitYMax, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, flagVisits,
+		    SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, boundsVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, recordVisits,
+		    SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, planeVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &clipped);
 		if (ok) {
 			context->drawRecordPool->inputActiveHeadOffset = clipped.activeHeadOffsetOut;
 			rejected = clipped.dispatch.carryOut;
 		}
 	}
 	if (ok && !rejected) {
-		SlipDraw3DTexturedDispatchPoint dispatchPoints[64];
-		SlipDraw3DTexturedDispatchVisit dispatchVisits[64];
+		SlipDraw3DTexturedDispatchPoint dispatchPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+		SlipDraw3DTexturedDispatchVisit dispatchVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 		SlipDraw3DTexturedDispatch dispatch;
-		ok = SlipDraw3D_PrepareTexturedDispatch(context->drawRecordPool, context->drawRecordPool->inputActiveHeadOffset,
-		                                        ring.drawMode, context->rendererFlags, ring.textureHandle,
-		                                        context->reverseTraversal, 0, dispatchPoints, 64, dispatchVisits, 64,
-		                                        &dispatch);
+		ok = SlipDraw3D_PrepareTexturedDispatch(
+		    context->drawRecordPool, context->drawRecordPool->inputActiveHeadOffset, ring.drawMode,
+		    context->rendererFlags, ring.textureHandle, context->reverseTraversal, 0, dispatchPoints,
+		    SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, dispatchVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &dispatch);
 		if (ok) {
-			RasterTexturedPoint rasterPoints[64] = {0};
+			RasterTexturedPoint rasterPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT] = {0};
 			for (size_t i = 0; i < dispatch.pointCount; ++i) {
 				rasterPoints[i].x = dispatchPoints[i].screenX;
 				rasterPoints[i].y = dispatchPoints[i].screenY;
@@ -8948,11 +9566,11 @@ static bool TrackView_DrawCloudSprite(TrackViewRawBspContext *context, const Sli
 				SlipRaceGpu_Texture(sprite->data, sprite->size, 0, (const RasterTexturedPoint *)rasterPoints,
 				                    (uint32_t)dispatch.pointCount);
 			} else {
-				visits = calloc(512, sizeof(*visits));
+				visits = calloc(SLIP_TEXTURED_RASTER_VISIT_CAPACITY, sizeof(*visits));
 				size_t pixels;
-				ok = visits != NULL &&
-				     Raster_DrawAffineTexturedPolygon(sprite->data, sprite->size, rasterPoints,
-				                                      (uint32_t)dispatch.pointCount, 0, visits, 512, &pixels);
+				ok = visits != NULL && Raster_DrawAffineTexturedPolygon(sprite->data, sprite->size, rasterPoints,
+				                                                        (uint32_t)dispatch.pointCount, 0, visits,
+				                                                        SLIP_TEXTURED_RASTER_VISIT_CAPACITY, &pixels);
 			}
 			if (resourceOwned)
 				SlipResourceHost_Unlock(NULL, spriteHandle);
@@ -8990,7 +9608,8 @@ bool TrackView_DrawSprite(TrackViewRawBspContext *context, SlipView3DVec32 view,
 		uint64_t dot = (uint64_t)((int64_t)x * state->auxiliaryClipPlaneNormal.x);
 		dot += (uint64_t)((int64_t)y * state->auxiliaryClipPlaneNormal.y);
 		dot += (uint64_t)((int64_t)z * state->auxiliaryClipPlaneNormal.z);
-		uint32_t distance = (uint32_t)(dot >> 14) + (uint32_t)((dot >> 13) & 1u);
+		uint32_t distance =
+		    (uint32_t)(dot >> SLIP_NORMAL_FRACTION_BITS) + (uint32_t)((dot >> SLIP_NORMAL_ROUND_BIT) & 1u);
 		if ((int32_t)distance < 0)
 			distance = 0u - distance;
 		if (distance <= (uint32_t)radius) {
@@ -9002,47 +9621,50 @@ bool TrackView_DrawSprite(TrackViewRawBspContext *context, SlipView3DVec32 view,
 			SlipDraw3DVec32 corners[4] = {
 			    {left, low, view.z}, {left, high, view.z}, {right, high, view.z}, {right, low, view.z}};
 			const SlipDraw3DVec32 *points[4] = {corners, corners + 1, corners + 2, corners + 3};
-			const SlipDraw3DTextureCoordinates uv[4] = {{0, 0x4000}, {0, 0}, {0x4000, 0}, {0x4000, 0x4000}};
+			const SlipDraw3DTextureCoordinates uv[4] = {
+			    {0, SLIP_Q14_ONE}, {0, 0}, {SLIP_Q14_ONE, 0}, {SLIP_Q14_ONE, SLIP_Q14_ONE}};
 			uint32_t common = UINT32_MAX;
 			for (unsigned i = 0; i < 4; ++i)
 				common &= state->projectMask(corners[i], state);
 			if (common != 0)
 				return true;
 			const uint32_t savedFlags = state->renderFlags;
-			state->renderFlags = 4;
-			if (radius < 0x4000)
-				state->renderFlags |= 1;
+			state->renderFlags = SLIP_RENDER_DISABLE_SPECULAR;
+			if (radius < SLIP_TRACK_SPRITE_MINIMUM_SOLID_RADIUS)
+				state->renderFlags |= SLIP_RENDER_WIREFRAME;
 			if (view.z >= (int32_t)((uint32_t)radius * (uint32_t)state->projectionScale))
-				state->renderFlags |= 8;
-			SlipDraw3DClipFlagVisit flagVisits[64];
-			SlipDraw3DPostPlaneBoundsVisit boundsVisits[64];
-			SlipDraw3DPostPlaneClipRecordVisit recordVisits[64];
-			SlipDraw3DPostPlaneClipPlaneVisit planeVisits[64];
+				state->renderFlags |= SLIP_RENDER_DISABLE_TEXTURES;
+			SlipDraw3DClipFlagVisit flagVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+			SlipDraw3DPostPlaneBoundsVisit boundsVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+			SlipDraw3DPostPlaneClipRecordVisit recordVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+			SlipDraw3DPostPlaneClipPlaneVisit planeVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 			SlipDraw3DSpritePolygon polygon;
 			TrackViewPostPlaneArgs post = TrackView_PostPlaneArgs(context);
 			const int built = SlipDraw3D_SpritePolygon(
 			    context->drawRecordPool, points, uv, 4, spriteHandle, state, post.hasPostPlanes, post.planeBase,
 			    post.planeBytes, post.planeHeadOffset, post.limitXMin, post.limitXMax, post.limitYMin, post.limitYMax,
-			    64, flagVisits, 64, boundsVisits, 64, recordVisits, 64, planeVisits, 64, &polygon);
+			    SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, flagVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, boundsVisits,
+			    SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, recordVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, planeVisits,
+			    SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &polygon);
 			state->renderFlags = savedFlags;
 			if (!built)
 				return false;
 			if (polygon.carryOut)
 				return true;
 
-			SlipDraw3DTexturedDispatchPoint dispatchPoints[64];
-			SlipDraw3DTexturedDispatchVisit dispatchVisits[64];
+			SlipDraw3DTexturedDispatchPoint dispatchPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+			SlipDraw3DTexturedDispatchVisit dispatchVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 			SlipDraw3DTexturedDispatch dispatch;
 			const uint32_t savedDrawFlags = context->rendererFlags;
 			context->rendererFlags |= SLIP_RENDER_MASKED_TEXTURE | SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
 			const int prepared = SlipDraw3D_PrepareTexturedDispatch(
 			    context->drawRecordPool, context->drawRecordPool->inputActiveHeadOffset, polygon.drawMode,
-			    context->rendererFlags, polygon.textureHandle, context->reverseTraversal, 0, dispatchPoints, 64,
-			    dispatchVisits, 64, &dispatch);
+			    context->rendererFlags, polygon.textureHandle, context->reverseTraversal, 0, dispatchPoints,
+			    SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, dispatchVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &dispatch);
 			bool drawn = prepared != 0;
 			if (drawn && TrackView_LockResourceHandlePayload(context->resourceRegistry, (uint16_t)polygon.textureHandle,
 			                                                 &sprite)) {
-				RasterTexturedPoint rasterPoints[64] = {0};
+				RasterTexturedPoint rasterPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT] = {0};
 				for (size_t i = 0; i < dispatch.pointCount; ++i) {
 					rasterPoints[i].x = dispatchPoints[i].screenX;
 					rasterPoints[i].y = dispatchPoints[i].screenY;
@@ -9055,11 +9677,11 @@ bool TrackView_DrawSprite(TrackViewRawBspContext *context, SlipView3DVec32 view,
 					SlipRaceGpu_Texture(sprite.data, sprite.size, 0, rasterPoints, (uint32_t)dispatch.pointCount);
 					drawn = true;
 				} else {
-					visits = calloc(512, sizeof(*visits));
+					visits = calloc(SLIP_TEXTURED_RASTER_VISIT_CAPACITY, sizeof(*visits));
 					size_t pixels;
-					drawn = visits != NULL &&
-					        Raster_DrawAffineTexturedPolygon(sprite.data, sprite.size, rasterPoints,
-					                                         (uint32_t)dispatch.pointCount, 0, visits, 512, &pixels);
+					drawn = visits != NULL && Raster_DrawAffineTexturedPolygon(
+					                              sprite.data, sprite.size, rasterPoints, (uint32_t)dispatch.pointCount,
+					                              0, visits, SLIP_TEXTURED_RASTER_VISIT_CAPACITY, &pixels);
 				}
 				TrackView_UnlockResourceHandlePayload(context->resourceRegistry, (uint16_t)polygon.textureHandle);
 				free(visits);
@@ -9100,9 +9722,10 @@ bool TrackView_DrawSprite(TrackViewRawBspContext *context, SlipView3DVec32 view,
 		SlipSpriteHost_effectResources.drawScaled(SlipSpriteHost_effectResources.context, spriteHandle, (int16_t)left,
 		                                          (int16_t)top, (int16_t)right, (int16_t)bottom);
 	else if (TrackView_LoadResourceHandlePayload(context->resourceRegistry, spriteHandle, &sprite) &&
-	         sprite.size > 0x10u)
-		Raster_DrawSpriteScaled(sprite.data, sprite.size, sprite.data + 0x10u, sprite.size - 0x10u, (int16_t)left,
-		                        (int16_t)top, (int16_t)right, (int16_t)bottom);
+	         sprite.size > SLIP_SPRITE_HEADER_BYTES)
+		Raster_DrawSpriteScaled(sprite.data, sprite.size, sprite.data + SLIP_SPRITE_HEADER_BYTES,
+		                        sprite.size - SLIP_SPRITE_HEADER_BYTES, (int16_t)left, (int16_t)top, (int16_t)right,
+		                        (int16_t)bottom);
 	Raster_SetClipRect(savedMinX, savedMinY, savedMaxX, savedMaxY);
 	return true;
 }
@@ -9128,7 +9751,7 @@ bool TrackView_QueueCrossEffect(TrackViewRawBspContext *context, uint32_t object
 	if (context == NULL || SlipDraw3D_listPool == NULL ||
 	    !SlipObject_ViewPosition(context->objectTable, context->objectTableBytes, (uint16_t)objectRecord, &view))
 		return false;
-	const uint32_t payload = ((uint32_t)view.x & 0xffff0000u) | (uint16_t)objectRecord;
+	const uint32_t payload = ((uint32_t)view.x & SLIP_CALLBACK_PAYLOAD_UPPER_WORD_MASK) | (uint16_t)objectRecord;
 	SlipDraw3D_ListInsert(&SlipDraw3D_listState, SlipDraw3D_listPool,
 	                      (size_t)SlipDraw3D_listState.capacity * sizeof(*SlipDraw3D_listPool), (uint32_t)view.z,
 	                      TrackView_DrawCrossEffect, payload);
@@ -9146,13 +9769,13 @@ bool TrackView_DrawCrossEffect(TrackViewRawBspContext *context, uint32_t objectR
 	SlipDraw3DProjectState *const state = context->projectState;
 	const int32_t detail = (int32_t)SlipDraw3D_DetailValue(state->projectionMode, SlipDraw3D_minimumDepth,
 	                                                       radius.drawExtent, (uint32_t)view.z);
-	if (detail > 100)
+	if (detail > SLIP_CROSS_EFFECT_MAXIMUM_DETAIL)
 		return true;
 	SlipObjectSlotDataReadResult slot;
-	if (detail <= 2) {
+	if (detail <= SLIP_CROSS_EFFECT_POINT_MAXIMUM_DETAIL) {
 		if (!SlipObject_GetDrawData(context->objectTable, context->objectTableBytes, objectRecord, &slot))
 			return false;
-		SlipDraw3D_DrawPoint(TrackView_crossPosition, (uint16_t)(slot.drawData >> 16), state);
+		SlipDraw3D_DrawPoint(TrackView_crossPosition, (uint16_t)(slot.drawData >> SLIP_WORD_BITS), state);
 		return true;
 	}
 	TrackView_crossSize = (int16_t)detail;
@@ -9173,19 +9796,22 @@ bool TrackView_DrawCrossEffect(TrackViewRawBspContext *context, uint32_t objectR
 	TrackView_crossAngle = (uint16_t)slot.drawData;
 	TrackView_crossSin = SlipView3D_SinQ14(context->maths, (int16_t)TrackView_crossAngle);
 	TrackView_crossCos = SlipView3D_CosQ14(context->maths, (int16_t)TrackView_crossAngle);
-	int16_t horizontalOffset = (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossSin) >> 16);
-	int16_t dy = (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossCos) >> 16);
+	int16_t horizontalOffset =
+	    (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossSin) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
+	int16_t dy =
+	    (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossCos) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
 	if (!SlipObject_GetDrawData(context->objectTable, context->objectTableBytes, objectRecord, &slot)) {
 		Raster_SetClipRect(minX, minY, maxX, maxY);
 		return false;
 	}
-	TrackView_crossColor = (uint16_t)(slot.drawData >> 16);
+	TrackView_crossColor = (uint16_t)(slot.drawData >> SLIP_WORD_BITS);
 	Raster_DrawLineClipped((uint8_t)TrackView_crossColor, (int16_t)(TrackView_crossX - horizontalOffset),
 	                       (int16_t)(TrackView_crossY - dy), (int16_t)(TrackView_crossX + horizontalOffset),
 	                       (int16_t)(TrackView_crossY + dy));
 	horizontalOffset =
-	    (int16_t)((uint32_t)((int32_t)(int16_t)(0u - (uint16_t)TrackView_crossSize) * TrackView_crossCos) >> 16);
-	dy = (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossSin) >> 16);
+	    (int16_t)((uint32_t)((int32_t)(int16_t)(0u - (uint16_t)TrackView_crossSize) * TrackView_crossCos) >>
+	              SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
+	dy = (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossSin) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
 	Raster_DrawLineClipped((uint8_t)TrackView_crossColor, (int16_t)(TrackView_crossX - horizontalOffset),
 	                       (int16_t)(TrackView_crossY - dy), (int16_t)(TrackView_crossX + horizontalOffset),
 	                       (int16_t)(TrackView_crossY + dy));
@@ -9202,7 +9828,8 @@ bool TrackView_QueueAnimatedEffect(TrackViewRawBspContext *context, uint32_t obj
 	/* The caller's draw dispatch does not consume the insertion carry flag. */
 	SlipDraw3D_ListInsert(&SlipDraw3D_listState, SlipDraw3D_listPool,
 	                      (size_t)SlipDraw3D_listState.capacity * sizeof(*SlipDraw3D_listPool), (uint32_t)view.z,
-	                      TrackView_DrawAnimatedEffect, ((uint32_t)view.x & 0xffff0000u) | (uint16_t)objectRecord);
+	                      TrackView_DrawAnimatedEffect,
+	                      ((uint32_t)view.x & SLIP_CALLBACK_PAYLOAD_UPPER_WORD_MASK) | (uint16_t)objectRecord);
 	return true;
 }
 
@@ -9326,9 +9953,9 @@ void TrackView_SetImpactSprites(const TrackViewImpactSprites *sprites) { TrackVi
 
 static uint16_t TrackView_SelectImpactSprite(const TrackViewImpactSprites *sprites, uint16_t previous) {
 	uint16_t selected = 0;
-	for (unsigned attempts = 4; attempts != 0; --attempts) {
+	for (unsigned attempts = SLIP_IMPACT_SPRITE_SELECTION_ATTEMPTS; attempts != 0; --attempts) {
 		TrackView_effectRandomState = SlipTrackWorld_RandomStep(TrackView_effectRandomState);
-		const uint16_t index = (uint16_t)(((uint32_t)TrackView_effectRandomState * sprites->count) >> 16);
+		const uint16_t index = (uint16_t)(((uint32_t)TrackView_effectRandomState * sprites->count) >> SLIP_WORD_BITS);
 		selected = sprites->handles[index];
 		if (selected != previous)
 			break;
@@ -9341,7 +9968,7 @@ static bool TrackView_DrawImpact(TrackViewRawBspContext *context, SlipView3DVec3
 		return true;
 	TrackView_previousImpactSprite =
 	    TrackView_SelectImpactSprite(TrackView_impactSprites, TrackView_previousImpactSprite);
-	return TrackView_DrawSprite(context, endpoint, 0xa00, TrackView_previousImpactSprite);
+	return TrackView_DrawSprite(context, endpoint, SLIP_IMPACT_SPRITE_RADIUS, TrackView_previousImpactSprite);
 }
 
 static bool TrackView_DrawPointPolygon(TrackViewRawBspContext *context, const SlipDraw3DVec32 *const *points,
@@ -9351,16 +9978,18 @@ static bool TrackView_DrawPointPolygon(TrackViewRawBspContext *context, const Sl
 	if (!SlipDraw3D_ReturnActiveRing(context->drawRecordPool, returnedVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
 	                                 &returned))
 		return false;
-	SlipDraw3DClipFlagVisit flags[64];
-	SlipDraw3DPostPlaneBoundsVisit bounds[64];
-	SlipDraw3DPostPlaneClipRecordVisit records[64];
-	SlipDraw3DPostPlaneClipPlaneVisit planes[64];
+	SlipDraw3DClipFlagVisit flags[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+	SlipDraw3DPostPlaneBoundsVisit bounds[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+	SlipDraw3DPostPlaneClipRecordVisit records[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+	SlipDraw3DPostPlaneClipPlaneVisit planes[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	TrackViewPostPlaneArgs post = TrackView_PostPlaneArgs(context);
 	SlipDraw3DPointPolygon polygon;
-	if (!SlipDraw3D_PointPolygon(context->drawRecordPool, points, shades, count, color, context->projectState,
-	                             post.hasPostPlanes, post.planeBase, post.planeBytes, post.planeHeadOffset,
-	                             post.limitXMin, post.limitXMax, post.limitYMin, post.limitYMax, 64, flags, 64, bounds,
-	                             64, records, 64, planes, 64, &polygon))
+	if (!SlipDraw3D_PointPolygon(
+	        context->drawRecordPool, points, shades, count, color, context->projectState, post.hasPostPlanes,
+	        post.planeBase, post.planeBytes, post.planeHeadOffset, post.limitXMin, post.limitXMax, post.limitYMin,
+	        post.limitYMax, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, flags, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, bounds,
+	        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, records, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, planes,
+	        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &polygon))
 		return false;
 	if (polygon.carryOut)
 		return true;
@@ -9375,6 +10004,21 @@ static bool TrackView_DrawPointPolygon(TrackViewRawBspContext *context, const Sl
 	++context->emitPathRasterizedCount;
 	return true;
 }
+
+enum {
+	SLIP_BLASTER_OUTER_HALF_WIDTH = 160,
+	SLIP_BLASTER_INNER_HALF_WIDTH = 60,
+	SLIP_BLASTER_DRAW_IMPACT = 0x80000000u,
+	SLIP_BEAM_COLOUR_MASK = 0x7fff,
+	SLIP_BEAM_OUTER_COLOUR_SHIFT = 16,
+	SLIP_REFUEL_BEAM_HALF_WIDTH = 64,
+	SLIP_REFUEL_BEAM_SEGMENT_SHIFT = 3,
+	SLIP_REFUEL_BEAM_SEGMENT_COUNT = 1 << SLIP_REFUEL_BEAM_SEGMENT_SHIFT,
+	SLIP_REFUEL_BEAM_MINIMUM_DISPLACEMENT = 512,
+	SLIP_REFUEL_BEAM_DISPLACEMENT_RANGE = 2048,
+	SLIP_REFUEL_BEAM_DISPLACEMENT_SIGN_BIT = 0x8000,
+	SLIP_REFUEL_BEAM_FACING_LIMIT_Q14 = SLIP_Q14_ONE - 3
+};
 
 bool TrackView_DrawBeam(TrackViewRawBspContext *context, uint32_t beamIndex) {
 	if (context == NULL || context->projectState == NULL || context->drawRecordPool == NULL ||
@@ -9403,10 +10047,10 @@ bool TrackView_DrawBeam(TrackViewRawBspContext *context, uint32_t beamIndex) {
 	SlipView3DNormalizeVector3D direction;
 	if (!SlipView3D_NormalizeVector3D((uint32_t)delta.x, (uint32_t)delta.y, (uint32_t)delta.z, &direction))
 		return false;
-	if (beam->type != SLIP_TRACK_BEAM_BLASTER && (int16_t)direction.unitZQ14 > 0x3ffd)
+	if (beam->type != SLIP_TRACK_BEAM_BLASTER && (int16_t)direction.unitZQ14 > SLIP_REFUEL_BEAM_FACING_LIMIT_Q14)
 		return true;
 	SlipView3D_BuildFacingBasis(&basis, (int16_t)direction.unitXQ14, (int16_t)direction.unitYQ14,
-	                            (int16_t)direction.unitZQ14, 0, 0, -0x4000);
+	                            (int16_t)direction.unitZQ14, 0, 0, -SLIP_Q14_ONE);
 	SlipTrackWorldAxisPlaneClassify facing;
 	if (!SlipTrackWorld_ClassifyAxisPlane(context->projectState->projectionMode, (uint32_t)start.x, (uint32_t)start.y,
 	                                      (uint32_t)start.z, (uint16_t)basis.m[3], (uint16_t)basis.m[4],
@@ -9415,7 +10059,7 @@ bool TrackView_DrawBeam(TrackViewRawBspContext *context, uint32_t beamIndex) {
 	if (facing.carry) {
 		if (context->maths == NULL)
 			return false;
-		SlipView3D_ApplyRow0Row1Rotation(context->maths, (int16_t)0x8000, &basis);
+		SlipView3D_ApplyRow0Row1Rotation(context->maths, (int16_t)SLIP_ANGLE_HALF_TURN, &basis);
 		if (!SlipTrackWorld_ClassifyAxisPlane(context->projectState->projectionMode, (uint32_t)start.x,
 		                                      (uint32_t)start.y, (uint32_t)start.z, (uint16_t)basis.m[3],
 		                                      (uint16_t)basis.m[4], (uint16_t)basis.m[5], &facing))
@@ -9423,68 +10067,86 @@ bool TrackView_DrawBeam(TrackViewRawBspContext *context, uint32_t beamIndex) {
 		if (facing.carry)
 			return true;
 	}
-	SlipDraw3DVec32 corners[4];
-	const SlipDraw3DVec32 *points[4] = {corners, corners + 1, corners + 2, corners + 3};
+	SlipDraw3DVec32 corners[SLIP_POLYGON_RECTANGLE_VERTICES];
+	const SlipDraw3DVec32 *points[SLIP_POLYGON_RECTANGLE_VERTICES] = {corners, corners + 1, corners + 2, corners + 3};
 	if (beam->type == SLIP_TRACK_BEAM_BLASTER) {
-		if ((beam->material & 0x80000000u) != 0 && beam->continuation == 0 && !TrackView_DrawImpact(context, end))
+		if ((beam->material & SLIP_BLASTER_DRAW_IMPACT) != 0 && beam->continuation == 0 &&
+		    !TrackView_DrawImpact(context, end))
 			return false;
 		{
-			SlipView3DVec32 startLeftOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-160, 0, 0});
+			SlipView3DVec32 startLeftOffset =
+			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-SLIP_BLASTER_OUTER_HALF_WIDTH, 0, 0});
 			corners[0] = (SlipDraw3DVec32){(int32_t)((uint32_t)start.x + (uint32_t)startLeftOffset.x),
 			                               (int32_t)((uint32_t)start.y + (uint32_t)startLeftOffset.y),
 			                               (int32_t)((uint32_t)start.z + (uint32_t)startLeftOffset.z)};
-			SlipView3DVec32 endLeftOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-160, 0, 0});
+			SlipView3DVec32 endLeftOffset =
+			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-SLIP_BLASTER_OUTER_HALF_WIDTH, 0, 0});
 			corners[1] = (SlipDraw3DVec32){(int32_t)((uint32_t)end.x + (uint32_t)endLeftOffset.x),
 			                               (int32_t)((uint32_t)end.y + (uint32_t)endLeftOffset.y),
 			                               (int32_t)((uint32_t)end.z + (uint32_t)endLeftOffset.z)};
-			SlipView3DVec32 endRightOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){160, 0, 0});
+			SlipView3DVec32 endRightOffset =
+			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){SLIP_BLASTER_OUTER_HALF_WIDTH, 0, 0});
 			corners[2] = (SlipDraw3DVec32){(int32_t)((uint32_t)end.x + (uint32_t)endRightOffset.x),
 			                               (int32_t)((uint32_t)end.y + (uint32_t)endRightOffset.y),
 			                               (int32_t)((uint32_t)end.z + (uint32_t)endRightOffset.z)};
-			SlipView3DVec32 startRightOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){160, 0, 0});
+			SlipView3DVec32 startRightOffset =
+			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){SLIP_BLASTER_OUTER_HALF_WIDTH, 0, 0});
 			corners[3] = (SlipDraw3DVec32){(int32_t)((uint32_t)start.x + (uint32_t)startRightOffset.x),
 			                               (int32_t)((uint32_t)start.y + (uint32_t)startRightOffset.y),
 			                               (int32_t)((uint32_t)start.z + (uint32_t)startRightOffset.z)};
-			if (!TrackView_DrawPointPolygon(context, points, 4, (beam->material >> 16) & 0x7fffu, NULL))
+			if (!TrackView_DrawPointPolygon(context, points, SLIP_POLYGON_RECTANGLE_VERTICES,
+			                                (beam->material >> SLIP_BEAM_OUTER_COLOUR_SHIFT) & SLIP_BEAM_COLOUR_MASK,
+			                                NULL))
 				return false;
 		}
 
 		{
-			SlipView3DVec32 startLeftOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-60, 0, 0});
+			SlipView3DVec32 startLeftOffset =
+			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-SLIP_BLASTER_INNER_HALF_WIDTH, 0, 0});
 			corners[0] = (SlipDraw3DVec32){(int32_t)((uint32_t)start.x + (uint32_t)startLeftOffset.x),
 			                               (int32_t)((uint32_t)start.y + (uint32_t)startLeftOffset.y),
 			                               (int32_t)((uint32_t)start.z + (uint32_t)startLeftOffset.z)};
-			SlipView3DVec32 endLeftOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-60, 0, 0});
+			SlipView3DVec32 endLeftOffset =
+			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-SLIP_BLASTER_INNER_HALF_WIDTH, 0, 0});
 			corners[1] = (SlipDraw3DVec32){(int32_t)((uint32_t)end.x + (uint32_t)endLeftOffset.x),
 			                               (int32_t)((uint32_t)end.y + (uint32_t)endLeftOffset.y),
 			                               (int32_t)((uint32_t)end.z + (uint32_t)endLeftOffset.z)};
-			SlipView3DVec32 endRightOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){60, 0, 0});
+			SlipView3DVec32 endRightOffset =
+			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){SLIP_BLASTER_INNER_HALF_WIDTH, 0, 0});
 			corners[2] = (SlipDraw3DVec32){(int32_t)((uint32_t)end.x + (uint32_t)endRightOffset.x),
 			                               (int32_t)((uint32_t)end.y + (uint32_t)endRightOffset.y),
 			                               (int32_t)((uint32_t)end.z + (uint32_t)endRightOffset.z)};
-			SlipView3DVec32 startRightOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){60, 0, 0});
+			SlipView3DVec32 startRightOffset =
+			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){SLIP_BLASTER_INNER_HALF_WIDTH, 0, 0});
 			corners[3] = (SlipDraw3DVec32){(int32_t)((uint32_t)start.x + (uint32_t)startRightOffset.x),
 			                               (int32_t)((uint32_t)start.y + (uint32_t)startRightOffset.y),
 			                               (int32_t)((uint32_t)start.z + (uint32_t)startRightOffset.z)};
-			if (!TrackView_DrawPointPolygon(context, points, 4, beam->material & 0x7fffu, NULL))
+			if (!TrackView_DrawPointPolygon(context, points, SLIP_POLYGON_RECTANGLE_VERTICES,
+			                                beam->material & SLIP_BEAM_COLOUR_MASK, NULL))
 				return false;
 		}
 
 	} else {
 
-		SlipView3DVec32 step = {delta.x >> 3, delta.y >> 3, delta.z >> 3};
+		SlipView3DVec32 step = {delta.x >> SLIP_REFUEL_BEAM_SEGMENT_SHIFT, delta.y >> SLIP_REFUEL_BEAM_SEGMENT_SHIFT,
+		                        delta.z >> SLIP_REFUEL_BEAM_SEGMENT_SHIFT};
 		SlipView3DVec32 center = start;
 		TrackView_effectRandomState = SlipTrackWorld_RandomStep(TrackView_effectRandomState);
-		const uint32_t color = (TrackView_effectRandomState & 15u) + 0x40u;
+		const uint32_t color =
+		    (TrackView_effectRandomState & (SLIP_REFUEL_COLOUR_RAMP_END - SLIP_REFUEL_COLOUR_RAMP_START)) +
+		    SLIP_REFUEL_COLOUR_RAMP_START;
 		uint32_t sign = 0;
-		for (unsigned segment = 0; segment < 8; ++segment) {
+		for (unsigned segment = 0; segment < SLIP_REFUEL_BEAM_SEGMENT_COUNT; ++segment) {
 			center.x = (int32_t)((uint32_t)center.x + (uint32_t)step.x);
 			center.y = (int32_t)((uint32_t)center.y + (uint32_t)step.y);
 			center.z = (int32_t)((uint32_t)center.z + (uint32_t)step.z);
 			TrackView_effectRandomState = SlipTrackWorld_RandomStep(TrackView_effectRandomState);
-			uint16_t displacement = (uint16_t)(((uint32_t)TrackView_effectRandomState * 0x800u) >> 16) + 0x200u;
+			uint16_t displacement =
+			    (uint16_t)(((uint32_t)TrackView_effectRandomState * SLIP_REFUEL_BEAM_DISPLACEMENT_RANGE) >>
+			               SLIP_WORD_BITS) +
+			    SLIP_REFUEL_BEAM_MINIMUM_DISPLACEMENT;
 			sign = ~sign;
-			if ((sign & 0x8000u) == 0)
+			if ((sign & SLIP_REFUEL_BEAM_DISPLACEMENT_SIGN_BIT) == 0)
 				displacement = (uint16_t)(0u - displacement);
 			SlipView3DVec32 offset =
 			    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){(int16_t)displacement, 0, 0});
@@ -9492,23 +10154,27 @@ bool TrackView_DrawBeam(TrackViewRawBspContext *context, uint32_t beamIndex) {
 			                        (int32_t)((uint32_t)center.y + (uint32_t)offset.y),
 			                        (int32_t)((uint32_t)center.z + (uint32_t)offset.z)};
 			{
-				SlipView3DVec32 startLeftOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-64, 0, 0});
+				SlipView3DVec32 startLeftOffset =
+				    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-SLIP_REFUEL_BEAM_HALF_WIDTH, 0, 0});
 				corners[0] = (SlipDraw3DVec32){(int32_t)((uint32_t)start.x + (uint32_t)startLeftOffset.x),
 				                               (int32_t)((uint32_t)start.y + (uint32_t)startLeftOffset.y),
 				                               (int32_t)((uint32_t)start.z + (uint32_t)startLeftOffset.z)};
-				SlipView3DVec32 endLeftOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-64, 0, 0});
+				SlipView3DVec32 endLeftOffset =
+				    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){-SLIP_REFUEL_BEAM_HALF_WIDTH, 0, 0});
 				corners[1] = (SlipDraw3DVec32){(int32_t)((uint32_t)end.x + (uint32_t)endLeftOffset.x),
 				                               (int32_t)((uint32_t)end.y + (uint32_t)endLeftOffset.y),
 				                               (int32_t)((uint32_t)end.z + (uint32_t)endLeftOffset.z)};
-				SlipView3DVec32 endRightOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){64, 0, 0});
+				SlipView3DVec32 endRightOffset =
+				    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){SLIP_REFUEL_BEAM_HALF_WIDTH, 0, 0});
 				corners[2] = (SlipDraw3DVec32){(int32_t)((uint32_t)end.x + (uint32_t)endRightOffset.x),
 				                               (int32_t)((uint32_t)end.y + (uint32_t)endRightOffset.y),
 				                               (int32_t)((uint32_t)end.z + (uint32_t)endRightOffset.z)};
-				SlipView3DVec32 startRightOffset = SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){64, 0, 0});
+				SlipView3DVec32 startRightOffset =
+				    SlipView3D_TransformPosition16(&basis, (SlipView3DVec32){SLIP_REFUEL_BEAM_HALF_WIDTH, 0, 0});
 				corners[3] = (SlipDraw3DVec32){(int32_t)((uint32_t)start.x + (uint32_t)startRightOffset.x),
 				                               (int32_t)((uint32_t)start.y + (uint32_t)startRightOffset.y),
 				                               (int32_t)((uint32_t)start.z + (uint32_t)startRightOffset.z)};
-				if (!TrackView_DrawPointPolygon(context, points, 4, color, NULL))
+				if (!TrackView_DrawPointPolygon(context, points, SLIP_POLYGON_RECTANGLE_VERTICES, color, NULL))
 					return false;
 			}
 
@@ -9548,7 +10214,7 @@ static void TrackView_DrawCloudLayer(TrackViewRawBspContext *context, uint16_t l
 		bool skip = false;
 
 		spriteWidth = (int16_t)entry->width;
-		if (spriteWidth >= 0x190 && detailLevel < 3u) {
+		if (spriteWidth >= SLIP_CLOUD_FULL_DETAIL_MINIMUM_WIDTH && detailLevel < SLIP_RENDER_FULL_DETAIL_LEVEL) {
 			skip = true;
 		}
 		if (!skip) {
@@ -9707,6 +10373,18 @@ static const uint8_t kNewYorkNearCloudLayout[] = {
 
 static const uint8_t kNewYorkFarCloudLayout[] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x50, 0x00, 0x00};
 
+enum {
+	SLIP_CLOUD_LAYOUT_HEADER_BYTES = sizeof(uint16_t),
+	SLIP_CLOUD_LAYOUT_RECORD_BYTES = 6,
+	SLIP_CLOUD_LAYOUT_YAW_OFFSET = 2,
+	SLIP_CLOUD_LAYOUT_PITCH_OFFSET = 4,
+	SLIP_CLOUD_LAYER_HEADER_BYTES = sizeof(uint16_t),
+	SLIP_CLOUD_ENTRY_BYTES = sizeof(TrackViewCloudEntry),
+	SLIP_CLOUD_EGYPT_HAWAII_YAW_STEP = 0x10,
+	SLIP_CLOUD_CHICAGO_YAW_STEP = 0x80,
+	SLIP_CLOUD_FRANCE_YAW_STEP = 0x60
+};
+
 static bool TrackView_BuildCloudLayer(const SlipView3DMaths *maths, const uint8_t *layout, size_t layoutBytes,
                                       const SlipResourcePayload *spritePayloads, size_t spritePayloadCount,
                                       const uint16_t *spriteResources, uint16_t *layerResource, bool silhouette,
@@ -9716,27 +10394,31 @@ static bool TrackView_BuildCloudLayer(const SlipView3DMaths *maths, const uint8_
 	TrackViewCloudEntry *entries;
 	uint16_t i;
 
-	if (layout == NULL || layoutBytes < 2u || spritePayloads == NULL || entriesOut == NULL || entryCountOut == NULL) {
+	if (layout == NULL || layoutBytes < SLIP_CLOUD_LAYOUT_HEADER_BYTES || spritePayloads == NULL ||
+	    entriesOut == NULL || entryCountOut == NULL) {
 		return false;
 	}
 	count = SlipBytes_ReadLE16(layout);
 	*entryCountOut = 0;
 	*entriesOut = NULL;
-	if (count == 0u || layoutBytes < (size_t)2u + (size_t)count * 6u) {
+	if (count == 0u ||
+	    layoutBytes < (size_t)SLIP_CLOUD_LAYOUT_HEADER_BYTES + (size_t)count * SLIP_CLOUD_LAYOUT_RECORD_BYTES) {
 		return false;
 	}
 
-	if (!SlipResourceHost_Allocate(NULL, (uint32_t)count * 0x10u + 2u, 0, layerResource))
+	if (!SlipResourceHost_Allocate(NULL, (uint32_t)count * SLIP_CLOUD_ENTRY_BYTES + SLIP_CLOUD_LAYER_HEADER_BYTES, 0,
+	                               layerResource))
 		return false;
 	uint8_t *const layerBytes = SlipResourceHost_LockWritable(NULL, *layerResource);
 	TrackView_WriteLE16(layerBytes, count);
-	entries = (TrackViewCloudEntry *)(void *)(layerBytes + 2);
+	entries = (TrackViewCloudEntry *)(void *)(layerBytes + SLIP_CLOUD_LAYER_HEADER_BYTES);
 	for (i = 0; i < count; ++i) {
-		const uint8_t *const record = layout + 2u + (size_t)i * 6u;
+		const uint8_t *const record =
+		    layout + SLIP_CLOUD_LAYOUT_HEADER_BYTES + (size_t)i * SLIP_CLOUD_LAYOUT_RECORD_BYTES;
 		TrackViewCloudEntry *const entry = &entries[i];
 		const uint16_t spriteIndex = SlipBytes_ReadLE16(record);
-		const int16_t yaw = (int16_t)SlipBytes_ReadLE16(record + 2u);
-		const int16_t pitch = (int16_t)SlipBytes_ReadLE16(record + 4u);
+		const int16_t yaw = (int16_t)SlipBytes_ReadLE16(record + SLIP_CLOUD_LAYOUT_YAW_OFFSET);
+		const int16_t pitch = (int16_t)SlipBytes_ReadLE16(record + SLIP_CLOUD_LAYOUT_PITCH_OFFSET);
 		SlipView3DMatrix rotation;
 		SlipView3DVec32 position;
 
@@ -9744,7 +10426,7 @@ static bool TrackView_BuildCloudLayer(const SlipView3DMaths *maths, const uint8_
 
 		const uint8_t *const spriteBytes = SlipResourceHost_Lock(NULL, entry->spriteHandle);
 		entry->width = SlipBytes_ReadLE16(spriteBytes);
-		entry->height = SlipBytes_ReadLE16(spriteBytes + 2u);
+		entry->height = SlipBytes_ReadLE16(spriteBytes + SLIP_SPRITE_HEIGHT_OFFSET);
 		SlipResourceHost_Unlock(NULL, entry->spriteHandle);
 
 		SlipView3D_BuildYawMatrix(maths, yaw, &rotation);
@@ -9855,21 +10537,53 @@ static bool TrackView_LoadCloudSprites(TrackViewCloudState *state, const char *p
 	return true;
 }
 
+enum {
+	SLIP_CLOUD_EGYPT_GROUP_A_COUNT = 2,
+	SLIP_CLOUD_EGYPT_GROUP_B_COUNT = 2,
+	SLIP_CLOUD_EGYPT_GROUP_C_COUNT = 2,
+	SLIP_CLOUD_EGYPT_SPRITE_COUNT =
+	    SLIP_CLOUD_EGYPT_GROUP_A_COUNT + SLIP_CLOUD_EGYPT_GROUP_B_COUNT + SLIP_CLOUD_EGYPT_GROUP_C_COUNT,
+	SLIP_CLOUD_CHICAGO_GROUP_A_COUNT = 2,
+	SLIP_CLOUD_CHICAGO_GROUP_B_COUNT = 7,
+	SLIP_CLOUD_CHICAGO_GROUP_C_COUNT = 8,
+	SLIP_CLOUD_CHICAGO_SPRITE_COUNT =
+	    SLIP_CLOUD_CHICAGO_GROUP_A_COUNT + SLIP_CLOUD_CHICAGO_GROUP_B_COUNT + SLIP_CLOUD_CHICAGO_GROUP_C_COUNT,
+	SLIP_CLOUD_HAWAII_GROUP_A_COUNT = 2,
+	SLIP_CLOUD_HAWAII_GROUP_B_COUNT = 9,
+	SLIP_CLOUD_HAWAII_GROUP_C_COUNT = 6,
+	SLIP_CLOUD_HAWAII_SPRITE_COUNT =
+	    SLIP_CLOUD_HAWAII_GROUP_A_COUNT + SLIP_CLOUD_HAWAII_GROUP_B_COUNT + SLIP_CLOUD_HAWAII_GROUP_C_COUNT,
+	SLIP_CLOUD_TOKYO_GROUP_A_COUNT = 3,
+	SLIP_CLOUD_TOKYO_SPRITE_COUNT = SLIP_CLOUD_TOKYO_GROUP_A_COUNT,
+	SLIP_CLOUD_LONDON_GROUP_A_COUNT = 2,
+	SLIP_CLOUD_LONDON_SPRITE_COUNT = SLIP_CLOUD_LONDON_GROUP_A_COUNT,
+	SLIP_CLOUD_FRANCE_GROUP_A_COUNT = 4,
+	SLIP_CLOUD_FRANCE_GROUP_B_COUNT = 4,
+	SLIP_CLOUD_FRANCE_GROUP_C_COUNT = 3,
+	SLIP_CLOUD_FRANCE_SPRITE_COUNT =
+	    SLIP_CLOUD_FRANCE_GROUP_A_COUNT + SLIP_CLOUD_FRANCE_GROUP_B_COUNT + SLIP_CLOUD_FRANCE_GROUP_C_COUNT,
+	SLIP_CLOUD_NEW_YORK_GROUP_A_COUNT = 1,
+	SLIP_CLOUD_NEW_YORK_GROUP_B_COUNT = 14,
+	SLIP_CLOUD_NEW_YORK_SPRITE_COUNT = SLIP_CLOUD_NEW_YORK_GROUP_A_COUNT + SLIP_CLOUD_NEW_YORK_GROUP_B_COUNT,
+};
+
 static bool TrackView_InitEgyptClouds(const TrackViewTrackLifecycleArgs *args) {
 	TrackViewCloudState *const state = args->cloudState;
 
-	if (!TrackView_LoadCloudSprites(state, "cancld*A.spr", 1u, 2u, 0) ||
-	    !TrackView_LoadCloudSprites(state, "cancld*B.spr", 1u, 2u, 2) ||
-	    !TrackView_LoadCloudSprites(state, "cancld*C.spr", 1u, 2u, 4)) {
+	if (!TrackView_LoadCloudSprites(state, "cancld*A.spr", 1u, SLIP_CLOUD_EGYPT_GROUP_A_COUNT, 0) ||
+	    !TrackView_LoadCloudSprites(state, "cancld*B.spr", 1u, SLIP_CLOUD_EGYPT_GROUP_B_COUNT,
+	                                SLIP_CLOUD_EGYPT_GROUP_A_COUNT) ||
+	    !TrackView_LoadCloudSprites(state, "cancld*C.spr", 1u, SLIP_CLOUD_EGYPT_GROUP_C_COUNT,
+	                                SLIP_CLOUD_EGYPT_GROUP_A_COUNT + SLIP_CLOUD_EGYPT_GROUP_B_COUNT)) {
 		return false;
 	}
-	state->spriteCount = 6u;
-	return TrackView_BuildClouds(state, args->maths, 0x10u, kEgyptNearCloudLayout, sizeof(kEgyptNearCloudLayout), NULL,
-	                             0, NULL, 0);
+	state->spriteCount = SLIP_CLOUD_EGYPT_SPRITE_COUNT;
+	return TrackView_BuildClouds(state, args->maths, SLIP_CLOUD_EGYPT_HAWAII_YAW_STEP, kEgyptNearCloudLayout,
+	                             sizeof(kEgyptNearCloudLayout), NULL, 0, NULL, 0);
 }
 
 static bool TrackView_ReleaseEgyptClouds(const TrackViewTrackLifecycleArgs *args) {
-	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, 6u);
+	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, SLIP_CLOUD_EGYPT_SPRITE_COUNT);
 	args->cloudState->spriteCount = 0;
 	return true;
 }
@@ -9877,18 +10591,21 @@ static bool TrackView_ReleaseEgyptClouds(const TrackViewTrackLifecycleArgs *args
 static bool TrackView_InitChicagoClouds(const TrackViewTrackLifecycleArgs *args) {
 	TrackViewCloudState *const state = args->cloudState;
 
-	if (!TrackView_LoadCloudSprites(state, "hawcld*A.spr", 1u, 2u, 0) ||
-	    !TrackView_LoadCloudSprites(state, "hawcld*B.spr", 1u, 7u, 2) ||
-	    !TrackView_LoadCloudSprites(state, "hawcld*C.spr", 1u, 8u, 9)) {
+	if (!TrackView_LoadCloudSprites(state, "hawcld*A.spr", 1u, SLIP_CLOUD_CHICAGO_GROUP_A_COUNT, 0) ||
+	    !TrackView_LoadCloudSprites(state, "hawcld*B.spr", 1u, SLIP_CLOUD_CHICAGO_GROUP_B_COUNT,
+	                                SLIP_CLOUD_CHICAGO_GROUP_A_COUNT) ||
+	    !TrackView_LoadCloudSprites(state, "hawcld*C.spr", 1u, SLIP_CLOUD_CHICAGO_GROUP_C_COUNT,
+	                                SLIP_CLOUD_CHICAGO_GROUP_A_COUNT + SLIP_CLOUD_CHICAGO_GROUP_B_COUNT)) {
 		return false;
 	}
-	state->spriteCount = 17u;
-	return TrackView_BuildClouds(state, args->maths, 0x80u, kChicagoNearCloudLayout, sizeof(kChicagoNearCloudLayout),
-	                             kChicagoFarCloudLayout, sizeof(kChicagoFarCloudLayout), NULL, 0);
+	state->spriteCount = SLIP_CLOUD_CHICAGO_SPRITE_COUNT;
+	return TrackView_BuildClouds(state, args->maths, SLIP_CLOUD_CHICAGO_YAW_STEP, kChicagoNearCloudLayout,
+	                             sizeof(kChicagoNearCloudLayout), kChicagoFarCloudLayout,
+	                             sizeof(kChicagoFarCloudLayout), NULL, 0);
 }
 
 static bool TrackView_ReleaseChicagoClouds(const TrackViewTrackLifecycleArgs *args) {
-	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, 17u);
+	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, SLIP_CLOUD_CHICAGO_SPRITE_COUNT);
 	args->cloudState->spriteCount = 0;
 	return true;
 }
@@ -9896,18 +10613,21 @@ static bool TrackView_ReleaseChicagoClouds(const TrackViewTrackLifecycleArgs *ar
 static bool TrackView_InitHawaiiClouds(const TrackViewTrackLifecycleArgs *args) {
 	TrackViewCloudState *const state = args->cloudState;
 
-	if (!TrackView_LoadCloudSprites(state, "loncld*A.spr", 1u, 2u, 0) ||
-	    !TrackView_LoadCloudSprites(state, "loncld*B.spr", 1u, 9u, 2) ||
-	    !TrackView_LoadCloudSprites(state, "loncld*C.spr", 1u, 6u, 11)) {
+	if (!TrackView_LoadCloudSprites(state, "loncld*A.spr", 1u, SLIP_CLOUD_HAWAII_GROUP_A_COUNT, 0) ||
+	    !TrackView_LoadCloudSprites(state, "loncld*B.spr", 1u, SLIP_CLOUD_HAWAII_GROUP_B_COUNT,
+	                                SLIP_CLOUD_HAWAII_GROUP_A_COUNT) ||
+	    !TrackView_LoadCloudSprites(state, "loncld*C.spr", 1u, SLIP_CLOUD_HAWAII_GROUP_C_COUNT,
+	                                SLIP_CLOUD_HAWAII_GROUP_A_COUNT + SLIP_CLOUD_HAWAII_GROUP_B_COUNT)) {
 		return false;
 	}
-	state->spriteCount = 17u;
-	return TrackView_BuildClouds(state, args->maths, 0x10u, kHawaiiNearCloudLayout, sizeof(kHawaiiNearCloudLayout),
-	                             kHawaiiFarCloudLayout, sizeof(kHawaiiFarCloudLayout), NULL, 0);
+	state->spriteCount = SLIP_CLOUD_HAWAII_SPRITE_COUNT;
+	return TrackView_BuildClouds(state, args->maths, SLIP_CLOUD_EGYPT_HAWAII_YAW_STEP, kHawaiiNearCloudLayout,
+	                             sizeof(kHawaiiNearCloudLayout), kHawaiiFarCloudLayout, sizeof(kHawaiiFarCloudLayout),
+	                             NULL, 0);
 }
 
 static bool TrackView_ReleaseHawaiiClouds(const TrackViewTrackLifecycleArgs *args) {
-	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, 17u);
+	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, SLIP_CLOUD_HAWAII_SPRITE_COUNT);
 	args->cloudState->spriteCount = 0;
 	return true;
 }
@@ -9915,16 +10635,16 @@ static bool TrackView_ReleaseHawaiiClouds(const TrackViewTrackLifecycleArgs *arg
 static bool TrackView_InitTokyoClouds(const TrackViewTrackLifecycleArgs *args) {
 	TrackViewCloudState *const state = args->cloudState;
 
-	if (!TrackView_LoadCloudSprites(state, "eghill*.spr", 1u, 3u, 0)) {
+	if (!TrackView_LoadCloudSprites(state, "eghill*.spr", 1u, SLIP_CLOUD_TOKYO_GROUP_A_COUNT, 0)) {
 		return false;
 	}
-	state->spriteCount = 3u;
+	state->spriteCount = SLIP_CLOUD_TOKYO_SPRITE_COUNT;
 	return TrackView_BuildClouds(state, args->maths, 0, NULL, 0, NULL, 0, kTokyoSilhouetteLayout,
 	                             sizeof(kTokyoSilhouetteLayout));
 }
 
 static bool TrackView_ReleaseTokyoClouds(const TrackViewTrackLifecycleArgs *args) {
-	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, 3u);
+	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, SLIP_CLOUD_TOKYO_SPRITE_COUNT);
 	args->cloudState->spriteCount = 0;
 	return true;
 }
@@ -9932,16 +10652,16 @@ static bool TrackView_ReleaseTokyoClouds(const TrackViewTrackLifecycleArgs *args
 static bool TrackView_InitLondonClouds(const TrackViewTrackLifecycleArgs *args) {
 	TrackViewCloudState *const state = args->cloudState;
 
-	if (!TrackView_LoadCloudSprites(state, "norhill*.spr", 1u, 2u, 0)) {
+	if (!TrackView_LoadCloudSprites(state, "norhill*.spr", 1u, SLIP_CLOUD_LONDON_GROUP_A_COUNT, 0)) {
 		return false;
 	}
-	state->spriteCount = 2u;
+	state->spriteCount = SLIP_CLOUD_LONDON_SPRITE_COUNT;
 	return TrackView_BuildClouds(state, args->maths, 0, NULL, 0, NULL, 0, kLondonSilhouetteLayout,
 	                             sizeof(kLondonSilhouetteLayout));
 }
 
 static bool TrackView_ReleaseLondonClouds(const TrackViewTrackLifecycleArgs *args) {
-	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, 2u);
+	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, SLIP_CLOUD_LONDON_SPRITE_COUNT);
 	args->cloudState->spriteCount = 0;
 	return true;
 }
@@ -9949,18 +10669,21 @@ static bool TrackView_ReleaseLondonClouds(const TrackViewTrackLifecycleArgs *arg
 static bool TrackView_InitFranceClouds(const TrackViewTrackLifecycleArgs *args) {
 	TrackViewCloudState *const state = args->cloudState;
 
-	if (!TrackView_LoadCloudSprites(state, "Amacld*A.spr", 1u, 4u, 0) ||
-	    !TrackView_LoadCloudSprites(state, "Amacld*B.spr", 1u, 4u, 4) ||
-	    !TrackView_LoadCloudSprites(state, "Amacld*C.spr", 1u, 3u, 8)) {
+	if (!TrackView_LoadCloudSprites(state, "Amacld*A.spr", 1u, SLIP_CLOUD_FRANCE_GROUP_A_COUNT, 0) ||
+	    !TrackView_LoadCloudSprites(state, "Amacld*B.spr", 1u, SLIP_CLOUD_FRANCE_GROUP_B_COUNT,
+	                                SLIP_CLOUD_FRANCE_GROUP_A_COUNT) ||
+	    !TrackView_LoadCloudSprites(state, "Amacld*C.spr", 1u, SLIP_CLOUD_FRANCE_GROUP_C_COUNT,
+	                                SLIP_CLOUD_FRANCE_GROUP_A_COUNT + SLIP_CLOUD_FRANCE_GROUP_B_COUNT)) {
 		return false;
 	}
-	state->spriteCount = 11u;
-	return TrackView_BuildClouds(state, args->maths, 0x60u, kFranceNearCloudLayout, sizeof(kFranceNearCloudLayout),
-	                             kFranceFarCloudLayout, sizeof(kFranceFarCloudLayout), NULL, 0);
+	state->spriteCount = SLIP_CLOUD_FRANCE_SPRITE_COUNT;
+	return TrackView_BuildClouds(state, args->maths, SLIP_CLOUD_FRANCE_YAW_STEP, kFranceNearCloudLayout,
+	                             sizeof(kFranceNearCloudLayout), kFranceFarCloudLayout, sizeof(kFranceFarCloudLayout),
+	                             NULL, 0);
 }
 
 static bool TrackView_ReleaseFranceClouds(const TrackViewTrackLifecycleArgs *args) {
-	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, 11u);
+	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, SLIP_CLOUD_FRANCE_SPRITE_COUNT);
 	args->cloudState->spriteCount = 0;
 	return true;
 }
@@ -9969,16 +10692,17 @@ static bool TrackView_InitNewYorkClouds(const TrackViewTrackLifecycleArgs *args)
 	TrackViewCloudState *const state = args->cloudState;
 
 	if (!SlipResourceHost_Load(NULL, "NYSUNS.spr", &state->spriteResources[0]) ||
-	    !TrackView_LoadCloudSprites(state, "NYcl**.spr", 1u, 14u, 1)) {
+	    !TrackView_LoadCloudSprites(state, "NYcl**.spr", 1u, SLIP_CLOUD_NEW_YORK_GROUP_B_COUNT,
+	                                SLIP_CLOUD_NEW_YORK_GROUP_A_COUNT)) {
 		SlipGame_ResourceFailure();
 	}
-	state->spriteCount = 15u;
+	state->spriteCount = SLIP_CLOUD_NEW_YORK_SPRITE_COUNT;
 	return TrackView_BuildClouds(state, args->maths, 0, kNewYorkNearCloudLayout, sizeof(kNewYorkNearCloudLayout),
 	                             kNewYorkFarCloudLayout, sizeof(kNewYorkFarCloudLayout), NULL, 0);
 }
 
 static bool TrackView_ReleaseNewYorkClouds(const TrackViewTrackLifecycleArgs *args) {
-	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, 15u);
+	SlipResourceHost_ReleaseSequence(NULL, args->cloudState->spriteResources, SLIP_CLOUD_NEW_YORK_SPRITE_COUNT);
 	args->cloudState->spriteCount = 0;
 	return true;
 }
@@ -10006,7 +10730,7 @@ void TrackView_DrawClouds(void *userData) {
 	state = draw->cloudState;
 
 	savedRenderFlags = draw->context->rendererFlags;
-	draw->context->rendererFlags = 0x30u;
+	draw->context->rendererFlags = SLIP_CLOUD_RENDER_FLAGS;
 
 	TrackView_DrawCloudLayer(draw->context, state->farResource, draw->maths, draw->farYaw, draw->viewMatrix,
 	                         draw->detailLevel, state->farEntries, state->farCount, state->spritePayloads,
@@ -10027,19 +10751,19 @@ static bool TrackView_WriteTexturedPointBuffer(const SlipDraw3DTexturedDispatchP
                                                uint8_t *pointBuffer, size_t pointBufferBytes) {
 	size_t i;
 
-	if (points == NULL || pointBuffer == NULL || pointCount > SIZE_MAX / 0x20u ||
-	    pointBufferBytes < pointCount * 0x20u) {
+	if (points == NULL || pointBuffer == NULL || pointCount > SIZE_MAX / sizeof(RasterTexturedPoint) ||
+	    pointBufferBytes < pointCount * sizeof(RasterTexturedPoint)) {
 		return false;
 	}
-	memset(pointBuffer, 0, pointCount * 0x20u);
+	memset(pointBuffer, 0, pointCount * sizeof(RasterTexturedPoint));
 	for (i = 0; i < pointCount; ++i) {
-		uint8_t *const point = pointBuffer + i * 0x20u;
+		uint8_t *const point = pointBuffer + i * sizeof(RasterTexturedPoint);
 
-		TrackView_WriteLE32(point + 0x00u, (uint32_t)points[i].screenX);
-		TrackView_WriteLE32(point + 0x04u, (uint32_t)points[i].screenY);
-		TrackView_WriteLE32(point + 0x0cu, points[i].textureU);
-		TrackView_WriteLE32(point + 0x10u, points[i].textureV);
-		TrackView_WriteLE32(point + 0x14u, (uint32_t)points[i].depth);
+		TrackView_WriteLE32(point + offsetof(RasterTexturedPoint, x), (uint32_t)points[i].screenX);
+		TrackView_WriteLE32(point + offsetof(RasterTexturedPoint, y), (uint32_t)points[i].screenY);
+		TrackView_WriteLE32(point + offsetof(RasterTexturedPoint, u), points[i].textureU);
+		TrackView_WriteLE32(point + offsetof(RasterTexturedPoint, v), points[i].textureV);
+		TrackView_WriteLE32(point + offsetof(RasterTexturedPoint, depth), (uint32_t)points[i].depth);
 	}
 	return true;
 }
@@ -10068,17 +10792,21 @@ static void TrackView_VehicleViewMaterialsLoadTextures(VehicleViewMaterialTable 
 }
 
 static uint32_t TrackView_VehicleViewNormalizedLightComponent(uint32_t value, uint32_t total) {
-	const uint32_t scale = 0x10000000u / total;
+	const uint32_t scale = (SLIP_Q14_ONE * SLIP_Q14_ONE) / total;
 
-	return (uint32_t)(((uint64_t)value * scale) >> 14);
+	return (uint32_t)(((uint64_t)value * scale) >> SLIP_Q14_FRACTION_BITS);
 }
 
 static uint32_t TrackView_VehicleViewNormalizedLightDirect(void) {
-	return TrackView_VehicleViewNormalizedLightComponent(0x4000u, 0x4000u + 0x0c00u);
+	return TrackView_VehicleViewNormalizedLightComponent(SLIP_VEHICLE_PREVIEW_DIRECT_LIGHT_Q14,
+	                                                     SLIP_VEHICLE_PREVIEW_DIRECT_LIGHT_Q14 +
+	                                                         SLIP_VEHICLE_PREVIEW_AMBIENT_LIGHT_Q14);
 }
 
 static uint32_t TrackView_VehicleViewNormalizedLightAmbient(void) {
-	return TrackView_VehicleViewNormalizedLightComponent(0x0c00u, 0x4000u + 0x0c00u);
+	return TrackView_VehicleViewNormalizedLightComponent(SLIP_VEHICLE_PREVIEW_AMBIENT_LIGHT_Q14,
+	                                                     SLIP_VEHICLE_PREVIEW_DIRECT_LIGHT_Q14 +
+	                                                         SLIP_VEHICLE_PREVIEW_AMBIENT_LIGHT_Q14);
 }
 
 static uint32_t TrackView_VehicleViewProjectMask(SlipDraw3DVec32 point, void *userData) {
@@ -10147,7 +10875,7 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 		primitiveContext.projectState = &ctx->projectState;
 		primitiveContext.frustum = &trackContext->frustum;
 		primitiveContext.shapeScaleShift = ctx->shapeScaleShift;
-		primitiveContext.shapeScaleRightShift = (uint16_t)(14u - ctx->shapeScaleShift);
+		primitiveContext.shapeScaleRightShift = (uint16_t)(SLIP_Q14_FRACTION_BITS - ctx->shapeScaleShift);
 		primitiveContext.shapePath = true;
 		if (!TrackView_ExecuteHighTexturedCallback(
 		        trackContext, &primitiveContext, primitiveRecord, primitiveRecordBytes, primitive->primitiveOffset,
@@ -10192,7 +10920,7 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 		                                     shape->data + stream.indexOffset, shape->size - stream.indexOffset,
 		                                     &ctx->projectState, TrackView_VehicleViewTransform,
 		                                     TrackView_VehicleViewProject, &lighting, &trackContext->materialColor)) {
-			trackContext->failureAddress = 0x0001dfa8u;
+			trackContext->failureAddress = TRACK_VIEW_DIAGNOSTIC_UNCLIPPED_POLYGON;
 			trackContext->failed = true;
 			return 0;
 		}
@@ -10205,8 +10933,9 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 	                                 sizeof(returnVisits) / sizeof(returnVisits[0]), &returnActive) ||
 	    !SlipDraw3D_MaterialGate(trackContext->materialTable, trackContext->materialTableBytes,
 	                             primitiveDispatch.materialIndex, trackContext->rendererFlags, polygonCountAndFlags,
-	                             shape->data + stream.indexOffset, (size_t)stream.vertexCount * 2u, &materialGate)) {
-		trackContext->failureAddress = 0x0001ba7du;
+	                             shape->data + stream.indexOffset,
+	                             (size_t)stream.vertexCount * SLIP_SERIALIZED_INDEX_BYTES, &materialGate)) {
+		trackContext->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_GATE;
 		trackContext->failed = true;
 		return 0;
 	}
@@ -10225,9 +10954,9 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 	    !TrackView_MaterialColorNormal((const void *)materialGate.materialRecord, trackContext, ctx->lightVector,
 	                                   primitiveDispatch.normalX, primitiveDispatch.normalY, polygonVertexCount,
 	                                   ctx->vertexRecords, ctx->vertexRecordCount, shape->data + stream.indexOffset,
-	                                   (size_t)stream.vertexCount * 2u, polygonCountAndFlags, &ctx->projectState,
-	                                   TrackView_VehicleViewTransform, ctx, &color)) {
-		trackContext->failureAddress = 0x0001cce9u;
+	                                   (size_t)stream.vertexCount * SLIP_SERIALIZED_INDEX_BYTES, polygonCountAndFlags,
+	                                   &ctx->projectState, TrackView_VehicleViewTransform, ctx, &color)) {
+		trackContext->failureAddress = TRACK_VIEW_DIAGNOSTIC_MATERIAL_NORMAL_COLOUR;
 		trackContext->failed = true;
 		return 0;
 	}
@@ -10236,7 +10965,7 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 		                             trackContext->materialTableBytes -
 		                                 (size_t)(materialGate.materialRecord - trackContext->materialTable),
 		                             polygonCountAndFlags, color, &regularSetup)) {
-			trackContext->failureAddress = 0x0001bbb1u;
+			trackContext->failureAddress = TRACK_VIEW_DIAGNOSTIC_REGULAR_MATERIAL_SETUP;
 			trackContext->failed = true;
 			return 0;
 		}
@@ -10274,16 +11003,16 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 	} else {
 		ok = SlipDraw3D_BuildSolidRingExecute(
 		    trackContext->drawRecordPool, ctx->vertexRecords, ctx->vertexRecordCount, shape->data + stream.indexOffset,
-		    (size_t)stream.vertexCount * 2u, (uint16_t)regularSetup.maskedIndex, regularSetup.materialDitherBits,
-		    &ctx->projectState, TrackView_VehicleViewTransform, TrackView_VehicleViewProject,
-		    TrackView_VehicleViewProject, ctx, false, NULL, 0, 0, 0, 0, 0, 0, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT,
-		    clipFlagVisits, sizeof(clipFlagVisits) / sizeof(clipFlagVisits[0]), postBoundsVisits,
-		    sizeof(postBoundsVisits) / sizeof(postBoundsVisits[0]), postClipRecordVisits,
+		    (size_t)stream.vertexCount * SLIP_SERIALIZED_INDEX_BYTES, (uint16_t)regularSetup.maskedIndex,
+		    regularSetup.materialDitherBits, &ctx->projectState, TrackView_VehicleViewTransform,
+		    TrackView_VehicleViewProject, TrackView_VehicleViewProject, ctx, false, NULL, 0, 0, 0, 0, 0, 0,
+		    SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, clipFlagVisits, sizeof(clipFlagVisits) / sizeof(clipFlagVisits[0]),
+		    postBoundsVisits, sizeof(postBoundsVisits) / sizeof(postBoundsVisits[0]), postClipRecordVisits,
 		    sizeof(postClipRecordVisits) / sizeof(postClipRecordVisits[0]), postClipPlaneVisits,
 		    sizeof(postClipPlaneVisits) / sizeof(postClipPlaneVisits[0]), &solidRing);
 	}
 	if (!ok) {
-		trackContext->failureAddress = 0x0001bc0cu;
+		trackContext->failureAddress = TRACK_VIEW_DIAGNOSTIC_SOLID_RING;
 		trackContext->failed = true;
 		return 0;
 	}
@@ -10291,14 +11020,14 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 	if (solidRing.carryOut) {
 		return 1;
 	}
-	if (regularSetup.drawMode == 1u) {
+	if (regularSetup.drawMode == SLIP_POLYGON_DRAW_SHADED) {
 		size_t shadedPointCount = 0;
 		size_t mode1PointCount = 0;
 		size_t shadedIndex;
 
 		if (!TrackView_ActorCollectRingPoints(trackContext->drawRecordPool, solidRing.activeHeadOffsetOut, flatPoints,
 		                                      sizeof(flatPoints) / sizeof(flatPoints[0]), &shadedPointCount)) {
-			trackContext->failureAddress = 0x0001ae47u;
+			trackContext->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 			trackContext->failed = true;
 			return 0;
 		}
@@ -10308,7 +11037,7 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 			if (!TrackView_ActorCollectShadedRing(trackContext->drawRecordPool, solidRing.activeHeadOffsetOut,
 			                                      shadedPoints, sizeof(shadedPoints) / sizeof(shadedPoints[0]),
 			                                      &mode1PointCount, &flatColor, &flatColorUniform)) {
-				trackContext->failureAddress = 0x0001b01au;
+				trackContext->failureAddress = TRACK_VIEW_DIAGNOSTIC_ACTOR_SHADED_RING;
 				trackContext->failed = true;
 				return 0;
 			}
@@ -10326,7 +11055,7 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 				fprintf(stderr, " colors=");
 				for (shadedIndex = 0; shadedIndex < mode1PointCount; ++shadedIndex) {
 					fprintf(stderr, "%s%02x", shadedIndex == 0 ? "" : ",",
-					        (uint8_t)(shadedPoints[shadedIndex].shade >> 8));
+					        (uint8_t)(shadedPoints[shadedIndex].shade >> SLIP_SHADE_COLOUR_SHIFT));
 				}
 				fprintf(stderr, "\n");
 			}
@@ -10353,7 +11082,7 @@ static int TrackView_SubmitShapePolygon(VehicleViewRenderContext *ctx, uint16_t 
 	        trackContext->drawRecordPool, solidRing.activeHeadOffsetOut, regularSetup.drawMode,
 	        trackContext->rendererFlags, regularSetup.storedMaterialColor, regularSetup.materialDitherBits,
 	        SLIP_DRAW3D_RECORD_NEXT_OFFSET, flatPoints, sizeof(flatPoints) / sizeof(flatPoints[0]), &flatRing)) {
-		trackContext->failureAddress = 0x0001ae47u;
+		trackContext->failureAddress = TRACK_VIEW_DIAGNOSTIC_FLAT_RING;
 		trackContext->failed = true;
 		return 0;
 	}
@@ -10528,7 +11257,7 @@ static VehicleArtSlot *TrackView_VehicleArtParseRecord(VehicleArtActor *actor, c
 	VehicleArtSlot *slot;
 	size_t i;
 
-	if (recordOffset + 0x1ccu > size) {
+	if (recordOffset + SLIP_ART_PART_POINT_COUNT_OFFSET > size) {
 		return NULL;
 	}
 	slot = TrackView_VehicleArtFindSlot(actor, recordOffset);
@@ -10543,39 +11272,46 @@ static VehicleArtSlot *TrackView_VehicleArtParseRecord(VehicleArtActor *actor, c
 	memset(slot, 0, sizeof(*slot));
 	slot->recordOffset = recordOffset;
 	slot->nameTag = SlipBytes_ReadLE32(data + recordOffset);
-	slot->childOffset = SlipBytes_ReadLE32(data + recordOffset + 4u);
-	slot->siblingOffset = SlipBytes_ReadLE32(data + recordOffset + 8u);
-	slot->rotationCallbackOffset = SlipBytes_ReadLE32(data + recordOffset + 0x0cu);
-	slot->localX = SlipBytes_ReadLEI32(data + recordOffset + 0x10u);
-	slot->localY = SlipBytes_ReadLEI32(data + recordOffset + 0x14u);
-	slot->localZ = SlipBytes_ReadLEI32(data + recordOffset + 0x18u);
+	slot->childOffset = SlipBytes_ReadLE32(data + recordOffset + SLIP_ART_PART_CHILD_OFFSET);
+	slot->siblingOffset = SlipBytes_ReadLE32(data + recordOffset + SLIP_ART_PART_SIBLING_OFFSET);
+	slot->rotationCallbackOffset = SlipBytes_ReadLE32(data + recordOffset + SLIP_ART_PART_ROTATION_CALLBACK_OFFSET);
+	slot->localX = SlipBytes_ReadLEI32(data + recordOffset + SLIP_ART_PART_POSITION_OFFSET);
+	slot->localY =
+	    SlipBytes_ReadLEI32(data + recordOffset + (SLIP_ART_PART_POSITION_OFFSET + SLIP_ART_POSITION_Y_OFFSET));
+	slot->localZ =
+	    SlipBytes_ReadLEI32(data + recordOffset + (SLIP_ART_PART_POSITION_OFFSET + SLIP_ART_POSITION_Z_OFFSET));
 	for (i = 0; i < VEHICLE_ART_SHAPE_LOD_COUNT; ++i) {
-		TrackView_VehicleArtCopyShapeName(slot->bodyShapes[i],
-		                                  data + recordOffset + 0x1cu + i * VEHICLE_ART_SHAPE_NAME_SIZE,
-		                                  size - (recordOffset + 0x1cu + i * VEHICLE_ART_SHAPE_NAME_SIZE));
-		TrackView_VehicleArtCopyShapeName(slot->replayShapes[i],
-		                                  data + recordOffset + 0x8cu + i * VEHICLE_ART_SHAPE_NAME_SIZE,
-		                                  size - (recordOffset + 0x8cu + i * VEHICLE_ART_SHAPE_NAME_SIZE));
+		TrackView_VehicleArtCopyShapeName(
+		    slot->bodyShapes[i],
+		    data + recordOffset + SLIP_ART_PART_SHAPE_NAMES_OFFSET + i * VEHICLE_ART_SHAPE_NAME_SIZE,
+		    size - (recordOffset + SLIP_ART_PART_SHAPE_NAMES_OFFSET + i * VEHICLE_ART_SHAPE_NAME_SIZE));
+		TrackView_VehicleArtCopyShapeName(
+		    slot->replayShapes[i],
+		    data + recordOffset + SLIP_ART_PART_REPLAY_SHAPE_NAMES_OFFSET + i * VEHICLE_ART_SHAPE_NAME_SIZE,
+		    size - (recordOffset + SLIP_ART_PART_REPLAY_SHAPE_NAMES_OFFSET + i * VEHICLE_ART_SHAPE_NAME_SIZE));
 	}
-	if (recordOffset + 0x1d0u <= size) {
-		uint32_t pointCount = SlipBytes_ReadLE32(data + recordOffset + 0x1ccu);
+	if (recordOffset + SLIP_ART_PART_POINTS_OFFSET <= size) {
+		uint32_t pointCount = SlipBytes_ReadLE32(data + recordOffset + SLIP_ART_PART_POINT_COUNT_OFFSET);
 
-		if (pointCount > 5u) {
-			pointCount = 5u;
+		if (pointCount > SLIP_ART_POINT_CAPACITY) {
+			pointCount = SLIP_ART_POINT_CAPACITY;
 		}
 		if (pointCount > VEHICLE_ART_MAX_POINTS) {
 			pointCount = VEHICLE_ART_MAX_POINTS;
 		}
 		for (i = 0; i < pointCount; ++i) {
-			const uint32_t pointOffset = recordOffset + 0x1d0u + (uint32_t)i * 0x10u;
+			const uint32_t pointOffset =
+			    recordOffset + SLIP_ART_PART_POINTS_OFFSET + (uint32_t)i * SLIP_ART_POINT_BYTES;
 
-			if (pointOffset + 0x10u > size) {
+			if (pointOffset + SLIP_ART_POINT_BYTES > size) {
 				break;
 			}
 			slot->points[i].nameTag = SlipBytes_ReadLE32(data + pointOffset);
-			slot->points[i].position.x = SlipBytes_ReadLEI32(data + pointOffset + 4u);
-			slot->points[i].position.y = SlipBytes_ReadLEI32(data + pointOffset + 8u);
-			slot->points[i].position.z = SlipBytes_ReadLEI32(data + pointOffset + 0xcu);
+			slot->points[i].position.x = SlipBytes_ReadLEI32(data + pointOffset + SLIP_ART_POINT_POSITION_OFFSET);
+			slot->points[i].position.y =
+			    SlipBytes_ReadLEI32(data + pointOffset + (SLIP_ART_POINT_POSITION_OFFSET + SLIP_ART_POSITION_Y_OFFSET));
+			slot->points[i].position.z =
+			    SlipBytes_ReadLEI32(data + pointOffset + (SLIP_ART_POINT_POSITION_OFFSET + SLIP_ART_POSITION_Z_OFFSET));
 		}
 		slot->pointCount = i;
 	}
@@ -10589,14 +11325,15 @@ static bool TrackView_VehicleArtActorFromPayload(const SlipResourcePayload *payl
 	uint32_t rootOffset;
 	size_t i;
 
-	if (payload == NULL || payload->data == NULL || payload->size < 0x58u || actor == NULL) {
+	if (payload == NULL || payload->data == NULL || payload->size < SLIP_ART_PREVIEW_HEADER_BYTES || actor == NULL) {
 		return false;
 	}
 	memset(actor, 0, sizeof(*actor));
-	rootOffset = SlipBytes_ReadLE32(payload->data + 0x20u);
-	actor->drawChildrenAfterParent = SlipBytes_ReadLEI32(payload->data + 0x24u) == 0;
+	rootOffset = SlipBytes_ReadLE32(payload->data + SLIP_ART_ROOT_PART_OFFSET);
+	actor->drawChildrenAfterParent = SlipBytes_ReadLEI32(payload->data + SLIP_ART_SORT_CHILDREN_OFFSET) == 0;
 	for (i = 0; i < VEHICLE_ART_SHAPE_LOD_COUNT; ++i) {
-		actor->lodRanges[i] = SlipBytes_ReadLEI32(payload->data + 0x28u + i * 4u);
+		actor->lodRanges[i] =
+		    SlipBytes_ReadLEI32(payload->data + SLIP_ART_LOD_DISTANCES_OFFSET + i * SLIP_ART_DISTANCE_BYTES);
 	}
 	actor->root = TrackView_VehicleArtParseRecord(actor, payload->data, payload->size, rootOffset);
 	return actor->root != NULL;
@@ -10606,9 +11343,9 @@ SlipView3DMatrix TrackView_VehicleViewIdentityMatrix(void) {
 	SlipView3DMatrix matrix;
 
 	memset(&matrix, 0, sizeof(matrix));
-	matrix.m[0] = 0x4000;
-	matrix.m[4] = 0x4000;
-	matrix.m[8] = 0x4000;
+	matrix.m[0] = SLIP_Q14_ONE;
+	matrix.m[4] = SLIP_Q14_ONE;
+	matrix.m[8] = SLIP_Q14_ONE;
 	return matrix;
 }
 
@@ -10616,7 +11353,7 @@ void TrackView_VehicleViewResetActorState(void) {
 	g_vehicleViewActorMatrix = TrackView_VehicleViewIdentityMatrix();
 	g_vehicleViewActorMatrixValid = true;
 	g_vehicleViewLastTickMs = SlipSdl_TicksMs();
-	g_vehicleViewTimerSuppressedSamples = 2;
+	g_vehicleViewTimerSuppressedSamples = SLIP_VEHICLE_PREVIEW_INITIAL_TIMER_SAMPLES;
 	memset(g_vehicleViewFanAngles, 0, sizeof(g_vehicleViewFanAngles));
 	g_vehicleViewJetAngle = 0;
 	g_vehicleViewJetDirection = 0;
@@ -10651,18 +11388,18 @@ void TrackView_MaterialAnimationTick(void) {
 	uint32_t folded;
 	uint64_t product;
 
-	updatedAnimationAccumulator = g_materialAnimAccumulator + (uint32_t)TrackView_FrameStepRead();
+	updatedAnimationAccumulator = g_materialAnimAccumulator + TrackView_FrameStepRead();
 	g_materialAnimAccumulator = updatedAnimationAccumulator;
-	folded = updatedAnimationAccumulator & 0x3fffu;
+	folded = updatedAnimationAccumulator & SLIP_MATERIAL_ANIMATION_PHASE_MASK;
 
-	if ((int32_t)folded > 0x2000) {
-		folded ^= 0x3fffu;
+	if (folded > SLIP_Q14_HALF) {
+		folded ^= SLIP_MATERIAL_ANIMATION_PHASE_MASK;
 	}
-	folded = (uint32_t)((int32_t)folded >> 1);
-	folded += 0x2000u;
+	folded = folded >> SLIP_MATERIAL_ANIMATION_AMPLITUDE_SHIFT;
+	folded += SLIP_Q14_HALF;
 	g_materialAnimWave = (uint16_t)folded;
 	product = (uint64_t)g_materialAnimWave * (uint64_t)(uint32_t)(g_materialAnimRangeHigh - g_materialAnimRangeLow);
-	g_materialAnimLerp = (uint32_t)(product >> 14) + g_materialAnimRangeLow;
+	g_materialAnimLerp = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS) + g_materialAnimRangeLow;
 }
 
 static uint16_t TrackView_VehicleViewFrameTimerUpdate(void) {
@@ -10670,6 +11407,7 @@ static uint16_t TrackView_VehicleViewFrameTimerUpdate(void) {
 	uint64_t elapsed;
 	uint32_t deltaMs;
 	const uint32_t minDeltaMs = 14;
+	const uint32_t maximumDeltaMs = 1000;
 
 	if (g_vehicleViewTimerSuppressedSamples > 0) {
 		--g_vehicleViewTimerSuppressedSamples;
@@ -10685,8 +11423,8 @@ static uint16_t TrackView_VehicleViewFrameTimerUpdate(void) {
 	}
 	g_vehicleViewLastTickMs = now;
 	deltaMs = elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
-	if (deltaMs > 1000u) {
-		deltaMs = 1000u;
+	if (deltaMs > maximumDeltaMs) {
+		deltaMs = maximumDeltaMs;
 	}
 	if (deltaMs < minDeltaMs) {
 		deltaMs = minDeltaMs;
@@ -10708,8 +11446,8 @@ static void TrackView_VehicleViewActorCallback(SlipView3DMatrix *actorObjectMatr
 		return;
 	}
 
-	product = 0x4000 * (int16_t)frameStep;
-	angle = (int16_t)(product >> 14);
+	product = SLIP_VEHICLE_PREVIEW_ACTOR_ANGLE_STEP * (int16_t)frameStep;
+	angle = (int16_t)(product >> SLIP_Q14_FRACTION_BITS);
 	if (angle != 0) {
 		SlipView3D_ApplyRow0Row2Rotation(maths, angle, actorObjectMatrix);
 		SlipView3D_OrthonormalizeForwardBasis(actorObjectMatrix);
@@ -10748,13 +11486,13 @@ static void TrackView_VehicleViewUpdateArtAnimations(VehicleArtActor *actor, uin
 		return;
 	}
 
-	fanStep = (int16_t)(((int32_t)0x7fff * (int16_t)frameStep) >> 14);
-	jetStep = (int16_t)(fanStep >> 1);
+	fanStep = (int16_t)((SLIP_VEHICLE_PREVIEW_FAN_ANGLE_STEP * (int16_t)frameStep) >> SLIP_Q14_FRACTION_BITS);
+	jetStep = (int16_t)(fanStep >> SLIP_VEHICLE_PREVIEW_JET_RATE_SHIFT);
 	jetAngle = g_vehicleViewJetAngle;
 	if (g_vehicleViewJetDirection == 0) {
 		jetAngle += jetStep;
-		if (jetAngle >= 0x4000) {
-			jetAngle = 0x4000;
+		if (jetAngle >= SLIP_ANGLE_QUARTER_TURN) {
+			jetAngle = SLIP_ANGLE_QUARTER_TURN;
 			g_vehicleViewJetDirection = 1;
 		}
 	} else {
@@ -10766,9 +11504,9 @@ static void TrackView_VehicleViewUpdateArtAnimations(VehicleArtActor *actor, uin
 	}
 	g_vehicleViewJetAngle = (int16_t)jetAngle;
 
-	for (i = 0; i < 4; ++i) {
-		const uint32_t fanTag = 0x66616e31u + (uint32_t)i;
-		const uint32_t jetTag = 0x6a657431u + (uint32_t)i;
+	for (i = 0; i < SLIP_VEHICLE_PREVIEW_ANIMATED_PART_COUNT; ++i) {
+		const uint32_t fanTag = SLIP_ACTOR_FIRST_FAN + (uint32_t)i;
+		const uint32_t jetTag = SLIP_ACTOR_FIRST_JET + (uint32_t)i;
 
 		if (TrackView_VehicleArtFindSlotByNameTag(actor, fanTag) != NULL) {
 			g_vehicleViewFanAngles[i] = (int16_t)(g_vehicleViewFanAngles[i] + fanStep);
@@ -10884,16 +11622,19 @@ static void TrackView_ShapeVertices(void *context, uint8_t *shape) {
 	ctx->vertexRecordCount = count;
 	SlipRendererState *const hostRenderer = ctx->trackContext->hostRenderer;
 	if (hostRenderer != NULL) {
-		if (!TrackView_BuildVertexRecords(ctx->trackContext, 0x00026242u, shape + ctx->shape.vertexOffset + 2u,
-		                                  ctx->shape.size - ctx->shape.vertexOffset - 2u, count, 6, NULL, NULL, NULL))
+		if (!TrackView_BuildVertexRecords(ctx->trackContext, TRACK_VIEW_DIAGNOSTIC_PREVIEW_BUILD_VERTEX_RECORDS,
+		                                  shape + ctx->shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
+		                                  ctx->shape.size - ctx->shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES,
+		                                  count, SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL))
 			SlipRuntime_Fatal("Could not bind shape vertex workspace");
 		ctx->vertexRecords = ctx->trackContext->vertexRecords;
 	} else {
 		ctx->vertexRecords = malloc((size_t)count * sizeof(*ctx->vertexRecords));
 		if (ctx->vertexRecords == NULL ||
-		    !SlipDraw3D_BuildVertexRecords(ctx->vertexRecords, count, shape + ctx->shape.vertexOffset + 2u,
-		                                   ctx->shape.size - ctx->shape.vertexOffset - 2u, count, 6, NULL, NULL, NULL,
-		                                   0, 0, NULL))
+		    !SlipDraw3D_BuildVertexRecords(ctx->vertexRecords, count,
+		                                   shape + ctx->shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
+		                                   ctx->shape.size - ctx->shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES,
+		                                   count, SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL, 0, 0, NULL))
 			SlipRuntime_Fatal("Could not allocate shape vertices");
 	}
 	ctx->trackContext->vertexRecords = ctx->vertexRecords;
@@ -10920,11 +11661,11 @@ static void TrackView_ShapeSortNode(void *context, uint32_t index, uint16_t type
                                     const uint8_t *node) {
 	TrackViewShapeBinding *const binding = context;
 	VehicleViewRenderContext *const ctx = &binding->render;
-	if (type == 1 && (ctx->actor != NULL || ctx->trackContext->articSortCallback)) {
+	if (type == SLIP_SHAPE_SORT_NODE_CHILD && (ctx->actor != NULL || ctx->trackContext->articSortCallback)) {
 		SlipShape3DPrimitive child = {.primitiveOffset = index,
 		                              .nodeKind = type,
 		                              .firstChildOffset = SlipBytes_ReadLE32(node),
-		                              .secondChildOffset = SlipBytes_ReadLE32(node + 4)};
+		                              .secondChildOffset = SlipBytes_ReadLE32(node + SLIP_SHAPE_SORT_CHILD_1_OFFSET)};
 		TrackViewRawBspContext *const track = ctx->trackContext;
 		if (ctx->actor != NULL ? ctx->actor->drawChildrenAfterParent : track->articDrawChildren == 0)
 			return;
@@ -10974,7 +11715,9 @@ static void TrackView_ShapeUnsorted(void *context, uint8_t *shape) {
 static void TrackView_ShapeRestoreVertexCursor(void *context) {
 	TrackViewShapeBinding *const binding = context;
 	SlipRendererState *const hostRenderer = binding->render.trackContext->hostRenderer;
-	if (hostRenderer != NULL && !TrackView_RestoreVertexBufferCursor(binding->render.trackContext, 0x00025d80u))
+	if (hostRenderer != NULL &&
+	    !TrackView_RestoreVertexBufferCursor(binding->render.trackContext,
+	                                         TRACK_VIEW_DIAGNOSTIC_ACTOR_PREVIEW_RESTORE_VERTEX_CURSOR))
 		SlipRuntime_Fatal("Could not restore shape vertex workspace");
 }
 
@@ -11089,7 +11832,7 @@ static bool TrackView_DrawShape(const SlipResourcePayload *residentShape, TrackV
 			}
 		}
 		if (sceneryMaterialsSource != context->materialTable ||
-		    (context->materialTableBytes >= 4u &&
+		    (context->materialTableBytes >= SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES &&
 		     sceneryMaterialsCount != SlipBytes_ReadLE32(context->materialTable))) {
 			if (TrackView_VehicleViewMaterialsFromTrackTable(context->materialTable, context->materialTableBytes,
 			                                                 &sceneryMaterials)) {
@@ -11117,16 +11860,16 @@ static bool TrackView_DrawShape(const SlipResourcePayload *residentShape, TrackV
 bool TrackViewDrawSceneryShape(TrackViewRawBspContext *context, const uint8_t *record, size_t recordBytes,
                                const SlipView3DMatrix *objectMatrix, const SlipView3DMatrix *viewMatrix,
                                SlipView3DVec32 viewPosition, SlipView3DVec32 worldPosition) {
-	char shapeName[13];
-	if (record == NULL || recordBytes < 0x3au) {
+	char shapeName[SLIP_TRK_SHAPE_NAME_BYTES + 1];
+	if (record == NULL || recordBytes < SLIP_TRK_SHAPE_WITH_FACING_BYTES) {
 		return false;
 	}
 
-	memcpy(shapeName, record, 12u);
-	shapeName[12] = '\0';
+	memcpy(shapeName, record, SLIP_TRK_SHAPE_NAME_BYTES);
+	shapeName[SLIP_TRK_SHAPE_NAME_BYTES] = '\0';
 	const uint16_t savedResource = context->hostShapeResource;
 	if (context->resourceRegistry->hostResources)
-		context->hostShapeResource = SlipBytes_ReadLE16(record + 0x0cu);
+		context->hostShapeResource = SlipBytes_ReadLE16(record + SLIP_TRK_SHAPE_HANDLE_OFFSET);
 	bool result = TrackView_DrawShape(NULL, context, shapeName, objectMatrix, viewMatrix, viewPosition, worldPosition);
 	context->hostShapeResource = savedResource;
 	return result;
@@ -11224,10 +11967,11 @@ bool TrackView_DrawDoor(TrackViewRawBspContext *context, uint32_t object) {
 	    !SlipObject_GetDrawData(context->objectTable, context->objectTableBytes, object, &privateState))
 		return false;
 	/* Translate the original static-table pointer to its typed host record. */
-	const uint32_t doorOffset = privateState.drawData - 0x339a6u;
-	if (doorOffset % 0x64u != 0 || doorOffset / 0x64u >= 8u)
+	const uint32_t doorOffset = privateState.drawData - SLIP_TRACK_DOOR_TABLE_DOS_TOKEN;
+	if (doorOffset % SLIP_TRACK_DOOR_RECORD_BYTES != 0 ||
+	    doorOffset / SLIP_TRACK_DOOR_RECORD_BYTES >= SLIP_TRACK_DOOR_CAPACITY)
 		return false;
-	const SlipTrackDoorRecord *const door = &SlipTrackWorld_doors[doorOffset / 0x64u];
+	const SlipTrackDoorRecord *const door = &SlipTrackWorld_doors[doorOffset / SLIP_TRACK_DOOR_RECORD_BYTES];
 	SlipResourcePayload payload = SlipResourceHost_Payload(door->shapeHandle);
 	clipDirection = (SlipView3DVec16){door->directionX, door->directionY, door->directionZ};
 	if (!SlipObject_Position(context->objectTable, context->objectTableBytes, 0, &cameraPosition) ||
@@ -11251,7 +11995,7 @@ bool TrackView_DrawDoor(TrackViewRawBspContext *context, uint32_t object) {
 		const SlipView3DMatrix *const drawMatrix = SlipObject_DrawMatrix(context->objectTable, (uint16_t)object);
 
 		const uint8_t *const shapeBytes = SlipResourceHost_Lock(NULL, door->shapeHandle);
-		const uint32_t radius = SlipBytes_ReadLE32(shapeBytes + 0x1c);
+		const uint32_t radius = SlipBytes_ReadLE32(shapeBytes + SLIP_SHAPE_RADIUS_OFFSET);
 		SlipResourceHost_Unlock(NULL, door->shapeHandle);
 		if (!TrackView_SphereCullCallback(view, radius, &context->frustum)) {
 			const uint16_t previousResource = context->hostShapeResource;
@@ -11425,14 +12169,14 @@ static uint8_t *TrackView_ArticPointer(TrackViewRawBspContext *context, uint32_t
 }
 
 static void TrackView_ArticReadMatrix(const uint8_t *source, SlipView3DMatrix *matrix) {
-	for (size_t i = 0; i < 9u; ++i) {
-		matrix->m[i] = (int16_t)SlipBytes_ReadLE16(source + i * 2u);
+	for (size_t i = 0; i < sizeof(matrix->m) / sizeof(matrix->m[0]); ++i) {
+		matrix->m[i] = (int16_t)SlipBytes_ReadLE16(source + i * sizeof(matrix->m[0]));
 	}
 }
 
 static void TrackView_ArticWriteMatrix(uint8_t *destination, const SlipView3DMatrix *matrix) {
-	for (size_t i = 0; i < 9u; ++i) {
-		TrackView_WriteLE16(destination + i * 2u, (uint16_t)matrix->m[i]);
+	for (size_t i = 0; i < sizeof(matrix->m) / sizeof(matrix->m[0]); ++i) {
+		TrackView_WriteLE16(destination + i * sizeof(matrix->m[0]), (uint16_t)matrix->m[i]);
 	}
 }
 
@@ -11495,46 +12239,49 @@ static bool TrackView_ArticPrepare(TrackViewRawBspContext *context, uint8_t *par
 	if (context == NULL || part == NULL || context->objectTable == NULL) {
 		return false;
 	}
-	TrackView_WriteLE32(part + 0x20u, UINT32_MAX);
+	TrackView_WriteLE32(part + offsetof(SlipArticPartRecord, header.drawShape), UINT32_MAX);
 	if (!TrackView_ArticShape(context, part, &shapeHandle, &carry)) {
 		return false;
 	}
 	if (!carry) {
-		TrackView_WriteLE32(part + 0x20u, shapeHandle);
+		TrackView_WriteLE32(part + offsetof(SlipArticPartRecord, header.drawShape), shapeHandle);
 	}
 
-	TrackView_ArticReadMatrix(part + 0xe4u, &localMatrix);
+	TrackView_ArticReadMatrix(part + offsetof(SlipArticPartRecord, worldMatrix), &localMatrix);
 	if (!SlipObject_MatrixCopy(context->objectTable, context->objectTableBytes, 0, &cameraMatrix, &matrixCopy)) {
 		return false;
 	}
 	SlipView3D_ComposeMatrix(&localMatrix, &cameraMatrix, &drawMatrix);
-	TrackView_ArticWriteMatrix(part + 0xf6u, &drawMatrix);
+	TrackView_ArticWriteMatrix(part + offsetof(SlipArticPartRecord, drawMatrix), &drawMatrix);
 
 	if (!SlipObject_Position(context->objectTable, context->objectTableBytes, 0, &cameraPosition)) {
 		return false;
 	}
-	worldDelta.x = (int32_t)(0u - cameraPosition.positionX + SlipBytes_ReadLE32(part + 0x24u) +
+	worldDelta.x = (int32_t)(0u - cameraPosition.positionX +
+	                         SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.worldPosition.x)) +
 	                         (uint32_t)context->articActorPosition.x);
-	worldDelta.y = (int32_t)(0u - cameraPosition.positionY + SlipBytes_ReadLE32(part + 0x28u) +
+	worldDelta.y = (int32_t)(0u - cameraPosition.positionY +
+	                         SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.worldPosition.y)) +
 	                         (uint32_t)context->articActorPosition.y);
-	worldDelta.z = (int32_t)(0u - cameraPosition.positionZ + SlipBytes_ReadLE32(part + 0x2cu) +
+	worldDelta.z = (int32_t)(0u - cameraPosition.positionZ +
+	                         SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.worldPosition.z)) +
 	                         (uint32_t)context->articActorPosition.z);
 	drawPosition = SlipView3D_TransformPositionByRows(&cameraMatrix, worldDelta);
-	TrackView_WriteLE32(part + 0x30u, (uint32_t)drawPosition.x);
-	TrackView_WriteLE32(part + 0x34u, (uint32_t)drawPosition.y);
-	TrackView_WriteLE32(part + 0x38u, (uint32_t)drawPosition.z);
+	TrackView_WriteLE32(part + offsetof(SlipArticPartRecord, header.drawPosition.x), (uint32_t)drawPosition.x);
+	TrackView_WriteLE32(part + offsetof(SlipArticPartRecord, header.drawPosition.y), (uint32_t)drawPosition.y);
+	TrackView_WriteLE32(part + offsetof(SlipArticPartRecord, header.drawPosition.z), (uint32_t)drawPosition.z);
 
-	firstChildAddress = SlipBytes_ReadLE32(part + 0x08u);
+	firstChildAddress = SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.firstChild));
 	if (firstChildAddress != 0) {
 		uint32_t childAddress = firstChildAddress;
 
 		do {
-			uint8_t *const childPart = TrackView_ArticPointer(context, childAddress, 0x108u);
+			uint8_t *const childPart = TrackView_ArticPointer(context, childAddress, SLIP_ARTIC_PART_DRAW_MATRICES_END);
 
 			if (childPart == NULL || !TrackView_ArticPrepare(context, childPart)) {
 				return false;
 			}
-			childAddress = SlipBytes_ReadLE32(childPart + 0x0cu);
+			childAddress = SlipBytes_ReadLE32(childPart + offsetof(SlipArticPartRecord, header.nextSibling));
 		} while (childAddress != firstChildAddress);
 	}
 	return true;
@@ -11557,7 +12304,7 @@ static bool TrackView_ArticDrawOne(TrackViewRawBspContext *context, uint8_t *par
 	if (context == NULL || part == NULL || context->resourceRegistry == NULL || context->projectState == NULL) {
 		return false;
 	}
-	shapeHandle = SlipBytes_ReadLE32(part + 0x20u);
+	shapeHandle = SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.drawShape));
 	if (shapeHandle == UINT32_MAX) {
 		return true;
 	}
@@ -11566,15 +12313,19 @@ static bool TrackView_ArticDrawOne(TrackViewRawBspContext *context, uint8_t *par
 	    !SlipObject_Position(context->objectTable, context->objectTableBytes, 0, &cameraPosition)) {
 		return false;
 	}
-	TrackView_ArticReadMatrix(part + 0xe4u, &localMatrix);
-	TrackView_ArticReadMatrix(part + 0xf6u, &drawMatrix);
+	TrackView_ArticReadMatrix(part + offsetof(SlipArticPartRecord, worldMatrix), &localMatrix);
+	TrackView_ArticReadMatrix(part + offsetof(SlipArticPartRecord, drawMatrix), &drawMatrix);
 	drawPosition =
-	    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(part + 0x30u), (int32_t)SlipBytes_ReadLE32(part + 0x34u),
-	                      (int32_t)SlipBytes_ReadLE32(part + 0x38u)};
+	    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.drawPosition.x)),
+	                      (int32_t)SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.drawPosition.y)),
+	                      (int32_t)SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.drawPosition.z))};
 	worldPosition =
-	    (SlipView3DVec32){(int32_t)(SlipBytes_ReadLE32(part + 0x24u) + (uint32_t)context->articActorPosition.x),
-	                      (int32_t)(SlipBytes_ReadLE32(part + 0x28u) + (uint32_t)context->articActorPosition.y),
-	                      (int32_t)(SlipBytes_ReadLE32(part + 0x2cu) + (uint32_t)context->articActorPosition.z)};
+	    (SlipView3DVec32){(int32_t)(SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.worldPosition.x)) +
+	                                (uint32_t)context->articActorPosition.x),
+	                      (int32_t)(SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.worldPosition.y)) +
+	                                (uint32_t)context->articActorPosition.y),
+	                      (int32_t)(SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.worldPosition.z)) +
+	                                (uint32_t)context->articActorPosition.z)};
 	cameraDelta = (SlipView3DVec32){(int32_t)(cameraPosition.positionX - (uint32_t)worldPosition.x),
 	                                (int32_t)(cameraPosition.positionY - (uint32_t)worldPosition.y),
 	                                (int32_t)(cameraPosition.positionZ - (uint32_t)worldPosition.z)};
@@ -11607,17 +12358,17 @@ static bool TrackView_ArticDraw(TrackViewRawBspContext *context, uint8_t *part) 
 	if (context->articDrawChildren != 0) {
 		return true;
 	}
-	firstChildAddress = SlipBytes_ReadLE32(part + 0x08u);
+	firstChildAddress = SlipBytes_ReadLE32(part + offsetof(SlipArticPartRecord, header.firstChild));
 	if (firstChildAddress != 0) {
 		uint32_t childAddress = firstChildAddress;
 
 		do {
-			uint8_t *const childPart = TrackView_ArticPointer(context, childAddress, 0x108u);
+			uint8_t *const childPart = TrackView_ArticPointer(context, childAddress, SLIP_ARTIC_PART_DRAW_MATRICES_END);
 
 			if (childPart == NULL || !TrackView_ArticDraw(context, childPart)) {
 				return false;
 			}
-			childAddress = SlipBytes_ReadLE32(childPart + 0x0cu);
+			childAddress = SlipBytes_ReadLE32(childPart + offsetof(SlipArticPartRecord, header.nextSibling));
 		} while (childAddress != firstChildAddress);
 	}
 	return true;
@@ -11652,13 +12403,13 @@ static bool TrackView_ArticDrawCallback(TrackViewRawBspContext *context, uint16_
 	context->articActor = actorRecord;
 	context->articDrawChildren = actor->childrenInSortTree;
 	product = (uint64_t)((int64_t)(int32_t)TrackView_ProjectionReciprocal(context) * (int64_t)context->articViewDepth);
-	lodDistance = (int32_t)(uint32_t)(product >> 16);
-	for (lodIndex = 0; lodIndex < 8u; ++lodIndex) {
+	lodDistance = (int32_t)(uint32_t)(product >> SLIP_DRAW3D_SCALE_FRACTION_BITS);
+	for (lodIndex = 0; lodIndex < SLIP_ART_LOD_COUNT; ++lodIndex) {
 		if (lodDistance < (int32_t)actor->lodDistances[lodIndex]) {
 			break;
 		}
 	}
-	if (lodIndex == 8u) {
+	if (lodIndex == SLIP_ART_LOD_COUNT) {
 		return true;
 	}
 	if (lodIndex < context->articMinimumLod) {
@@ -11666,7 +12417,7 @@ static bool TrackView_ArticDrawCallback(TrackViewRawBspContext *context, uint16_
 	}
 	context->articSelectedLod = lodIndex;
 	rootPartAddress = actor->parts[0];
-	rootPart = TrackView_ArticPointer(context, rootPartAddress, 0x108u);
+	rootPart = TrackView_ArticPointer(context, rootPartAddress, SLIP_ARTIC_PART_DRAW_MATRICES_END);
 	if (rootPart == NULL || !TrackView_ArticPrepare(context, rootPart)) {
 		return false;
 	}
@@ -11690,14 +12441,16 @@ static bool TrackView_ApplyPostPlaneProjection(TrackViewRawBspContext *context, 
 	                         context->postPlaneNormalY);
 	dotProduct += (uint64_t)((int64_t)(int32_t)((uint32_t)point.z - (uint32_t)context->postPlanePointZ) *
 	                         context->postPlaneNormalZ);
-	planeDot = (uint32_t)(dotProduct >> 14) + (uint32_t)((dotProduct >> 13) & 1u);
+	planeDot =
+	    (uint32_t)(dotProduct >> SLIP_NORMAL_FRACTION_BITS) + (uint32_t)((dotProduct >> SLIP_NORMAL_ROUND_BIT) & 1u);
 	if ((int32_t)planeDot < 0) {
 		*pointOut = point;
 		*carryOut = true;
 		return true;
 	}
 	scaleProduct = (uint64_t)planeDot * context->postPlaneScale;
-	projectionScale = (uint32_t)(scaleProduct >> 16) + (uint32_t)((scaleProduct >> 15) & 1u);
+	projectionScale = (uint32_t)(scaleProduct >> SLIP_DRAW3D_SCALE_FRACTION_BITS) +
+	                  (uint32_t)((scaleProduct >> (SLIP_DRAW3D_SCALE_FRACTION_BITS - 1)) & 1u);
 	scaled = SlipView3D_ScaleVector((int16_t)context->cameraLightX, (int16_t)context->cameraLightY,
 	                                (int16_t)context->cameraLightZ, (int32_t)projectionScale);
 	*pointOut = (SlipView3DVec32){(int32_t)((uint32_t)point.x + (uint32_t)scaled.x),
@@ -11722,8 +12475,8 @@ static bool TrackView_ShadowBounds(TrackViewRawBspContext *context, const SlipSh
 		return false;
 	if (carry)
 		return true;
-	const int32_t radius =
-	    (int32_t)((uint64_t)((int64_t)(int32_t)context->postPlaneScale * shape->boundingRadius) >> 16);
+	const int32_t radius = (int32_t)((uint64_t)((int64_t)(int32_t)context->postPlaneScale * shape->boundingRadius) >>
+	                                 SLIP_DRAW3D_SCALE_FRACTION_BITS);
 	if (!SlipTrackWorld_SphereCull(projected, radius, &context->frustum, &carry))
 		return false;
 	if (carry)
@@ -11732,13 +12485,13 @@ static bool TrackView_ShadowBounds(TrackViewRawBspContext *context, const SlipSh
 	if (shape->size < sizeof(header))
 		return false;
 	memcpy(&header, shape->data, sizeof(header));
-	const SlipView3DVec32 corners[8] = {
+	const SlipView3DVec32 corners[SLIP_TRACK_BOUNDING_CORNER_COUNT] = {
 	    {header.minimumX, header.minimumY, header.minimumZ}, {header.minimumX, header.minimumY, header.maximumZ},
 	    {header.maximumX, header.minimumY, header.maximumZ}, {header.maximumX, header.minimumY, header.minimumZ},
 	    {header.minimumX, header.maximumY, header.minimumZ}, {header.minimumX, header.maximumY, header.maximumZ},
 	    {header.maximumX, header.maximumY, header.maximumZ}, {header.maximumX, header.maximumY, header.minimumZ}};
-	uint16_t all = 0xffffu;
-	for (size_t i = 0; i < 8; ++i) {
+	uint16_t all = UINT16_MAX;
+	for (size_t i = 0; i < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++i) {
 
 		SlipView3DVec32 point = SlipView3D_TransformPositionByColumns(&view->matrix, corners[i]);
 		point.x = (int32_t)((uint32_t)point.x + (uint32_t)view->translation.x);
@@ -11752,7 +12505,7 @@ static bool TrackView_ShadowBounds(TrackViewRawBspContext *context, const SlipSh
 			    TrackView_VehicleViewProjectMask((SlipDraw3DVec32){projected.x, projected.y, projected.z}, view),
 			    view->projectState.minZ, view->projectState.maxZ);
 			if (mask == 0) {
-				if (i < 7) {
+				if (i < SLIP_TRACK_BOUNDING_CORNER_COUNT - 1) {
 					*rejected = false;
 					return true;
 				}
@@ -11768,23 +12521,28 @@ static bool TrackView_ShadowBounds(TrackViewRawBspContext *context, const SlipSh
 static bool TrackView_ShadowPolygon(TrackViewRawBspContext *context, VehicleViewRenderContext *view,
                                     const uint8_t *primitive, size_t primitiveBytes) {
 	SlipDraw3DRecordPool *const pool = context->drawRecordPool;
-	SlipDraw3DReturnActiveVisit returnedVisits[64];
+	SlipDraw3DReturnActiveVisit returnedVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	SlipDraw3DReturnActiveRing returned;
-	if (!SlipDraw3D_ReturnActiveRing(pool, returnedVisits, 64, &returned) || primitiveBytes < 12)
+	if (!SlipDraw3D_ReturnActiveRing(pool, returnedVisits, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &returned) ||
+	    primitiveBytes < SLIP_PRIMITIVE_HEADER_BYTES)
 		return false;
 	SlipDraw3DVec32 light = context->drawStateRecord->lightVector;
-	const int16_t dot = (int16_t)SlipView3D_DotProductQ14(
-	    SlipBytes_ReadLE16(primitive + 2), SlipBytes_ReadLE16(primitive + 4), SlipBytes_ReadLE16(primitive + 6),
-	    (uint16_t)light.x, (uint16_t)light.y, (uint16_t)light.z, NULL);
+	const int16_t dot =
+	    (int16_t)SlipView3D_DotProductQ14(SlipBytes_ReadLE16(primitive + SLIP_PRIMITIVE_NORMAL_X_OFFSET),
+	                                      SlipBytes_ReadLE16(primitive + SLIP_PRIMITIVE_NORMAL_Y_OFFSET),
+	                                      SlipBytes_ReadLE16(primitive + SLIP_PRIMITIVE_NORMAL_Z_OFFSET),
+	                                      (uint16_t)light.x, (uint16_t)light.y, (uint16_t)light.z, NULL);
 	if (dot >= 0)
 		return true;
-	const uint16_t count = SlipBytes_ReadLE16(primitive) & 0x3fffu;
-	if (count == 0 || count > 64 || primitiveBytes - 12 < (size_t)count * 2)
+	const uint16_t count = SlipBytes_ReadLE16(primitive) & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
+	if (count == 0 || count > SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT ||
+	    primitiveBytes - SLIP_PRIMITIVE_HEADER_BYTES < (size_t)count * SLIP_SERIALIZED_INDEX_BYTES)
 		return false;
 	context->materialColor = (uint8_t)context->postPlaneColor;
 	uint32_t all = UINT32_MAX;
 	for (size_t i = 0; i < count; ++i) {
-		const uint16_t index = SlipBytes_ReadLE16(primitive + 12 + i * 2);
+		const uint16_t index =
+		    SlipBytes_ReadLE16(primitive + SLIP_PRIMITIVE_HEADER_BYTES + i * SLIP_SERIALIZED_INDEX_BYTES);
 		if (index >= view->vertexRecordCount)
 			return false;
 		SlipDraw3DVertexRecord *const vertex = &view->vertexRecords[index];
@@ -11803,16 +12561,16 @@ static bool TrackView_ShadowPolygon(TrackViewRawBspContext *context, VehicleView
 		}
 		uint32_t mask = TrackView_VehicleViewProjectMask(vertex->world, view);
 		if (vertex->world.z <= view->projectState.minZ)
-			mask |= 0x10u;
+			mask |= SLIP_BOX_CLIP_NEAR;
 		if (vertex->world.z >= view->projectState.maxZ)
-			mask |= 0x20u;
+			mask |= SLIP_BOX_CLIP_FAR;
 		all &= mask;
 	}
 	if (all != 0)
 		return true;
 
 	uint32_t first = 0, previous = 0;
-	all = 0x21f8u;
+	all = SLIP_CLIP_ALL;
 	uint32_t any = 0;
 	for (size_t i = 0; i < count; ++i) {
 		SlipDraw3DLinkedDrawRecord *const sentinel = &pool->records[pool->freeHeadOffset / sizeof(pool->records[0])];
@@ -11829,7 +12587,8 @@ static bool TrackView_ShadowPolygon(TrackViewRawBspContext *context, VehicleView
 			pool->records[previous / sizeof(pool->records[0])].links.nextOffset = current;
 			record->links.prevOffset = previous;
 		}
-		SlipDraw3DVertexRecord *const vertex = &view->vertexRecords[SlipBytes_ReadLE16(primitive + 12 + i * 2)];
+		SlipDraw3DVertexRecord *const vertex = &view->vertexRecords[SlipBytes_ReadLE16(
+		    primitive + SLIP_PRIMITIVE_HEADER_BYTES + i * SLIP_SERIALIZED_INDEX_BYTES)];
 		const uint32_t flags =
 		    SlipDraw3D_ProjectVertex(vertex, &view->projectState, TrackView_VehicleViewTransform,
 		                             TrackView_VehicleViewProject, TrackView_VehicleViewProject, view);
@@ -11845,11 +12604,12 @@ static bool TrackView_ShadowPolygon(TrackViewRawBspContext *context, VehicleView
 	pool->records[previous / sizeof(pool->records[0])].links.nextOffset = first;
 	pool->records[first / sizeof(pool->records[0])].links.prevOffset = previous;
 
-	SlipDraw3DClipFlagVisit flags[64];
-	SlipDraw3DPostPlaneBoundsVisit bounds[64];
+	SlipDraw3DClipFlagVisit flags[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+	SlipDraw3DPostPlaneBoundsVisit bounds[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 
-	SlipDraw3DPostPlaneClipRecordVisit records[64 * 64];
-	SlipDraw3DPostPlaneClipPlaneVisit planes[64];
+	SlipDraw3DPostPlaneClipRecordVisit
+	    records[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT * SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
+	SlipDraw3DPostPlaneClipPlaneVisit planes[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	SlipDraw3DClipDispatchExecute dispatch;
 	TrackViewPostPlaneArgs post = TrackView_PostPlaneArgs(context);
 	SlipDraw3DProjectState *const state = &view->projectState;
@@ -11857,18 +12617,21 @@ static bool TrackView_ShadowPolygon(TrackViewRawBspContext *context, VehicleView
 	        SlipDraw3D_RecordPoolBytes(pool), SlipDraw3D_RecordPoolByteSize(), first, pool->freeHeadOffset, any, all,
 	        state->renderFlags, 0, state->minZ, state->maxZ, state->minX, state->maxX, state->minY, state->maxY,
 	        TrackView_VehicleViewProject, TrackView_VehicleViewProject, view, post.hasPostPlanes, post.planeBase,
-	        post.planeBytes, post.planeHeadOffset, post.limitXMin, post.limitXMax, post.limitYMin, post.limitYMax, 64,
-	        flags, 64, bounds, 64, records, 64 * 64, planes, 64, &dispatch))
+	        post.planeBytes, post.planeHeadOffset, post.limitXMin, post.limitXMax, post.limitYMin, post.limitYMax,
+	        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, flags, SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, bounds,
+	        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, records,
+	        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT * SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, planes,
+	        SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &dispatch))
 		return false;
 	pool->inputActiveHeadOffset = dispatch.activeHeadOffsetOut;
 	if (dispatch.dispatch.carryOut)
 		return true;
-	SlipDraw3DRasterPoint points[64];
+	SlipDraw3DRasterPoint points[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 	SlipDraw3DFlatRingDispatch raster;
 	return SlipDraw3D_RasterizeFlatRing(
 	           pool, pool->inputActiveHeadOffset, 0, context->rendererFlags, (uint8_t)context->postPlaneColor, 0,
 	           context->reverseTraversal == 0 ? SLIP_DRAW3D_RECORD_NEXT_OFFSET : SLIP_DRAW3D_RECORD_PREV_OFFSET, points,
-	           64, &raster) != 0;
+	           SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &raster) != 0;
 }
 
 static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t resource, const char *name,
@@ -11889,7 +12652,7 @@ static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t reso
 	} else if (!SlipResource_LoadByName(context->resourceRegistry->archives, context->resourceRegistry->archiveCount,
 	                                    name, &payload))
 		return false;
-	if (!SlipShape3D_FromPayload(payload.data, payload.size, &shape) || shape.version != 12 ||
+	if (!SlipShape3D_FromPayload(payload.data, payload.size, &shape) || shape.version != SLIP_SHAPE_VERSION ||
 	    !SlipShape3D_GetVertexCount(&shape, &vertexCount))
 		return false;
 	VehicleViewRenderContext view = {0};
@@ -11905,30 +12668,33 @@ static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t reso
 			SlipResourceHost_Unlock(NULL, resource);
 		return true;
 	}
-	view.projectState.renderFlags = shape.scaleShift == 0 ? 0 : 1;
+	view.projectState.renderFlags = shape.scaleShift == 0 ? 0 : SLIP_SHAPE_SHORT_COORDINATES;
 	view.vertexRecordCount = vertexCount;
 	bool ok;
 	if (context->hostRenderer != NULL) {
-		ok = TrackView_BuildVertexRecords(context, 0x00026242u, shape.data + shape.vertexOffset + 2,
-		                                  shape.size - shape.vertexOffset - 2, vertexCount, 6, NULL, NULL, NULL);
+		ok = TrackView_BuildVertexRecords(context, TRACK_VIEW_DIAGNOSTIC_PREVIEW_BUILD_VERTEX_RECORDS,
+		                                  shape.data + shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
+		                                  shape.size - shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES, vertexCount,
+		                                  SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL);
 		view.vertexRecords = context->vertexRecords;
 	} else {
 		view.vertexRecords = malloc((size_t)vertexCount * sizeof(*view.vertexRecords));
 		if (view.vertexRecords == NULL)
 			return false;
-		ok = SlipDraw3D_BuildVertexRecords(view.vertexRecords, vertexCount, shape.data + shape.vertexOffset + 2,
-		                                   shape.size - shape.vertexOffset - 2, vertexCount, 6, NULL, NULL, NULL, 0, 0,
-		                                   NULL) != 0;
+		ok = SlipDraw3D_BuildVertexRecords(view.vertexRecords, vertexCount,
+		                                   shape.data + shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
+		                                   shape.size - shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES, vertexCount,
+		                                   SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL, 0, 0, NULL) != 0;
 	}
 	if (ok && shape.primitiveOffset != 0) {
-		if ((shape.primitiveOffset > shape.size || shape.size - shape.primitiveOffset < 2)) {
+		if ((shape.primitiveOffset > shape.size || shape.size - shape.primitiveOffset < SLIP_SHAPE_TABLE_COUNT_BYTES)) {
 			ok = false;
 		} else {
 			const uint16_t count = SlipBytes_ReadLE16(shape.data + shape.primitiveOffset);
-			uint32_t offset = shape.primitiveOffset + 2;
+			uint32_t offset = shape.primitiveOffset + SLIP_SHAPE_TABLE_COUNT_BYTES;
 			for (size_t i = 0; ok && i < count; ++i) {
 				SlipShape3DPrimitiveAdvanceWrapper advance = {0};
-				ok = (offset <= shape.size && shape.size - offset >= 12) &&
+				ok = (offset <= shape.size && shape.size - offset >= SLIP_PRIMITIVE_HEADER_BYTES) &&
 				     TrackView_ShadowPolygon(context, &view, shape.data + offset, shape.size - offset) &&
 				     SlipShape3D_PrimitiveAdvanceWrapper(shape.data + offset, shape.size - offset, offset, &advance);
 				if (ok)
@@ -11940,7 +12706,9 @@ static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t reso
 	if (hostResource)
 		SlipResourceHost_Unlock(NULL, resource);
 	if (context->hostRenderer != NULL)
-		ok = TrackView_RestoreVertexBufferCursor(context, 0x00025efdu) && ok;
+		ok =
+		    TrackView_RestoreVertexBufferCursor(context, TRACK_VIEW_DIAGNOSTIC_VEHICLE_PREVIEW_RESTORE_VERTEX_CURSOR) &&
+		    ok;
 	else
 		free(view.vertexRecords);
 	return ok;
@@ -11984,19 +12752,19 @@ bool TrackView_ExecuteArticDrawCallback(TrackViewRawBspContext *context, uint32_
 		return false;
 	}
 	product = (uint64_t)((int64_t)(int32_t)TrackView_ProjectionReciprocal(context) * (int64_t)context->articViewDepth);
-	lodDistance = (int32_t)(uint32_t)(product >> 16);
+	lodDistance = (int32_t)(uint32_t)(product >> SLIP_DRAW3D_SCALE_FRACTION_BITS);
 	if (!SlipArticSlot_TestOwner(objectOffset, context->objectTable, context->objectTableBytes, context->articSlotPool,
 	                             context->articSlotPoolBytes, context->articSlotPoolAddress, &actorRecord, &zeroFlag)) {
 		return false;
 	}
 
 	const SlipArticActorHeader *const actor = (const void *)actorRecord;
-	for (lodIndex = 0; lodIndex < 8u; ++lodIndex) {
+	for (lodIndex = 0; lodIndex < SLIP_ART_LOD_COUNT; ++lodIndex) {
 		if (lodDistance < (int32_t)actor->replayLodDistances[lodIndex]) {
 			break;
 		}
 	}
-	if (lodIndex == 8u) {
+	if (lodIndex == SLIP_ART_LOD_COUNT) {
 		return true;
 	}
 	if (lodIndex < context->articMinimumLod) {
@@ -12005,7 +12773,7 @@ bool TrackView_ExecuteArticDrawCallback(TrackViewRawBspContext *context, uint32_
 	context->articReplayLod = lodIndex;
 	context->articActor = actorRecord;
 	rootPartAddress = actor->parts[0];
-	rootPart = TrackView_ArticPointer(context, rootPartAddress, 0x108u);
+	rootPart = TrackView_ArticPointer(context, rootPartAddress, SLIP_ARTIC_PART_DRAW_MATRICES_END);
 	if (rootPart == NULL || !TrackView_ArticReplayShape(context, rootPart, &shapeHandle, &shapeCarry)) {
 		return false;
 	}
@@ -12066,8 +12834,9 @@ static int TrackView_ArticSortCallback(VehicleViewRenderContext *ctx, const Slip
 	if ((primitive->firstChildOffset | primitive->secondChildOffset) != 0) {
 		return 0;
 	}
-	partAddress = SlipBytes_ReadLE32(context->articActor + 0x30u + primitive->primitiveOffset * 4u);
-	part = TrackView_ArticPointer(context, partAddress, 0x108u);
+	partAddress = SlipBytes_ReadLE32(context->articActor + offsetof(SlipArticActorHeader, parts) +
+	                                 primitive->primitiveOffset * SLIP_ARTIC_PART_POINTER_BYTES);
+	part = TrackView_ArticPointer(context, partAddress, SLIP_ARTIC_PART_DRAW_MATRICES_END);
 	if (part == NULL) {
 		return 0;
 	}
@@ -12088,7 +12857,7 @@ static int TrackView_VehicleViewDrawSortChild(VehicleViewRenderContext *ctx, uin
 bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DMatrix *actorObjectMatrix,
                                     uint16_t frameStep) {
 	SlipShape3D_Initialize();
-	char secondaryPath[512];
+	char secondaryPath[SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES];
 	const char *archives[2];
 	size_t archiveCount;
 	SlipResourcePayload artPayload = {0};
@@ -12107,11 +12876,11 @@ bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DM
 	SlipView3DMatrix staticActorObjectMatrix;
 	SlipView3DMatrix cameraMatrix;
 	SlipDraw3DProjectState projectState;
-	SlipView3DVec32 actorPosition = {0x374986, 0x603e1, 0x473546};
+	SlipView3DVec32 actorPosition = {SLIP_VIEWER_OBJECT_X, SLIP_VIEWER_OBJECT_Y, SLIP_VIEWER_OBJECT_Z};
 	SlipView3DVec32 cameraPosition;
 	SlipView3DVec32 cameraOffset;
-	char artName[32];
-	char materialName[32];
+	char artName[SLIP_VEHICLE_PREVIEW_RESOURCE_NAME_BYTES];
+	char materialName[SLIP_VEHICLE_PREVIEW_RESOURCE_NAME_BYTES];
 	const int16_t angle = 0;
 	bool ok = false;
 
@@ -12161,7 +12930,10 @@ bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DM
 	cameraPosition.y = actorPosition.y + cameraOffset.y;
 	cameraPosition.z = actorPosition.z + cameraOffset.z;
 
-	SlipDraw3D_SetViewport(&projectState, 31, 14, 287, 183, 159, 98 + g_vehicleViewParams[driver].centerYOffset);
+	SlipDraw3D_SetViewport(&projectState, SLIP_VEHICLE_PREVIEW_VIEWPORT_LEFT, SLIP_VEHICLE_PREVIEW_VIEWPORT_TOP,
+	                       SLIP_VEHICLE_PREVIEW_VIEWPORT_RIGHT, SLIP_VEHICLE_PREVIEW_VIEWPORT_BOTTOM,
+	                       SLIP_VEHICLE_PREVIEW_VIEWPORT_CENTER_X,
+	                       SLIP_VEHICLE_PREVIEW_VIEWPORT_CENTER_Y + g_vehicleViewParams[driver].centerYOffset);
 	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh) ||
 	    !SlipDraw3D_InitRecordPool(&drawRecordPool, &drawRecordPoolInit)) {
 		if (materialTable != NULL) {
@@ -12186,10 +12958,12 @@ bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DM
 	trackContext.rendererFlags = projectState.renderFlags;
 	trackContext.ambientLight = TrackView_VehicleViewNormalizedLightAmbient();
 	trackContext.directLight = TrackView_VehicleViewNormalizedLightDirect();
-	trackContext.lightInput = (SlipView3DVec32){(int16_t)0xd2b6u, (int16_t)0xd2b6u, 0};
+	trackContext.lightInput =
+	    (SlipView3DVec32){SLIP_VEHICLE_PREVIEW_LIGHT_DIAGONAL_Q14, SLIP_VEHICLE_PREVIEW_LIGHT_DIAGONAL_Q14, 0};
 
-	Raster_SetClipRect(31, 14, 287, 183);
-	if (actor.slotCount > 16)
+	Raster_SetClipRect(SLIP_VEHICLE_PREVIEW_VIEWPORT_LEFT, SLIP_VEHICLE_PREVIEW_VIEWPORT_TOP,
+	                   SLIP_VEHICLE_PREVIEW_VIEWPORT_RIGHT, SLIP_VEHICLE_PREVIEW_VIEWPORT_BOTTOM);
+	if (actor.slotCount > SLIP_VEHICLE_PREVIEW_ORIGINAL_PART_CAPACITY)
 		SlipRuntime_Fatal("ART exceeds the original sixteen-part actor table");
 	actor.objectMatrix = *actorObjectMatrix;
 	actor.cameraMatrix = cameraMatrix;
@@ -12242,24 +13016,27 @@ bool TrackView_DrawVehicleView(const char *resPath, int driver) {
 	}
 
 	SlipText_SelectFont(&SlipText_state, &font);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 33, 285);
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, SLIP_VEHICLE_DESCRIPTION_LEFT,
+	                  SLIP_VEHICLE_DESCRIPTION_RIGHT);
 	SlipText_SetColor(&SlipText_state, UINT16_MAX);
-	SlipText_DrawCentered(&SlipText_state, g_driverDescriptions[driver], NULL, 0, 130, 179);
+	SlipText_DrawCentered(&SlipText_state, g_driverDescriptions[driver], NULL, 0, SLIP_VEHICLE_DESCRIPTION_TOP,
+	                      SLIP_VEHICLE_DESCRIPTION_BOTTOM);
 	return true;
 }
 
 static bool TrackView_MaterialPayloadExpandedBytes(const SlipResourcePayload *payload, size_t *expandedBytes) {
 	uint16_t count;
 
-	if (payload == NULL || payload->data == NULL || expandedBytes == NULL || payload->size < 4u ||
-	    SlipBytes_ReadLE16(payload->data + 2u) != 1u) {
+	if (payload == NULL || payload->data == NULL || expandedBytes == NULL || payload->size < SLIP_MAT_HEADER_BYTES ||
+	    SlipBytes_ReadLE16(payload->data + SLIP_MAT_VERSION_OFFSET) != SLIP_MAT_VERSION) {
 		return false;
 	}
 	count = SlipBytes_ReadLE16(payload->data);
-	if ((size_t)count > (payload->size - 4u) / SLIP_DRAW3D_RAW_MATERIAL_RECORD_SIZE) {
+	if ((size_t)count > (payload->size - SLIP_MAT_HEADER_BYTES) / SLIP_DRAW3D_RAW_MATERIAL_RECORD_SIZE) {
 		return false;
 	}
-	*expandedBytes = 4u + (size_t)count * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
+	*expandedBytes =
+	    SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES + (size_t)count * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
 	return true;
 }
 
@@ -12307,7 +13084,7 @@ static bool TrackView_BuildGlobeMaterialTable(const char *const *archives, size_
 bool TrackView_BuildTrackMaterialTable(const char *const *archives, size_t archiveCount, uint8_t resourceIndexMinus,
                                        uint8_t **materialTable, size_t *materialTableBytes, uint16_t *materialGlobal,
                                        TrackViewResourceHandleRegistry *resourceRegistryOut) {
-	char trackMaterialName[16];
+	char trackMaterialName[SLIP_TRACK_MATERIAL_NAME_BUFFER_BYTES];
 	uint16_t sourceResource;
 	snprintf(trackMaterialName, sizeof(trackMaterialName), "%s.MAT", g_trackResourceNames[resourceIndexMinus]);
 	if (!SlipResourceHost_Load(NULL, trackMaterialName, &sourceResource))
@@ -12334,6 +13111,25 @@ bool TrackView_BuildTrackMaterialTable(const char *const *archives, size_t archi
 	return true;
 }
 
+enum {
+	SLIP_GLOBE_FREE_YAW_STEP = 0x0800,
+	SLIP_GLOBE_FREE_PITCH_STEP = 0x1000,
+	SLIP_GLOBE_TRACK_ALIGNMENT_STEP = 0x3000,
+	SLIP_GLOBE_LONGITUDE_ORIGIN_DEGREES = 180,
+	SLIP_GLOBE_LATITUDE_ORIGIN_DEGREES = 90,
+	SLIP_GLOBE_FULL_TURN_DEGREES = 360,
+	SLIP_GLOBE_DEGREES_TO_ANGLE_SHIFT = 16,
+	SLIP_GLOBE_FLAG_LONGITUDE_BIAS = 0x600,
+	SLIP_GLOBE_VIEW_DISTANCE = 6500,
+	SLIP_GLOBE_FLAG_PASS_DEPTH_THRESHOLD = 5500,
+	SLIP_GLOBE_RADIUS = 2000,
+	SLIP_GLOBE_FLAG_RETRACTION_DISTANCE = 640,
+	SLIP_GLOBE_VIEWPORT_CENTRE_X = 91,
+	SLIP_GLOBE_VIEWPORT_CENTRE_Y = 109,
+	SLIP_GLOBE_AMBIENT_LIGHT_Q14 = 0x1800,
+	SLIP_GLOBE_DIRECT_LIGHT_Q14 = 0x2800
+};
+
 static void TrackView_TrackGlobeUpdateMatrix(const SlipView3DMaths *maths, uint16_t trackResourceHandle,
                                              SlipView3DMatrix *matrix, uint32_t rotationArgument) {
 	SlipFrameTimerValues timerValues;
@@ -12344,11 +13140,11 @@ static void TrackView_TrackGlobeUpdateMatrix(const SlipView3DMaths *maths, uint1
 
 	timerValues = SlipFrameTimer_Values();
 	if (trackResourceHandle == 0) {
-		product = 0x0800u * (uint16_t)timerValues.stepQ14;
-		angle = (uint16_t)(product >> 14);
+		product = SLIP_GLOBE_FREE_YAW_STEP * (uint16_t)timerValues.stepQ14;
+		angle = (uint16_t)(product >> SLIP_Q14_FRACTION_BITS);
 		SlipView3D_ApplyColumn0Column2Rotation(maths, (int16_t)angle, matrix);
-		product = 0x1000u * (uint16_t)timerValues.stepQ14;
-		angle = (uint16_t)(product >> 14);
+		product = SLIP_GLOBE_FREE_PITCH_STEP * (uint16_t)timerValues.stepQ14;
+		angle = (uint16_t)(product >> SLIP_Q14_FRACTION_BITS);
 		SlipView3D_ApplyPitchMatrix(maths, (int16_t)angle, matrix);
 		SlipView3D_OrthonormalizeForwardBasis(matrix);
 		return;
@@ -12359,19 +13155,22 @@ static void TrackView_TrackGlobeUpdateMatrix(const SlipView3DMaths *maths, uint1
 		return;
 	}
 	record = g_trackGlobeOrientation[resourceIndex];
-	product = 0x3000u * (uint16_t)timerValues.stepQ14;
-	angle = (uint16_t)(product >> 14);
+	product = SLIP_GLOBE_TRACK_ALIGNMENT_STEP * (uint16_t)timerValues.stepQ14;
+	angle = (uint16_t)(product >> SLIP_Q14_FRACTION_BITS);
 
-	SlipView3D_RotateForwardTowards(maths, matrix, record[3], record[4], record[5],
-	                                (rotationArgument & 0xffff0000u) | angle);
-	SlipView3D_RotateRightTowards(maths, matrix, record[0], record[1], record[2],
-	                              (rotationArgument & 0xffff0000u) | angle);
+	SlipView3D_RotateForwardTowards(maths, matrix, record[SLIP_GLOBE_FORWARD_VECTOR_OFFSET],
+	                                record[SLIP_GLOBE_FORWARD_VECTOR_OFFSET + 1],
+	                                record[SLIP_GLOBE_FORWARD_VECTOR_OFFSET + 2],
+	                                (rotationArgument & SLIP_CALLBACK_PAYLOAD_UPPER_WORD_MASK) | angle);
+	SlipView3D_RotateRightTowards(
+	    maths, matrix, record[SLIP_GLOBE_RIGHT_VECTOR_OFFSET], record[SLIP_GLOBE_RIGHT_VECTOR_OFFSET + 1],
+	    record[SLIP_GLOBE_RIGHT_VECTOR_OFFSET + 2], (rotationArgument & SLIP_CALLBACK_PAYLOAD_UPPER_WORD_MASK) | angle);
 	SlipView3D_OrthonormalizeForwardBasis(matrix);
 }
 
 bool SlipTrackGlobe_UpdateGivenMatrix(const char *resPath, uint16_t trackResourceHandle, SlipView3DMatrix *matrix,
                                       uint32_t rotationArgument) {
-	char secondaryPath[512];
+	char secondaryPath[SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES];
 	const char *archives[2];
 	size_t archiveCount;
 	SlipView3DMaths maths = {0};
@@ -12408,16 +13207,23 @@ static SlipView3DVec32 TrackView_TrackGlobeFlagSurfacePoint(const SlipView3DMath
 
 	resourceIndex = (uint16_t)(trackResourceHandle - 1u);
 
-	longitude = ((((int32_t)g_trackGlobeFlagCoords[resourceIndex][0] + 0xb4) << 16) / 0x168) - 0x4000 + 0x600;
-	latitude = (((-(int32_t)g_trackGlobeFlagCoords[resourceIndex][1] + 0x5a) << 16) / 0x168);
+	longitude = ((((int32_t)g_trackGlobeFlagCoords[resourceIndex][0] + SLIP_GLOBE_LONGITUDE_ORIGIN_DEGREES)
+	              << SLIP_GLOBE_DEGREES_TO_ANGLE_SHIFT) /
+	             SLIP_GLOBE_FULL_TURN_DEGREES) -
+	            SLIP_ANGLE_QUARTER_TURN + SLIP_GLOBE_FLAG_LONGITUDE_BIAS;
+	latitude = (((-(int32_t)g_trackGlobeFlagCoords[resourceIndex][1] + SLIP_GLOBE_LATITUDE_ORIGIN_DEGREES)
+	             << SLIP_GLOBE_DEGREES_TO_ANGLE_SHIFT) /
+	            SLIP_GLOBE_FULL_TURN_DEGREES);
 	lonAngle = (int16_t)(uint16_t)longitude;
 	latAngle = (int16_t)(uint16_t)latitude;
 
-	latRadius = (int16_t)(uint16_t)(((int32_t)SlipView3D_SinQ14(maths, latAngle) * 0x4000) >> 14);
+	latRadius =
+	    (int16_t)(uint16_t)(((int32_t)SlipView3D_SinQ14(maths, latAngle) * SLIP_Q14_ONE) >> SLIP_Q14_FRACTION_BITS);
 
-	return (SlipView3DVec32){(int16_t)(uint16_t)(((int32_t)SlipView3D_CosQ14(maths, lonAngle) * latRadius) >> 14),
-	                         (int16_t)(uint16_t)(((int32_t)SlipView3D_CosQ14(maths, latAngle) * 0x4000) >> 14),
-	                         (int16_t)(uint16_t)(((int32_t)SlipView3D_SinQ14(maths, lonAngle) * latRadius) >> 14)};
+	return (SlipView3DVec32){
+	    (int16_t)(uint16_t)(((int32_t)SlipView3D_CosQ14(maths, lonAngle) * latRadius) >> SLIP_Q14_FRACTION_BITS),
+	    (int16_t)(uint16_t)(((int32_t)SlipView3D_CosQ14(maths, latAngle) * SLIP_Q14_ONE) >> SLIP_Q14_FRACTION_BITS),
+	    (int16_t)(uint16_t)(((int32_t)SlipView3D_SinQ14(maths, lonAngle) * latRadius) >> SLIP_Q14_FRACTION_BITS)};
 }
 
 static bool TrackView_TrackGlobeShouldDrawFlagPass(const SlipView3DMatrix *matrix, SlipView3DVec32 flagSurface,
@@ -12426,7 +13232,7 @@ static bool TrackView_TrackGlobeShouldDrawFlagPass(const SlipView3DMatrix *matri
 	int32_t depthTest;
 
 	transformed = SlipView3D_TransformPositionByColumns(matrix, flagSurface);
-	depthTest = transformed.z + 0x1964 - 0x157c;
+	depthTest = transformed.z + SLIP_GLOBE_VIEW_DISTANCE - SLIP_GLOBE_FLAG_PASS_DEPTH_THRESHOLD;
 
 	return secondPass ? depthTest < 0 : depthTest >= 0;
 }
@@ -12445,14 +13251,14 @@ static int TrackView_DrawTrackSelectFlag(const char *const *archives, size_t arc
 	                                 matrix->m[3], matrix->m[4], matrix->m[5]);
 	trackContext->hostShapeResource = flagResource;
 	return TrackView_DrawVehicleViewShape(NULL, archives, archiveCount, "FLAG.SHP", matrix, flagTranslation,
-	                                      flagBspOrigin, flagLight, &flagProjectState, NULL, 0, NULL, 0x1800u, 0x2800u,
-	                                      trackContext);
+	                                      flagBspOrigin, flagLight, &flagProjectState, NULL, 0, NULL,
+	                                      SLIP_GLOBE_AMBIENT_LIGHT_Q14, SLIP_GLOBE_DIRECT_LIGHT_Q14, trackContext);
 }
 
 static int16_t TrackView_TrackGlobeScaleAxisQ14(uint16_t grow, int16_t axis) {
 	const int32_t product = (int32_t)(int16_t)grow * axis;
 
-	return (int16_t)(uint16_t)((uint32_t)product >> 14);
+	return (int16_t)(uint16_t)((uint32_t)product >> SLIP_Q14_FRACTION_BITS);
 }
 
 static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackResourceHandle, uint16_t growAmount,
@@ -12460,7 +13266,7 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
                                          uint16_t flagResource) {
 	if (globeResource == 0)
 		SlipShape3D_Initialize();
-	char secondaryPath[512];
+	char secondaryPath[SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES];
 	const char *archives[2];
 	size_t archiveCount;
 	SlipView3DMaths maths = {0};
@@ -12477,15 +13283,15 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
 	uint8_t *materialTable = NULL;
 	size_t materialTableBytes = 0;
 	uint16_t materialGlobal = 0;
-	SlipView3DVec32 translation = {0, 0, 0x1964};
-	SlipView3DVec32 originDelta = {0, 0, -0x1964};
+	SlipView3DVec32 translation = {0, 0, SLIP_GLOBE_VIEW_DISTANCE};
+	SlipView3DVec32 originDelta = {0, 0, -SLIP_GLOBE_VIEW_DISTANCE};
 	SlipView3DVec32 flagSurface;
 	SlipView3DVec32 flagTranslation;
 	SlipView3DVec32 flagClipPlaneOrigin;
 	SlipView3DVec32 flagOutward;
 	SlipView3DVec32 flagOriginDelta;
 	SlipView3DVec32 flagBspOrigin;
-	SlipView3DMatrix flagMatrix = {{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
+	SlipView3DMatrix flagMatrix = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 	SlipView3DVec32 bspOrigin;
 	SlipView3DVec32 lightVector;
 	uint16_t growDisplacement;
@@ -12520,7 +13326,8 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
 		projectState.minZ = (int32_t)SlipDraw3D_minimumDepth;
 		projectState.maxZ = (int32_t)SlipDraw3D_maximumDepth;
 	}
-	SlipDraw3D_SetViewport(&projectState, 0, 0, 319, 199, 0x5b, 0x6d);
+	SlipDraw3D_SetViewport(&projectState, 0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1,
+	                       SLIP_GLOBE_VIEWPORT_CENTRE_X, SLIP_GLOBE_VIEWPORT_CENTRE_Y);
 	projectState.renderFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
 	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh)) {
 		if (globeResource == 0)
@@ -12555,18 +13362,18 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
 	    refresh.maxYPlaneDepthQ, refresh.maxYPlaneYQ,    refresh.minYPlaneNegDepthQ, refresh.minYPlaneNegYQ,
 	    projectState.minZ,       projectState.maxZ};
 	trackContext.rendererFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	trackContext.directLight = 0x2800u;
-	trackContext.lightInput = (SlipView3DVec32){0, (int16_t)0xc000u, 0};
-	trackContext.ambientLight = 0x1800u;
+	trackContext.directLight = SLIP_GLOBE_DIRECT_LIGHT_Q14;
+	trackContext.lightInput = (SlipView3DVec32){0, -SLIP_Q14_ONE, 0};
+	trackContext.ambientLight = SLIP_GLOBE_AMBIENT_LIGHT_Q14;
 
 	bspOrigin = SlipView3D_TransformPositionByRows(matrix, originDelta);
-	lightVector = SlipView3D_TransformVector(matrix, (SlipView3DVec32){0, (int16_t)0xc000u, 0});
+	lightVector = SlipView3D_TransformVector(matrix, (SlipView3DVec32){0, -SLIP_Q14_ONE, 0});
 
 	if (trackResourceHandle == 0) {
 		trackContext.hostShapeResource = globeResource;
 		ok = TrackView_DrawVehicleViewShape(NULL, archives, archiveCount, "GLOBE.SHP", matrix, translation, bspOrigin,
-		                                    lightVector, &projectState, NULL, 0, NULL, 0x1800u, 0x2800u,
-		                                    &trackContext) > 0;
+		                                    lightVector, &projectState, NULL, 0, NULL, SLIP_GLOBE_AMBIENT_LIGHT_Q14,
+		                                    SLIP_GLOBE_DIRECT_LIGHT_Q14, &trackContext) > 0;
 		if (globeResource == 0)
 			free(materialTable);
 		return ok;
@@ -12578,15 +13385,17 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
 		return false;
 	}
 
-	growDisplacement = (uint16_t)(((uint32_t)(uint16_t)(0x4000u - growAmount) * 0x0280u) >> 14);
+	growDisplacement =
+	    (uint16_t)(((uint32_t)(uint16_t)(SLIP_Q14_ONE - growAmount) * SLIP_GLOBE_FLAG_RETRACTION_DISTANCE) >>
+	               SLIP_Q14_FRACTION_BITS);
 	flagSurface = TrackView_TrackGlobeFlagSurfacePoint(&maths, trackResourceHandle);
 
-	flagSurface.x = (int16_t)(uint16_t)((flagSurface.x * 0x7d0) >> 14);
-	flagSurface.y = (int16_t)(uint16_t)((flagSurface.y * 0x7d0) >> 14);
-	flagSurface.z = (int16_t)(uint16_t)((flagSurface.z * 0x7d0) >> 14);
+	flagSurface.x = (int16_t)(uint16_t)((flagSurface.x * SLIP_GLOBE_RADIUS) >> SLIP_Q14_FRACTION_BITS);
+	flagSurface.y = (int16_t)(uint16_t)((flagSurface.y * SLIP_GLOBE_RADIUS) >> SLIP_Q14_FRACTION_BITS);
+	flagSurface.z = (int16_t)(uint16_t)((flagSurface.z * SLIP_GLOBE_RADIUS) >> SLIP_Q14_FRACTION_BITS);
 	flagOutward = SlipView3D_TransformPositionByColumns(matrix, flagSurface);
 	flagTranslation = flagOutward;
-	flagTranslation.z += 0x1964;
+	flagTranslation.z += SLIP_GLOBE_VIEW_DISTANCE;
 
 	flagClipPlaneOrigin = flagTranslation;
 
@@ -12599,7 +13408,7 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
 		(void)SlipView3D_BuildMatrixFromVector(&flagBasis, (int16_t)(uint16_t)flagNormal.unitXQ14,
 		                                       (int16_t)(uint16_t)flagNormal.unitYQ14,
 		                                       (int16_t)(uint16_t)flagNormal.unitZQ14);
-		SlipView3D_ApplyPitchMatrix(&maths, (int16_t)0xc000u, &flagBasis);
+		SlipView3D_ApplyPitchMatrix(&maths, -SLIP_ANGLE_QUARTER_TURN, &flagBasis);
 		SlipView3D_MultiplyMatrix(&flagBasis, matrix, &flagMatrix);
 	}
 
@@ -12616,7 +13425,8 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
 	}
 	trackContext.hostShapeResource = globeResource;
 	ok = TrackView_DrawVehicleViewShape(NULL, archives, archiveCount, "GLOBE.SHP", matrix, translation, bspOrigin,
-	                                    lightVector, &projectState, NULL, 0, NULL, 0x1800u, 0x2800u, &trackContext) > 0;
+	                                    lightVector, &projectState, NULL, 0, NULL, SLIP_GLOBE_AMBIENT_LIGHT_Q14,
+	                                    SLIP_GLOBE_DIRECT_LIGHT_Q14, &trackContext) > 0;
 	if (TrackView_TrackGlobeShouldDrawFlagPass(matrix, flagSurface, true)) {
 		ok = TrackView_DrawTrackSelectFlag(archives, archiveCount, &flagMatrix, flagTranslation, flagClipPlaneOrigin,
 		                                   flagBspOrigin, &projectState, &trackContext, flagResource) > 0 ||
@@ -12642,12 +13452,34 @@ bool SlipTrackGlobe_Draw(const char *resPath, uint16_t track, uint16_t grow) {
 	return SlipTrackGlobe_DrawGivenMatrix(resPath, track, grow, &g_trackSelectGlobeMatrix);
 }
 
+enum {
+	SLIP_STARTUP_TIMED_CLOCK_HZ = 70,
+	SLIP_STARTUP_TIMED_OUTPUT_COUNT = 2,
+	/* Original timer output identity, retained for lookup alongside the host pointer. */
+	SLIP_STARTUP_GLOBE_DISTANCE_DOS_IDENTITY = 0x56af0,
+	SLIP_STARTUP_VERTEX_CAPACITY = 150,
+	SLIP_STARTUP_MINIMUM_DEPTH = 12,
+	SLIP_STARTUP_VIEWPORT_CENTRE_X = 260,
+	SLIP_STARTUP_VIEWPORT_CENTRE_Y = 40,
+	SLIP_STARTUP_LIGHT_DIAGONAL_Q14 = 0x24f3,
+	SLIP_STARTUP_GLOBE_DISTANCE_START = 200,
+	SLIP_STARTUP_GLOBE_DISTANCE_END = 16500,
+	SLIP_STARTUP_GLOBE_DISTANCE_TICKS = 350,
+	SLIP_STARTUP_GLOBE_MINIMUM_DISTANCE = 2200,
+	SLIP_STARTUP_GLOBE_ROTATION_STEP = SLIP_ANGLE_QUARTER_TURN,
+	SLIP_STARTUP_TEXTURE_SCROLL_STEP_Q14 = 0x5000,
+	SLIP_STARTUP_CREDITS_DURATION_MS = 2000,
+	SLIP_STARTUP_MILLISECONDS_PER_SECOND = 1000,
+	SLIP_STARTUP_CREDITS_Y = 180,
+	SLIP_STARTUP_VERSION_Y = 190
+};
+
 typedef struct SlipStartupIntroTimedValue {
 	int32_t fadeValue;
 } SlipStartupIntroTimedValue;
 
 static SlipTimedValues startupTimedValues;
-static int32_t *startupTimedValueOutputs[2];
+static int32_t *startupTimedValueOutputs[SLIP_STARTUP_TIMED_OUTPUT_COUNT];
 static uint32_t startupTimedClockRate;
 
 static bool TrackView_StartupRegisterTimedClock(void *context, uint32_t rate) {
@@ -12708,7 +13540,8 @@ static const char g_startupIntroPhelanCredits[] =
 
 static void TrackView_StartupIntroStartTimedValue(SlipStartupIntroTimedValue *value, int32_t from, int32_t to,
                                                   uint32_t ticks, uint32_t mode) {
-	SlipTimedValues_Start(&startupTimedValues, 0x56af0, &value->fadeValue, from, to, ticks, mode);
+	SlipTimedValues_Start(&startupTimedValues, SLIP_STARTUP_GLOBE_DISTANCE_DOS_IDENTITY, &value->fadeValue, from, to,
+	                      ticks, mode);
 }
 
 static void TrackView_StartupIntroTickTimedValue(SlipStartupIntroTimedValue *value) {
@@ -12774,24 +13607,34 @@ void TrackView_MaterialBytes(uint8_t *bytes, const SlipDraw3DMaterialTable *tabl
 	TrackView_WriteLE32(bytes, table->count);
 	for (uint32_t index = 0; index < table->count; ++index) {
 		const SlipDraw3DMaterialRecord *const record = &table->records[index];
-		uint8_t *const destination = bytes + 4u + index * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
+		uint8_t *const destination =
+		    bytes + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES + index * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
 		memcpy(destination, record->name, sizeof(record->name));
-		TrackView_WriteLE32(destination + 0x10, record->rampStart);
-		TrackView_WriteLE32(destination + 0x14, record->rampEnd);
-		destination[0x18] = (uint8_t)record->textureTransparency;
-		destination[0x19] = (uint8_t)((uint16_t)record->textureTransparency >> 8);
-		destination[0x1a] = (uint8_t)record->skipFlatPolygon;
-		destination[0x1b] = (uint8_t)((uint16_t)record->skipFlatPolygon >> 8);
-		TrackView_WriteLE32(destination + 0x1c, record->fixedShade);
-		TrackView_WriteLE32(destination + 0x20, record->ambientCoefficient);
-		TrackView_WriteLE32(destination + 0x24, record->diffuseCoefficient);
-		TrackView_WriteLE32(destination + 0x28, record->specularCoefficient);
-		TrackView_WriteLE32(destination + 0x2c, record->ditherBits);
-		TrackView_WriteLE32(destination + 0x30, record->vertexShading);
-		memcpy(destination + 0x34, record->textureName, sizeof(record->textureName));
-		for (unsigned frame = 0; frame < 4; ++frame)
-			TrackView_WriteLE32(destination + 0x40 + frame * 4u, record->textureHandles[frame]);
-		TrackView_WriteLE32(destination + 0x50, record->importedMaterialByte);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, rampStart), record->rampStart);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, rampEnd), record->rampEnd);
+		destination[offsetof(SlipDraw3DMaterialRecord, textureTransparency)] = (uint8_t)record->textureTransparency;
+		destination[offsetof(SlipDraw3DMaterialRecord, textureTransparency) + 1] =
+		    (uint8_t)((uint16_t)record->textureTransparency >> 8);
+		destination[offsetof(SlipDraw3DMaterialRecord, skipFlatPolygon)] = (uint8_t)record->skipFlatPolygon;
+		destination[offsetof(SlipDraw3DMaterialRecord, skipFlatPolygon) + 1] =
+		    (uint8_t)((uint16_t)record->skipFlatPolygon >> 8);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, fixedShade), record->fixedShade);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, ambientCoefficient),
+		                    record->ambientCoefficient);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, diffuseCoefficient),
+		                    record->diffuseCoefficient);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, specularCoefficient),
+		                    record->specularCoefficient);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, ditherBits), record->ditherBits);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, vertexShading), record->vertexShading);
+		memcpy(destination + offsetof(SlipDraw3DMaterialRecord, textureName), record->textureName,
+		       sizeof(record->textureName));
+		for (unsigned frame = 0; frame < SLIP_DRAW3D_MATERIAL_FRAME_COUNT; ++frame)
+			TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, textureHandles) +
+			                        frame * SLIP_DRAW3D_TEXTURE_HANDLE_BYTES,
+			                    record->textureHandles[frame]);
+		TrackView_WriteLE32(destination + offsetof(SlipDraw3DMaterialRecord, importedMaterialByte),
+		                    record->importedMaterialByte);
 	}
 }
 
@@ -12817,7 +13660,7 @@ static bool TrackView_StartupIntroMaterials(uint8_t **table, size_t *bytes, uint
 
 static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStartupIntroHost *host,
                                              bool phelanCredits) {
-	char secondaryPath[512];
+	char secondaryPath[SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES];
 	const char *archives[2];
 	size_t archiveCount;
 	uint16_t fontResource = 0;
@@ -12825,7 +13668,7 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	uint16_t globeResource = 0;
 	uint16_t soundResource = 0;
 	SlipView3DMaths maths = {0};
-	SlipView3DMatrix globeMatrix = {{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
+	SlipView3DMatrix globeMatrix = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 	SlipDraw3DProjectState projectState;
 	SlipDraw3DRefreshMode0Projection refresh;
 	TrackViewResourceHandleRegistry resourceRegistry;
@@ -12838,7 +13681,7 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	size_t materialTableBytes = 0;
 	uint16_t materialGlobal = 0;
 	const char *credits = phelanCredits ? g_startupIntroPhelanCredits : g_startupIntroCredits;
-	int32_t creditsTime = 0x7d0;
+	int32_t creditsTime = SLIP_STARTUP_CREDITS_DURATION_MS;
 	uint32_t textureScroll = 0;
 	uint32_t soundHandle = 0;
 	uint32_t timedValueTicks = 0;
@@ -12859,23 +13702,25 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	if (archiveCount == 0)
 		return false; /* Invalid host archive binding. */
 
-	(void)SlipTimedValues_Initialize(&startupTimedValues, startupTimedValueOutputs, 70, 2, &startupTimedValueTimer);
+	(void)SlipTimedValues_Initialize(&startupTimedValues, startupTimedValueOutputs, SLIP_STARTUP_TIMED_CLOCK_HZ,
+	                                 SLIP_STARTUP_TIMED_OUTPUT_COUNT, &startupTimedValueTimer);
 	if (!SlipResourceHost_Load(NULL, "SHADE1.FNT", &fontResource))
 		SlipGame_ResourceFailure();
 	SlipText_SelectResourceFont(&SlipText_state, fontResource, &TrackView_startupFontCalls);
 	SlipText_SetColor(&SlipText_state, UINT16_MAX);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
 	if (!SlipResourceHost_Load(NULL, "SOFTLOGO.SPR", &logoResource))
 		SlipGame_ResourceFailure();
 	if (!TrackView_LoadMaths(&maths, archives, archiveCount))
 		SlipRuntime_Fatal("Invalid host startup maths view");
 	TrackView_StartupIntroSprite(logoResource, true);
-	SlipRenderer_Initialize(&SlipRendererHost_state, 150, &SlipRendererHost_lifecycleCalls);
-	SlipDraw3D_SetMinimumDepth(0x0cu);
-	SlipDraw3D_SetMaximumDepth(0x7fffffffu);
+	SlipRenderer_Initialize(&SlipRendererHost_state, SLIP_STARTUP_VERTEX_CAPACITY, &SlipRendererHost_lifecycleCalls);
+	SlipDraw3D_SetMinimumDepth(SLIP_STARTUP_MINIMUM_DEPTH);
+	SlipDraw3D_SetMaximumDepth(INT32_MAX);
 	SlipDraw3D_ResetLighting();
-	SlipDraw3D_SetAmbientLight(0x1800u);
-	SlipDraw3D_SetLightVector(0x24f3, (int16_t)0xdb0du, 0x24f3, 0x2800u);
+	SlipDraw3D_SetAmbientLight(SLIP_GLOBE_AMBIENT_LIGHT_Q14);
+	SlipDraw3D_SetLightVector(SLIP_STARTUP_LIGHT_DIAGONAL_Q14, -SLIP_STARTUP_LIGHT_DIAGONAL_Q14,
+	                          SLIP_STARTUP_LIGHT_DIAGONAL_Q14, SLIP_GLOBE_DIRECT_LIGHT_Q14);
 	SlipDraw3D_SetDepthFade(0, 0, 0);
 	SlipShape3D_Initialize();
 	if (!TrackView_StartupIntroMaterials(&materialTable, &materialTableBytes, &materialGlobal, &resourceRegistry) ||
@@ -12886,9 +13731,10 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	if (!SlipDraw3D_InitRecordPool(drawRecordPool, &drawRecordPoolInit))
 		SlipRuntime_Fatal("Invalid startup polygon workspace");
 	SlipDraw3D_InitDefaultProjectState(&projectState);
-	projectState.minZ = 0x0c;
-	projectState.maxZ = 0x7fffffff;
-	SlipDraw3D_SetViewport(&projectState, 0, 0, 319, 199, 0x104, 0x28);
+	projectState.minZ = SLIP_STARTUP_MINIMUM_DEPTH;
+	projectState.maxZ = INT32_MAX;
+	SlipDraw3D_SetViewport(&projectState, 0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1,
+	                       SLIP_STARTUP_VIEWPORT_CENTRE_X, SLIP_STARTUP_VIEWPORT_CENTRE_Y);
 	projectState.renderFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
 	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh)) {
 		SlipRuntime_Fatal("Invalid host startup projection view");
@@ -12917,10 +13763,12 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	    refresh.maxYPlaneDepthQ, refresh.maxYPlaneYQ,    refresh.minYPlaneNegDepthQ, refresh.minYPlaneNegYQ,
 	    projectState.minZ,       projectState.maxZ};
 	trackContext.rendererFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	trackContext.directLight = 0x2800u;
-	trackContext.lightInput = (SlipView3DVec32){0x24f3, (int16_t)0xdb0du, 0x24f3};
-	trackContext.ambientLight = 0x1800u;
-	TrackView_StartupIntroStartTimedValue(&globeDistanceAnimation, 0xc8, 0x4074, 0x15e, 0);
+	trackContext.directLight = SLIP_GLOBE_DIRECT_LIGHT_Q14;
+	trackContext.lightInput = (SlipView3DVec32){SLIP_STARTUP_LIGHT_DIAGONAL_Q14, -SLIP_STARTUP_LIGHT_DIAGONAL_Q14,
+	                                            SLIP_STARTUP_LIGHT_DIAGONAL_Q14};
+	trackContext.ambientLight = SLIP_GLOBE_AMBIENT_LIGHT_Q14;
+	TrackView_StartupIntroStartTimedValue(&globeDistanceAnimation, SLIP_STARTUP_GLOBE_DISTANCE_START,
+	                                      SLIP_STARTUP_GLOBE_DISTANCE_END, SLIP_STARTUP_GLOBE_DISTANCE_TICKS, 0);
 	SlipFrameTimer_Reset();
 
 	while (TrackView_StartupIntroHostRunning(host)) {
@@ -12938,20 +13786,22 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
 		timerValues = SlipFrameTimer_Values();
 		timedValueTicks += timerValues.deltaMilliseconds * startupTimedClockRate;
-		while (timedValueTicks >= 1000u) {
+		while (timedValueTicks >= SLIP_STARTUP_MILLISECONDS_PER_SECOND) {
 			TrackView_StartupIntroTickTimedValue(&globeDistanceAnimation);
-			timedValueTicks -= 1000u;
+			timedValueTicks -= SLIP_STARTUP_MILLISECONDS_PER_SECOND;
 		}
-		globeAngle = (uint16_t)(((uint32_t)0x4000u * (uint16_t)timerValues.stepQ14) >> 14);
+		globeAngle = (uint16_t)(((uint32_t)SLIP_STARTUP_GLOBE_ROTATION_STEP * (uint16_t)timerValues.stepQ14) >>
+		                        SLIP_Q14_FRACTION_BITS);
 		SlipView3D_ApplyColumn0Column2Rotation(&maths, (int16_t)globeAngle, &globeMatrix);
 		SlipView3D_ApplyPitchMatrix(&maths, (int16_t)globeAngle, &globeMatrix);
 		SlipView3D_OrthonormalizeForwardBasis(&globeMatrix);
 		TrackView_StartupIntroSprite(logoResource, false);
-		textureScroll += (uint32_t)(((uint64_t)0x5000u * timerValues.stepQ14) >> 14);
-		textureScroll &= 0x3fffu;
+		textureScroll += (uint32_t)(((uint64_t)SLIP_STARTUP_TEXTURE_SCROLL_STEP_Q14 * timerValues.stepQ14) >>
+		                            SLIP_Q14_FRACTION_BITS);
+		textureScroll &= SLIP_TRACK_TEXTURE_SCROLL_FRACTION_MASK;
 		creditsTime -= (int32_t)timerValues.deltaMilliseconds;
 		if (creditsTime < 0) {
-			creditsTime = 0x7d0;
+			creditsTime = SLIP_STARTUP_CREDITS_DURATION_MS;
 			while (*credits != '\0') {
 				++credits;
 			}
@@ -12963,16 +13813,18 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 		}
 		trackContext.textureScrollPhase = textureScroll;
 		globeDistance = (uint32_t)globeDistanceAnimation.fadeValue;
-		if ((int32_t)globeDistance < 0x898) {
-			globeDistance = 0x898;
+		if ((int32_t)globeDistance < SLIP_STARTUP_GLOBE_MINIMUM_DISTANCE) {
+			globeDistance = SLIP_STARTUP_GLOBE_MINIMUM_DISTANCE;
 		}
 		translation = (SlipView3DVec32){0, 0, (int32_t)globeDistance};
 		bspOrigin = SlipView3D_TransformPositionByRows(&globeMatrix, (SlipView3DVec32){0, 0, -(int32_t)globeDistance});
-		lightVector = SlipView3D_TransformVector(&globeMatrix, (SlipView3DVec32){0x24f3, (int16_t)0xdb0du, 0x24f3});
+		lightVector = SlipView3D_TransformVector(&globeMatrix, (SlipView3DVec32){SLIP_STARTUP_LIGHT_DIAGONAL_Q14,
+		                                                                         -SLIP_STARTUP_LIGHT_DIAGONAL_Q14,
+		                                                                         SLIP_STARTUP_LIGHT_DIAGONAL_Q14});
 		(void)TrackView_DrawVehicleViewShape(NULL, archives, archiveCount, "GLOBE.SHP", &globeMatrix, translation,
-		                                     bspOrigin, lightVector, &projectState, NULL, 0, NULL, 0x1800u, 0x2800u,
-		                                     &trackContext);
-		SlipTextPosition creditsPosition = {0, 0xb4};
+		                                     bspOrigin, lightVector, &projectState, NULL, 0, NULL,
+		                                     SLIP_GLOBE_AMBIENT_LIGHT_Q14, SLIP_GLOBE_DIRECT_LIGHT_Q14, &trackContext);
+		SlipTextPosition creditsPosition = {0, SLIP_STARTUP_CREDITS_Y};
 		SlipText_Draw(&SlipText_state, credits, NULL, &creditsPosition);
 		host->presentFrame(host->context);
 		if (host->testAndClearInput(host->context, SLIP_INPUT_SCAN_ENTER) ||
@@ -12996,7 +13848,7 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 }
 
 bool SlipStartupIntro_Run(const char *resPath, const SlipStartupIntroHost *host) {
-	char secondaryPath[512];
+	char secondaryPath[SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES];
 	const char *archives[2];
 	size_t archiveCount;
 	uint16_t logoResource = 0;
@@ -13013,8 +13865,8 @@ bool SlipStartupIntro_Run(const char *resPath, const SlipStartupIntroHost *host)
 	if (archiveCount == 0)
 		return false;
 	SlipText_SelectResourceFont(&SlipText_state, SlipMenu_resources.smallFont, &TrackView_startupFontCalls);
-	SlipText_SetColor(&SlipText_state, 0xff);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
+	SlipText_SetColor(&SlipText_state, UINT8_MAX);
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
 	if (!SlipResourceHost_Load(NULL, "GREMLOGO.SPR", &logoResource))
 		SlipGame_ResourceFailure();
 	Raster_SetScreenBufferRows(g_framebuffer, SLIPSTREAM_SCREEN_WIDTH);
@@ -13031,7 +13883,7 @@ bool SlipStartupIntro_Run(const char *resPath, const SlipStartupIntroHost *host)
 		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
 		TrackView_StartupIntroSprite(logoResource, false);
 		if (host->inputHeld(host->context, SLIP_INPUT_SCAN_V)) {
-			SlipTextPosition versionPosition = {0, 0xbe};
+			SlipTextPosition versionPosition = {0, SLIP_STARTUP_VERSION_Y};
 			SlipText_Draw(&SlipText_state, "Version ID: 24/04/95@14:36:40/CD", NULL, &versionPosition);
 		}
 		host->presentFrame(host->context);

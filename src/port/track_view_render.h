@@ -10,6 +10,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+enum {
+	SLIP_TRACK_VIEW_RESOURCE_HANDLE_CAPACITY = 512,
+	SLIP_TRACK_VIEW_BSP_GATE_TRACE_CAPACITY = 32,
+	SLIP_TRACK_VIEW_PRIMITIVE_RANGE_TRACE_CAPACITY = 32,
+	SLIP_TRACK_VIEW_DRAW_GATE_TRACE_CAPACITY = 64,
+	SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT = 8
+};
+
 struct TrackViewRawBspContext;
 
 typedef struct TrackViewImpactSprites {
@@ -25,7 +33,7 @@ typedef bool (*TrackViewReplayCallback)(struct TrackViewRawBspContext *context);
 extern const SlipRaceTrackFrameCallback g_trackViewFrameCallbacks[];
 
 typedef struct TrackViewResourceHandleEntry {
-	char name[13];
+	char name[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 	uint32_t resourceHandle;
 	SlipResourcePayload payload; /* Host binding of this named resource reference. */
 } TrackViewResourceHandleEntry;
@@ -36,7 +44,7 @@ void TrackView_MaterialBytes(uint8_t *bytes, const SlipDraw3DMaterialTable *tabl
 typedef struct TrackViewResourceHandleRegistry {
 	const char *const *archives;
 	size_t archiveCount;
-	TrackViewResourceHandleEntry entries[512];
+	TrackViewResourceHandleEntry entries[SLIP_TRACK_VIEW_RESOURCE_HANDLE_CAPACITY];
 	size_t entryCount;
 	bool hostResources;
 } TrackViewResourceHandleRegistry;
@@ -74,9 +82,9 @@ int TrackView_ResolveComponentMaterials(uint8_t *componentBase, size_t component
 
 void TrackView_MaterialAnimationTick(void);
 
-int TrackView_FindNameRecord(void *user, const char name[13], uint32_t *handle);
-int TrackView_LoadNamedResource(void *user, const char name[13], uint32_t *resourceHandle);
-int TrackView_FindNamedResource(void *user, const char name[13], uint32_t *resourceHandle);
+int TrackView_FindNameRecord(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint32_t *handle);
+int TrackView_LoadNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint32_t *resourceHandle);
+int TrackView_FindNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint32_t *resourceHandle);
 
 typedef struct TrackViewChunkCallbackContext {
 	const SlipView3DMatrix *viewMatrix;
@@ -124,16 +132,16 @@ typedef struct TrackViewPrimitiveRangeTrace {
 	uint32_t primitivePathBoundsMaxX;
 	uint32_t primitivePathBoundsMaxY;
 	uint32_t activeRingVisitCount;
-	uint16_t activeRingIndex[8];
-	uint32_t activeRingFlags[8];
-	int32_t activeRingSourceX[8];
-	int32_t activeRingSourceY[8];
-	int32_t activeRingSourceZ[8];
-	int32_t activeRingWorldX[8];
-	int32_t activeRingWorldY[8];
-	int32_t activeRingWorldZ[8];
-	int32_t activeRingScreenX[8];
-	int32_t activeRingScreenY[8];
+	uint16_t activeRingIndex[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	uint32_t activeRingFlags[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	int32_t activeRingSourceX[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	int32_t activeRingSourceY[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	int32_t activeRingSourceZ[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	int32_t activeRingWorldX[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	int32_t activeRingWorldY[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	int32_t activeRingWorldZ[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	int32_t activeRingScreenX[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
+	int32_t activeRingScreenY[SLIP_TRACK_DIAGNOSTIC_ACTIVE_VERTEX_LIMIT];
 	uint32_t nestedExcludedObjectToken;
 	uint32_t nestedClipBoundsSuppressed;
 	uint32_t relatedBranch;
@@ -323,7 +331,7 @@ typedef struct TrackViewRawBspContext {
 	size_t trackCellTableBytes;
 	const SlipView3DMatrix *cameraMatrix;
 
-	uint8_t replayListBuffer[20];
+	uint8_t replayListBuffer[SLIP_TRACK_REPLAY_OBJECT_CAPACITY * sizeof(uint16_t)];
 
 	const uint8_t *materialRecord;
 	size_t materialRecordBytes;
@@ -458,11 +466,11 @@ typedef struct TrackViewRawBspContext {
 	SlipTrackWorldComponentTail firstComponentTail;
 	SlipTrackWorldPrimitiveWalker firstPrimitiveWalker;
 	SlipTrackWorldRecordVisibility firstRecordVisibility;
-	TrackViewRawBspGateTrace gateTrace[32];
+	TrackViewRawBspGateTrace gateTrace[SLIP_TRACK_VIEW_BSP_GATE_TRACE_CAPACITY];
 	uint32_t gateTraceCount;
-	TrackViewPrimitiveRangeTrace rangeTrace[32];
+	TrackViewPrimitiveRangeTrace rangeTrace[SLIP_TRACK_VIEW_PRIMITIVE_RANGE_TRACE_CAPACITY];
 	size_t drawGateTraceCount;
-	TrackViewPrimitiveDrawGateTrace drawGateTrace[64];
+	TrackViewPrimitiveDrawGateTrace drawGateTrace[SLIP_TRACK_VIEW_DRAW_GATE_TRACE_CAPACITY];
 	uint32_t rangeTraceCount;
 	uint32_t failureAddress;
 	bool haveFirstCallback;

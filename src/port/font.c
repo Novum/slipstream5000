@@ -1,5 +1,6 @@
 #include "font.h"
 #include "byte_order.h"
+#include "font_format.h"
 #include "raster/overlay.h"
 #include "raster/raster.h"
 #include "runtime.h"
@@ -54,33 +55,34 @@ void SlipFont_ResourceCharacterMetrics(uint16_t resource, uint8_t character, uin
 void SlipFont_CharacterMetrics(const SlipFont *font, uint8_t character, uint16_t *advance, uint16_t *height) {
 	*height = font->glyphHeight;
 	const uint8_t index = (uint8_t)(character - font->firstChar);
-	const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * 4;
-	*advance = SlipBytes_ReadLE16(entry + 2);
+	const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * SLIP_FONT_GLYPH_ENTRY_BYTES;
+	*advance = SlipBytes_ReadLE16(entry + SLIP_FONT_GLYPH_ADVANCE_OFFSET);
 }
 
 int SlipFont_FromPayload(const SlipResourcePayload *payload, SlipFont *font) {
 	uint16_t tableOffset;
 	size_t glyphCount;
 
-	if (payload == NULL || payload->data == NULL || payload->size < 14) {
+	if (payload == NULL || payload->data == NULL || payload->size < SLIP_FONT_HEADER_BYTES) {
 		return 0;
 	}
 
-	if (memcmp(payload->data, "FONT", 4) != 0) {
+	if (memcmp(payload->data, "FONT", SLIP_FONT_SIGNATURE_BYTES) != 0) {
 		return 0;
 	}
 
-	tableOffset = SlipBytes_ReadLE16(payload->data + 10);
-	glyphCount = (size_t)(payload->data[9] - payload->data[8] + 1u);
-	if (tableOffset + glyphCount * 4u > payload->size) {
+	tableOffset = SlipBytes_ReadLE16(payload->data + SLIP_FONT_TABLE_OFFSET);
+	glyphCount =
+	    (size_t)(payload->data[SLIP_FONT_LAST_CHARACTER_OFFSET] - payload->data[SLIP_FONT_FIRST_CHARACTER_OFFSET] + 1u);
+	if (tableOffset + glyphCount * SLIP_FONT_GLYPH_ENTRY_BYTES > payload->size) {
 		return 0;
 	}
 
 	font->data = payload->data;
-	font->glyphWidth = SlipBytes_ReadLE16(payload->data + 4);
-	font->glyphHeight = SlipBytes_ReadLE16(payload->data + 6);
-	font->firstChar = payload->data[8];
-	font->lastChar = payload->data[9];
+	font->glyphWidth = SlipBytes_ReadLE16(payload->data + SLIP_FONT_WIDTH_OFFSET);
+	font->glyphHeight = SlipBytes_ReadLE16(payload->data + SLIP_FONT_HEIGHT_OFFSET);
+	font->firstChar = payload->data[SLIP_FONT_FIRST_CHARACTER_OFFSET];
+	font->lastChar = payload->data[SLIP_FONT_LAST_CHARACTER_OFFSET];
 	font->tableOffset = tableOffset;
 
 	return font->glyphWidth != 0 && font->glyphHeight != 0;
@@ -96,8 +98,9 @@ int SlipFont_MeasureText(const SlipFont *font, const char *text) {
 			continue;
 		if (character < font->firstChar)
 			continue;
-		const uint16_t offset = (uint16_t)((uint16_t)(character - font->firstChar) * 4u + font->tableOffset);
-		width = (uint16_t)(width + SlipBytes_ReadLE16(font->data + offset + 2u));
+		const uint16_t offset =
+		    (uint16_t)((uint16_t)(character - font->firstChar) * SLIP_FONT_GLYPH_ENTRY_BYTES + font->tableOffset);
+		width = (uint16_t)(width + SlipBytes_ReadLE16(font->data + offset + SLIP_FONT_GLYPH_ADVANCE_OFFSET));
 	}
 }
 
@@ -137,8 +140,8 @@ void SlipFont_DrawString(const SlipFont *font, const char *text, int16_t *x, int
 		const uint8_t index = (uint8_t)(character - font->firstChar);
 		if (index > font->lastChar)
 			continue;
-		const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * 4;
-		const uint16_t advance = SlipBytes_ReadLE16(entry + 2);
+		const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * SLIP_FONT_GLYPH_ENTRY_BYTES;
+		const uint16_t advance = SlipBytes_ReadLE16(entry + SLIP_FONT_GLYPH_ADVANCE_OFFSET);
 		const uint8_t *glyph = font->data + SlipBytes_ReadLE16(entry);
 		uint8_t *destination = g_screenRowPtrs[(uint16_t)y] + (uint16_t)(*x);
 		uint16_t rows = font->glyphHeight;
@@ -172,8 +175,8 @@ void SlipFont_DrawStringColor(const SlipFont *font, const char *text, int16_t *x
 		const uint8_t index = (uint8_t)(character - font->firstChar);
 		if (index > font->lastChar)
 			continue;
-		const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * 4;
-		const uint16_t advance = SlipBytes_ReadLE16(entry + 2);
+		const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * SLIP_FONT_GLYPH_ENTRY_BYTES;
+		const uint16_t advance = SlipBytes_ReadLE16(entry + SLIP_FONT_GLYPH_ADVANCE_OFFSET);
 		const uint8_t *glyph = font->data + SlipBytes_ReadLE16(entry);
 		uint8_t *destination = g_screenRowPtrs[(uint16_t)y] + (uint16_t)(*x);
 		uint16_t rows = font->glyphHeight;
@@ -206,8 +209,8 @@ uint16_t SlipFont_DrawCharacter(const SlipFont *font, uint8_t character, int16_t
 	const uint8_t index = (uint8_t)(character - font->firstChar);
 	if (index > font->lastChar)
 		return lastCharacterAdvance;
-	const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * 4;
-	lastCharacterAdvance = SlipBytes_ReadLE16(entry + 2);
+	const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * SLIP_FONT_GLYPH_ENTRY_BYTES;
+	lastCharacterAdvance = SlipBytes_ReadLE16(entry + SLIP_FONT_GLYPH_ADVANCE_OFFSET);
 	const uint8_t *glyph = font->data + SlipBytes_ReadLE16(entry);
 	uint8_t *destination = g_screenRowPtrs[(uint16_t)y] + (uint16_t)(x);
 	uint16_t rows = font->glyphHeight;
@@ -239,8 +242,8 @@ uint16_t SlipFont_DrawCharacterColor(const SlipFont *font, uint8_t character, in
 	const uint8_t index = (uint8_t)(character - font->firstChar);
 	if (index > font->lastChar)
 		return lastColorCharacterAdvance;
-	const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * 4;
-	lastColorCharacterAdvance = SlipBytes_ReadLE16(entry + 2);
+	const uint8_t *const entry = font->data + font->tableOffset + (uint32_t)index * SLIP_FONT_GLYPH_ENTRY_BYTES;
+	lastColorCharacterAdvance = SlipBytes_ReadLE16(entry + SLIP_FONT_GLYPH_ADVANCE_OFFSET);
 	const uint8_t *glyph = font->data + SlipBytes_ReadLE16(entry);
 	uint8_t *destination = g_screenRowPtrs[(uint16_t)y] + (uint16_t)(x);
 	uint16_t rows = font->glyphHeight;

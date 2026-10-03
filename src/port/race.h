@@ -2,6 +2,7 @@
 #define SLIPSTREAM5000_RACE_H
 
 #include "input.h"
+#include "race_limits.h"
 
 #include "artic_slot.h"
 #include "race_player.h"
@@ -16,14 +17,15 @@ extern uint32_t SlipRace_activeReverseAccelerator;
 extern uint32_t SlipRace_menuRequest;
 extern uint32_t SlipRace_racerCount;
 
-enum { SLIP_RACE_RACER_COUNT = 10 };
-
 typedef struct SlipRaceRacerTable {
 	uint16_t racerCount;
 	SlipRaceRacerState records[SLIP_RACE_RACER_COUNT];
 } SlipRaceRacerTable;
 
 extern SlipRaceRacerTable SlipRace_racerTable;
+
+typedef enum SlipRaceGameMode { SLIP_RACE_GAME_SINGLE_PLAYER = 0, SLIP_RACE_GAME_SPLIT_SCREEN = 1 } SlipRaceGameMode;
+
 extern uint32_t SlipRace_gameMode;
 
 typedef enum SlipRaceType {
@@ -38,6 +40,9 @@ extern uint32_t SlipRace_demoChaseEnabled;
 extern uint32_t SlipRace_flybyChaseEnabled;
 extern uint32_t SlipRace_allPowerups;
 extern SlipRaceRacerTable *SlipRace_activeRacerTable;
+
+enum { SLIP_RACE_CLOUD_PHASE_FRACTION_BITS = 16 };
+
 extern uint32_t SlipRace_cloudScrollPhase;
 extern uint32_t SlipRace_cloudScrollFinePhase;
 extern uint16_t SlipRace_cloudScrollStep;
@@ -53,20 +58,6 @@ extern uint32_t SlipRace_alternateStartEnabled;
 extern uint32_t SlipRace_playerSlotType;
 extern SlipView3DMatrix SlipRace_matrix;
 extern uint32_t SlipRace_viewIndex;
-
-typedef enum SlipRaceTrackId {
-	SLIP_RACE_TRACK_CHICAGO = 1,
-	SLIP_RACE_TRACK_HAWAII,
-	SLIP_RACE_TRACK_TOKYO,
-	SLIP_RACE_TRACK_NORWAY,
-	SLIP_RACE_TRACK_CAVE,
-	SLIP_RACE_TRACK_CANADA,
-	SLIP_RACE_TRACK_AMAZON,
-	SLIP_RACE_TRACK_LONDON,
-	SLIP_RACE_TRACK_EGYPT,
-	SLIP_RACE_TRACK_NEW_YORK,
-	SLIP_RACE_TRACK_COUNT = SLIP_RACE_TRACK_NEW_YORK,
-} SlipRaceTrackId;
 
 extern const char *const SlipRace_paletteNames[SLIP_RACE_TRACK_COUNT];
 extern const char *const SlipRace_materialNames[SLIP_RACE_TRACK_COUNT];
@@ -102,6 +93,14 @@ void SlipRace_UpdateTimedEffects(void);
 void SlipRace_UpdateTrackFrameState(const SlipRacePlayerHostBindings *context);
 uint32_t SlipRace_Finished(void);
 
+typedef enum SlipMovementControl {
+	SLIP_MOVEMENT_KEYBOARD = 0,
+	SLIP_MOVEMENT_JOYSTICK_ONE = 1,
+	SLIP_MOVEMENT_JOYSTICK_TWO = 2,
+	SLIP_MOVEMENT_MOUSE = 3,
+	SLIP_MOVEMENT_COUNT
+} SlipMovementControl;
+
 typedef struct SlipRaceControlBinding {
 	uint16_t movementControl;
 	SlipInputCode left;
@@ -129,9 +128,11 @@ typedef struct SlipRaceControlHistory {
 } SlipRaceControlHistory;
 
 void SlipRace_ResetControlHistory(void);
-void SlipRace_ReadControls(const SlipRaceControlBinding *binding, const bool inputHeld1[256], bool inputPressed[256],
-                           SlipRaceControlHistory *history, SlipRacePlayerControl *controls);
+void SlipRace_ReadControls(const SlipRaceControlBinding *binding, const bool inputHeld1[SLIP_INPUT_CODE_COUNT],
+                           bool inputPressed[SLIP_INPUT_CODE_COUNT], SlipRaceControlHistory *history,
+                           SlipRacePlayerControl *controls);
 
-void SlipRace_PreCameraInput(const bool inputHeld1[256], bool inputPressed[256], SlipRacePlayerControl *controls);
+void SlipRace_PreCameraInput(const bool inputHeld1[SLIP_INPUT_CODE_COUNT], bool inputPressed[SLIP_INPUT_CODE_COUNT],
+                             SlipRacePlayerControl *controls);
 
 #endif

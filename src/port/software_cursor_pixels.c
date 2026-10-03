@@ -1,6 +1,7 @@
 #include "software_cursor_pixels.h"
 #include "raster/overlay.h"
 #include "raster/raster.h"
+#include "sprite_format.h"
 #include <string.h>
 
 static const uint8_t defaultCursorPixels[] = {16, 0, 0, 0,  16, 0,  16, 0,  16, 0, 0, 0, 0,
@@ -46,11 +47,11 @@ void SlipCursor_Draw(SlipCursorPixels *state, const SlipSoftwareCursor *cursor, 
 	const uint16_t sourceOffset = (uint16_t)((uint32_t)sprite->width * state->sourceY + state->sourceX);
 	const uint8_t *source = sprite->pixels + sourceOffset;
 	uint16_t remainingRows = state->drawHeight;
-	if (sprite->transparentColor == 0xffff) {
+	if (sprite->transparentColor == SLIP_SPRITE_NO_TRANSPARENT_COLOUR) {
 		do {
 			memcpy(destination, source, state->drawWidth);
 			RasterOverlay_MarkWritten(destination, state->drawWidth);
-			destination += 320;
+			destination += SLIPSTREAM_SCREEN_WIDTH;
 			source += sprite->width;
 		} while (--remainingRows != 0);
 	} else {
@@ -67,7 +68,7 @@ void SlipCursor_Draw(SlipCursorPixels *state, const SlipSoftwareCursor *cursor, 
 				}
 				++output;
 			} while (--remainingColumns != 0);
-			destination += 320;
+			destination += SLIPSTREAM_SCREEN_WIDTH;
 			source += sprite->width;
 		} while (--remainingRows != 0);
 	}
@@ -103,14 +104,14 @@ void SlipCursor_SaveBackground(SlipCursorPixels *state, const SlipSoftwareCursor
 	state->background.y = top;
 	const uint8_t *source = displayPage + state->rowOffsets[(uint16_t)top] + (uint16_t)left;
 	state->background.width = state->captureWidth;
-	state->background.transparentColor = 0xffff;
+	state->background.transparentColor = SLIP_SPRITE_NO_TRANSPARENT_COLOUR;
 	uint16_t remainingRows = state->captureHeight;
 	state->background.height = remainingRows;
 	uint8_t *destination = state->background.pixels;
 	do {
 		memcpy(destination, source, state->captureWidth);
 		destination += state->captureWidth;
-		source += 320;
+		source += SLIPSTREAM_SCREEN_WIDTH;
 	} while (--remainingRows != 0);
 }
 
@@ -126,7 +127,7 @@ void SlipCursor_RestoreBackground(SlipCursorPixels *state, uint8_t *displayPage)
 		do {
 			memcpy(destination, source, width);
 			source += width;
-			destination += 320;
+			destination += SLIPSTREAM_SCREEN_WIDTH;
 		} while (--remainingRows != 0);
 	}
 }

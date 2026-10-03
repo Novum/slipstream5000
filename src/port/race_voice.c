@@ -1,22 +1,23 @@
 #include "race_voice.h"
+#include "race.h"
 #include "race_player.h"
 
 #include <stddef.h>
 
-SlipRaceVoiceRecord SlipRaceVoice_resultsRecords[12] = {
+SlipRaceVoiceRecord SlipRaceVoice_resultsRecords[SLIP_RACE_VOICE_RESULTS_COUNT] = {
     {"EM28a.SMP", 0, NULL, 0, 0}, {"EM28c.SMP", 0, NULL, 0, 0}, {"EM28e.SMP", 0, NULL, 0, 0},
     {"EM29.SMP", 0, NULL, 0, 0},  {"EM30.SMP", 0, NULL, 0, 0},  {"EM31.SMP", 0, NULL, 0, 0},
     {"EM32.SMP", 0, NULL, 0, 0},  {"EM33.SMP", 0, NULL, 0, 0},  {"EM34.SMP", 0, NULL, 0, 0},
     {"EM35.SMP", 0, NULL, 0, 0},  {"EM36.SMP", 0, NULL, 0, 0},  {"EM37.SMP", 0, NULL, 0, 0},
 };
 
-SlipRaceVoiceRecord SlipRaceVoice_alternateRecords[10] = {
+SlipRaceVoiceRecord SlipRaceVoice_alternateRecords[SLIP_RACE_VOICE_ALTERNATE_COUNT] = {
     {"EF01.SMP", 0, NULL, 0, 0}, {"EM23.SMP", 0, NULL, 0, 0}, {"EF05.SMP", 0, NULL, 0, 0}, {"EM27.SMP", 0, NULL, 0, 0},
     {"EF04.SMP", 0, NULL, 0, 0}, {"EM24.SMP", 0, NULL, 0, 0}, {"EF02.SMP", 0, NULL, 0, 0}, {"EM26.SMP", 0, NULL, 0, 0},
     {"EF03.SMP", 0, NULL, 0, 0}, {"EM25.SMP", 0, NULL, 0, 0},
 };
 
-SlipRaceVoiceRecord SlipRaceVoice_raceRecords[85] = {
+SlipRaceVoiceRecord SlipRaceVoice_raceRecords[SLIP_RACE_VOICE_RACE_COUNT] = {
     {"EF93.SMP", 0, NULL, 0, 0},   {"EF104.SMP", 0, NULL, 0, 0}, {"EM38.SMP", 0, NULL, 0, 0},
     {"EM41.SMP", 0, NULL, 0, 0},   {"EM56.SMP", 0, NULL, 0, 1},  {"EM67.SMP", 0, NULL, 0, 2},
     {"EM64.SMP", 0, NULL, 0, 3},   {"EF56.SMP", 0, NULL, 0, 4},  {"EM70B.SMP", 0, NULL, 0, 5},
@@ -52,13 +53,14 @@ uint32_t SlipRaceVoice_bank;
 uint32_t SlipRaceVoice_speakingDriver;
 SlipRaceVoiceRecord *SlipRaceVoice_currentRecord;
 
-static SlipRaceVoiceRecord *const SlipRaceVoice_banks[4] = {NULL, SlipRaceVoice_resultsRecords,
-                                                            SlipRaceVoice_alternateRecords, SlipRaceVoice_raceRecords};
-static const uint32_t SlipRaceVoice_bankCounts[4] = {0, 12, 10, 85};
+static SlipRaceVoiceRecord *const SlipRaceVoice_banks[SLIP_RACE_VOICE_BANK_COUNT] = {
+    NULL, SlipRaceVoice_resultsRecords, SlipRaceVoice_alternateRecords, SlipRaceVoice_raceRecords};
+static const uint32_t SlipRaceVoice_bankCounts[SLIP_RACE_VOICE_BANK_COUNT] = {
+    0, SLIP_RACE_VOICE_RESULTS_COUNT, SLIP_RACE_VOICE_ALTERNATE_COUNT, SLIP_RACE_VOICE_RACE_COUNT};
 
 uint32_t SlipRaceVoice_loadOnDemand;
 uint32_t SlipRaceVoice_suppressRecent;
-uint32_t SlipRaceVoice_recentSelections[4];
+uint32_t SlipRaceVoice_recentSelections[SLIP_RACE_VOICE_RECENT_COUNT];
 uint32_t SlipRaceVoice_pendingSelection;
 
 bool SlipRaceVoice_CanPreload(uint32_t digitalCard, uint32_t bank, uint32_t reserve, const SlipRaceVoiceCalls *calls) {
@@ -110,7 +112,7 @@ bool SlipRaceVoice_Setup(uint32_t digitalCard, uint32_t bank, uint32_t loadOnDem
 }
 
 void SlipRaceVoice_ShutdownWithCalls(uint32_t digitalCard, const SlipRaceVoiceCalls *calls) {
-	if (digitalCard == 0 || SlipRaceVoice_bank == 0)
+	if (digitalCard == 0 || SlipRaceVoice_bank == SLIP_RACE_VOICE_BANK_NONE)
 		return;
 	SlipRaceVoiceRecord *const records = SlipRaceVoice_banks[SlipRaceVoice_bank];
 	const uint32_t count = SlipRaceVoice_bankCounts[SlipRaceVoice_bank];
@@ -124,11 +126,11 @@ void SlipRaceVoice_ShutdownWithCalls(uint32_t digitalCard, const SlipRaceVoiceCa
 			calls->release(calls->context, record->resourceHandle);
 		}
 	}
-	SlipRaceVoice_bank = 0;
+	SlipRaceVoice_bank = SLIP_RACE_VOICE_BANK_NONE;
 }
 
 uint32_t SlipRaceVoice_SpeakingDriverWithCalls(uint32_t digitalCard, const SlipRaceVoiceCalls *calls) {
-	if (SlipRaceVoice_bank == 0 || digitalCard == 0)
+	if (SlipRaceVoice_bank == SLIP_RACE_VOICE_BANK_NONE || digitalCard == 0)
 		return 0;
 	if (SlipRaceVoice_speakingDriver == 0)
 		return 0;
@@ -144,7 +146,7 @@ uint32_t SlipRaceVoice_SpeakingDriverWithCalls(uint32_t digitalCard, const SlipR
 }
 
 void SlipRaceVoice_Play(uint32_t digitalCard, uint32_t selection, const SlipRaceVoiceCalls *calls) {
-	if (digitalCard == 0 || SlipRaceVoice_bank == 0)
+	if (digitalCard == 0 || SlipRaceVoice_bank == SLIP_RACE_VOICE_BANK_NONE)
 		return;
 	if (SlipRaceVoice_suppressRecent != 0) {
 		if (selection == SlipRaceVoice_recentSelections[0])
@@ -157,7 +159,7 @@ void SlipRaceVoice_Play(uint32_t digitalCard, uint32_t selection, const SlipRace
 			return;
 	}
 	SlipRaceVoice_pendingSelection = selection;
-	if (SlipRaceVoice_bank == 0)
+	if (SlipRaceVoice_bank == SLIP_RACE_VOICE_BANK_NONE)
 		return;
 	SlipRaceVoiceRecord *records = SlipRaceVoice_banks[SlipRaceVoice_bank];
 	const uint32_t count = SlipRaceVoice_bankCounts[SlipRaceVoice_bank];
@@ -220,8 +222,8 @@ uint32_t SlipRaceVoice_SpeakingDriver(const SlipGameSoundState *sound) {
 	return SlipRaceVoice_SpeakingDriverWithCalls(sound->digitalCard, &calls);
 }
 
-static const uint32_t positionVoiceFirst[10] = {24, 25, 26, 27, 28, 29, 30, 31, 32, 33};
-static const uint32_t positionVoiceSecond[10] = {34, 35, 36, 37, 38, 39, 40, 41, 42, 43};
+static const uint32_t positionVoiceFirst[SLIP_RACE_RACER_COUNT] = {24, 25, 26, 27, 28, 29, 30, 31, 32, 33};
+static const uint32_t positionVoiceSecond[SLIP_RACE_RACER_COUNT] = {34, 35, 36, 37, 38, 39, 40, 41, 42, 43};
 
 void SlipRaceVoice_PositionChange(uint16_t minimumPosition, uint16_t previousMinimumPosition,
                                   const SlipRacePositionVoiceCalls *calls) {

@@ -1,5 +1,9 @@
 #include "input_navigation.h"
 #include <stddef.h>
+
+/* Move halfway toward the selected navigation target each update. */
+enum { SLIP_INPUT_NAVIGATION_APPROACH_SHIFT = 1 };
+
 SlipInputNavigationState SlipInput_navigation;
 int32_t SlipInput_pointerX, SlipInput_pointerY;
 SlipInputMotion SlipInput_motion;
@@ -11,7 +15,7 @@ SlipInputMotion SlipInput_ReadMotion(void) {
 	return motion;
 }
 
-bool SlipInput_TestAndClear(bool pressed[256], SlipInputCode code) {
+bool SlipInput_TestAndClear(bool pressed[SLIP_INPUT_CODE_COUNT], SlipInputCode code) {
 	bool result = pressed[code];
 	pressed[code] = false;
 	return result;
@@ -30,7 +34,7 @@ void SlipInput_SetNavigation(SlipInputNavigationTable *table) {
 
 void SlipInput_ClearNavigation(void) { SlipInput_navigation.active = NULL; }
 
-void SlipInput_UpdateNavigation(bool pressed[256]) {
+void SlipInput_UpdateNavigation(bool pressed[SLIP_INPUT_CODE_COUNT]) {
 	if (SlipInput_navigation.active == NULL)
 		return;
 	if (SlipInput_TestAndClear(pressed, SLIP_INPUT_SCAN_UP)) {
@@ -55,15 +59,19 @@ void SlipInput_UpdateNavigation(bool pressed[256]) {
 	}
 	const uint16_t current = *SlipInput_navigation.currentItem;
 	const int32_t distanceX =
-	    (int32_t)(((uint32_t)(uint16_t)SlipInput_navigation.centers[current][0] << 16) - (uint32_t)SlipInput_pointerX);
+	    (int32_t)(((uint32_t)(uint16_t)SlipInput_navigation.centers[current][0] << SLIP_INPUT_POINTER_FRACTION_BITS) -
+	              (uint32_t)SlipInput_pointerX);
 	const int32_t distanceY =
-	    (int32_t)(((uint32_t)(uint16_t)SlipInput_navigation.centers[current][1] << 16) - (uint32_t)SlipInput_pointerY);
-	SlipInput_pointerX = (int32_t)((uint32_t)SlipInput_pointerX + (uint32_t)(distanceX >> 1));
-	SlipInput_pointerY = (int32_t)((uint32_t)SlipInput_pointerY + (uint32_t)(distanceY >> 1));
+	    (int32_t)(((uint32_t)(uint16_t)SlipInput_navigation.centers[current][1] << SLIP_INPUT_POINTER_FRACTION_BITS) -
+	              (uint32_t)SlipInput_pointerY);
+	SlipInput_pointerX =
+	    (int32_t)((uint32_t)SlipInput_pointerX + (uint32_t)(distanceX >> SLIP_INPUT_NAVIGATION_APPROACH_SHIFT));
+	SlipInput_pointerY =
+	    (int32_t)((uint32_t)SlipInput_pointerY + (uint32_t)(distanceY >> SLIP_INPUT_NAVIGATION_APPROACH_SHIFT));
 }
 
 /* Original configuration navigation tables, in SlipConfigMenuTable order. */
-SlipInputNavigationTable SlipInput_configurationNavigation[9] = {
+SlipInputNavigationTable SlipInput_configurationNavigation[SLIP_CONFIG_TABLE_COUNT] = {
 
     {6,
      0,
@@ -130,8 +138,8 @@ SlipInputNavigationTable SlipInput_configurationNavigation[9] = {
 };
 
 SlipInputPointerPosition SlipInput_Pointer(void) {
-	return (SlipInputPointerPosition){(uint16_t)((uint32_t)SlipInput_pointerX >> 16),
-	                                  (uint16_t)((uint32_t)SlipInput_pointerY >> 16)};
+	return (SlipInputPointerPosition){(uint16_t)((uint32_t)SlipInput_pointerX >> SLIP_INPUT_POINTER_FRACTION_BITS),
+	                                  (uint16_t)((uint32_t)SlipInput_pointerY >> SLIP_INPUT_POINTER_FRACTION_BITS)};
 }
 
 uint32_t SlipInput_HitTest(const SlipInputRectangle *rectangle, uint16_t count, int16_t x, int16_t y) {
@@ -146,11 +154,11 @@ uint32_t SlipInput_HitTest(const SlipInputRectangle *rectangle, uint16_t count, 
 	return 0;
 }
 
-bool SlipInput_pressed[256], SlipInput_held[256];
+bool SlipInput_pressed[SLIP_INPUT_CODE_COUNT], SlipInput_held[SLIP_INPUT_CODE_COUNT];
 
-SlipInputCode SlipInput_PopPressed(bool pressed[256]) {
+SlipInputCode SlipInput_PopPressed(bool pressed[SLIP_INPUT_CODE_COUNT]) {
 	unsigned code = 0;
-	unsigned remaining = 256;
+	unsigned remaining = SLIP_INPUT_CODE_COUNT;
 	do {
 		if (pressed[code]) {
 			pressed[code] = false;
@@ -161,13 +169,14 @@ SlipInputCode SlipInput_PopPressed(bool pressed[256]) {
 	return SLIP_INPUT_SCAN_NONE;
 }
 
-SlipInputCode SlipInput_PopMenuPressed(bool pressed[256]) {
+SlipInputCode SlipInput_PopMenuPressed(bool pressed[SLIP_INPUT_CODE_COUNT]) {
 	unsigned code = 0;
-	unsigned remaining = 256;
+	unsigned remaining = SLIP_INPUT_CODE_COUNT;
 	do {
 		bool examine = true;
 		if (SlipInput_navigation.active != NULL) {
-			if (code == 0x48 || code == 0x50 || code == 0x4b || code == 0x4d)
+			if (code == SLIP_INPUT_SCAN_UP || code == SLIP_INPUT_SCAN_DOWN || code == SLIP_INPUT_SCAN_LEFT ||
+			    code == SLIP_INPUT_SCAN_RIGHT)
 				examine = false;
 		}
 		if (examine && pressed[code]) {
@@ -179,7 +188,7 @@ SlipInputCode SlipInput_PopMenuPressed(bool pressed[256]) {
 	return SLIP_INPUT_SCAN_NONE;
 }
 
-SlipInputNavigationTable SlipInput_garageNavigation[5] = {
+SlipInputNavigationTable SlipInput_garageNavigation[SLIP_INPUT_GARAGE_TABLE_COUNT] = {
 
     {3, 0, {-1, 0, 1}, {1, 2, -1}, {-1, -1, -1}, {-1, -1, -1}, {{63, 122}, {63, 150}, {63, 178}}},
 

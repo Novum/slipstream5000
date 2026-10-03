@@ -10,8 +10,8 @@ typedef struct SlipLapRecordsScreen {
 	uint32_t trackIndex;
 	SlipStringTableSlot *strings;
 	uint16_t background, inactive, shapeBackground;
-	uint16_t portraits[10], shapes[10];
-	uint16_t rowFont, titleFont, rows[3];
+	uint16_t portraits[SLIP_RACE_RACER_COUNT], shapes[SLIP_RACE_RACER_COUNT];
+	uint16_t rowFont, titleFont, rows[SLIP_LAP_RECORDS_ROW_COUNT];
 	SlipLapRecordsAnimation animation;
 	SlipLapRecordNameInput input;
 	SlipLapRecord *editingRecord;

@@ -45,11 +45,11 @@ static bool SlipFile_WriteAt(int handle, int32_t offset, const uint8_t *data, ui
 bool SlipFile_Write(const char *path, const uint8_t *data, uint32_t length) {
 	const int handle = SlipFile_Create(path);
 	if (handle < 0) {
-		SlipRuntime_error = 4;
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_CREATE_FAILED;
 		return true;
 	}
 	if (SlipFile_WriteAt(handle, 0, data, (uint16_t)length)) {
-		SlipRuntime_error = 5;
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_WRITE_FAILED;
 		SlipFile_Close(handle);
 		return true;
 	}

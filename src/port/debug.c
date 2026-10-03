@@ -8,6 +8,7 @@
 #include "capture_stream.h"
 #include "config_menu_host.h"
 #include "config_settings.h"
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "input.h"
 #include "menu.h"
@@ -46,10 +47,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+	SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN = 0x04000000,
+	SLIP_DEBUG_RACE_MAXIMUM_FRAMES = 90000,
+	SLIP_DEBUG_RACE_DEFAULT_TICK_MS = 14,
+	SLIP_DEBUG_RACE_MAXIMUM_TICK_MS = 1000,
+	SLIP_DEBUG_RACE_TRACE_INTERVAL_FRAMES = 1000,
+	SLIP_DEBUG_DIGITAL_DRIVER_VERSION = 0xe015,
+	SLIP_DEBUG_RESOURCE_CAPACITY_BYTES = 32u * 1024u * 1024u,
+	SLIP_DEBUG_GPU_MAXIMUM_DIMENSION = 8192,
+	SLIP_DEBUG_PRESENTER_TICK_MS = 16,
+	SLIP_DEBUG_PRESENTER_DELAY_MS = 14,
+	SLIP_DEBUG_PRESENTER_DEFAULT_CAPTURE_FRAME = 3000
+};
+
 static SlipRaceFrameResult SlipDebug_RunRaceFixtureFrame(uint32_t tick, const SlipRaceControlBinding bindings[2],
-                                                         const bool held[256], bool pressed[256],
-                                                         bool reverseAccelerator, uint32_t windowSize, int mouseX,
-                                                         int mouseY) {
+                                                         const bool held[SLIP_INPUT_CODE_COUNT],
+                                                         bool pressed[SLIP_INPUT_CODE_COUNT], bool reverseAccelerator,
+                                                         uint32_t windowSize, int mouseX, int mouseY) {
 	SlipRace_controlBindings[0] = bindings[0];
 	SlipRace_controlBindings[1] = bindings[1];
 	SlipRace_reverseAccelerator = reverseAccelerator ? 1 : 0;
@@ -90,7 +105,7 @@ static uint32_t SlipDebug_ReplayTick(void *context) {
 static bool SlipDebug_HarnessFrame(uint32_t frame) {
 	if (getenv("SLIP_HARNESS_PIPE") == NULL)
 		return false;
-	uint32_t states[16] = {0};
+	uint32_t states[SLIP_CAPTURE_STATE_WORD_COUNT] = {0};
 	uint32_t count = 0;
 	const uint16_t players[2] = {SlipRacePlayer_playerOneObject, SlipRacePlayer_playerTwoObject};
 	for (unsigned i = 0; i < 2; ++i) {
@@ -266,8 +281,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 	SlipGameSoundState musicGame = {0};
 	uint64_t musicFrames = 0;
 	SlipRaceControlBinding bindings[2] = {{0}};
-	bool inputHeld1[256] = {false};
-	bool inputPressed[256] = {false};
+	bool inputHeld1[SLIP_INPUT_CODE_COUNT] = {false};
+	bool inputPressed[SLIP_INPUT_CODE_COUNT] = {false};
 	size_t nonzeroPixelCount = 0;
 	size_t i;
 
@@ -317,11 +332,11 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		return -1;
 	}
 	if ((verifyRefuel || verifyDoors || verifyLapRun || (verifyQuit && argc == 4)) &&
-	    (atoi(argv[3]) < 1 || atoi(argv[3]) > 10))
+	    (atoi(argv[3]) < 1 || atoi(argv[3]) > SLIP_RACE_TRACK_COUNT))
 		return 4;
 	TrackView_RenderSetDiagnostics(capturedFrancePostframe || capturedTunnel || capturedLondon || capturedHawaii ||
 	                               capturedHawaiiHall || hawaiiFirstFrame || capturedEgypt);
-	SlipResourceHost_Initialize(32u * 1024u * 1024u);
+	SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 	SlipResourceHost_OpenArchives(argv[2], NULL);
 
 	if (!SlipResourceHost_Load(NULL, "SMALL.FNT", &SlipMenu_resources.smallFont) ||
@@ -358,11 +373,11 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 	HmiDigitalDriver aiHitAudioDriver;
 	if (verifyAiHitAudio || verifyWeaponCamera) {
 
-		HmiDigitalDriver_Reset(&aiHitAudioDriver, 0xe015u);
+		HmiDigitalDriver_Reset(&aiHitAudioDriver, SLIP_DEBUG_DIGITAL_DRIVER_VERSION);
 		SlipGameSound_Reset(&musicGame, &aiHitAudioDriver);
 		musicGame.initialized = 1;
 		SlipSoundEffects_Install();
-		musicGame.digitalCard = 0xe015u;
+		musicGame.digitalCard = SLIP_DEBUG_DIGITAL_DRIVER_VERSION;
 		SlipRaceSession_BindSoundHost(&musicGame, 0, NULL, NULL, NULL);
 	}
 	if (verifyMusic || verifyMenuMusicClose) {
@@ -370,8 +385,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		if (!SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy") || !SDL_Init(SDL_INIT_AUDIO))
 			return 4;
 		musicGame.initialized = 1;
-		for (route = 0; route < 32; ++route)
-			musicGame.musicRouting[route] = 0xff;
+		for (route = 0; route < HMI_MUSIC_TRACK_COUNT; ++route)
+			musicGame.musicRouting[route] = HMI_MUSIC_UNROUTED_DRIVER;
 		if (!SlipMenuMusic_Open(argv[2], &musicGame)) {
 			SDL_Quit();
 			return 4;
@@ -406,7 +421,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 	}
 	if (verifyRecordingLive) {
 		SlipConfig_damageOverride = -1;
-		SlipRaceRecording_Install(12, 100000, &SlipRaceSession_recordingHost);
+		SlipRaceRecording_Install(2 * SLIP_RECORDING_CONTROL_BYTES, SLIP_RECORDING_DEFAULT_CAPACITY_BYTES,
+		                          &SlipRaceSession_recordingHost);
 	}
 	SlipRaceSession_Begin(
 	    argv[2],
@@ -444,12 +460,13 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		uint16_t sections[2] = {0}, laps[2] = {0};
 		unsigned crossings[2] = {0};
 		for (unsigned player = 0; player < 2; ++player) {
-			SlipRacePlayer_SetController(players[player], 2);
+			SlipRacePlayer_SetController(players[player], SLIP_RACER_COMPUTER);
 			sections[player] = SlipRace_racerTable.records[player].trackComponent;
 		}
-		const uint32_t frameLimit = argc >= 5 ? (uint32_t)strtoul(argv[4], NULL, 10) : 90000;
-		const uint32_t tickDelta = argc == 6 ? (uint32_t)strtoul(argv[5], NULL, 10) : 14;
-		if (frameLimit == 0 || frameLimit > 90000 || tickDelta == 0 || tickDelta > 1000)
+		const uint32_t frameLimit = argc >= 5 ? (uint32_t)strtoul(argv[4], NULL, 10) : SLIP_DEBUG_RACE_MAXIMUM_FRAMES;
+		const uint32_t tickDelta = argc == 6 ? (uint32_t)strtoul(argv[5], NULL, 10) : SLIP_DEBUG_RACE_DEFAULT_TICK_MS;
+		if (frameLimit == 0 || frameLimit > SLIP_DEBUG_RACE_MAXIMUM_FRAMES || tickDelta == 0 ||
+		    tickDelta > SLIP_DEBUG_RACE_MAXIMUM_TICK_MS)
 			return 2;
 		for (uint32_t frame = 0; frame < frameLimit; ++frame) {
 			const SlipRaceFrameResult result =
@@ -464,8 +481,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 					sections[player] = racer->trackComponent;
 				}
 				winner |= racer->finished && racer->lapNumber > SlipRacePlayer_lapCount;
-				if (traceLapFrames || frame % 1000 == 0 || laps[player] != racer->lapNumber ||
-				    result != SLIP_RACE_FRAME_CONTINUE) {
+				if (traceLapFrames || frame % SLIP_DEBUG_RACE_TRACE_INTERVAL_FRAMES == 0 ||
+				    laps[player] != racer->lapNumber || result != SLIP_RACE_FRAME_CONTINUE) {
 					printf("split_laps player=%u track=%s frame=%u crossings=%u lap=%u finished=%u result=%u\n",
 					       player + 1, argv[3], frame, crossings[player], racer->lapNumber, racer->finished, result);
 					if (result == SLIP_RACE_FRAME_CONTINUE) {
@@ -496,13 +513,14 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		 * Lap counters, finish flags, and positions are not injected. */
 		SlipRaceRacerState *const racer = &SlipRace_racerTable.records[0];
 		if (getenv("SLIP_HARNESS_INPUT") == NULL)
-			SlipRacePlayer_SetController(SlipRacePlayer_playerOneObject, 2);
+			SlipRacePlayer_SetController(SlipRacePlayer_playerOneObject, SLIP_RACER_COMPUTER);
 		uint16_t previousSection = racer->trackComponent;
 		uint16_t previousLap = racer->lapNumber;
 		unsigned crossings = 0;
-		const uint32_t frameLimit = argc >= 5 ? (uint32_t)strtoul(argv[4], NULL, 10) : 90000;
-		const uint32_t tickDelta = argc == 6 ? (uint32_t)strtoul(argv[5], NULL, 10) : 14;
-		if (frameLimit == 0 || frameLimit > 90000 || tickDelta == 0 || tickDelta > 1000)
+		const uint32_t frameLimit = argc >= 5 ? (uint32_t)strtoul(argv[4], NULL, 10) : SLIP_DEBUG_RACE_MAXIMUM_FRAMES;
+		const uint32_t tickDelta = argc == 6 ? (uint32_t)strtoul(argv[5], NULL, 10) : SLIP_DEBUG_RACE_DEFAULT_TICK_MS;
+		if (frameLimit == 0 || frameLimit > SLIP_DEBUG_RACE_MAXIMUM_FRAMES || tickDelta == 0 ||
+		    tickDelta > SLIP_DEBUG_RACE_MAXIMUM_TICK_MS)
 			return 2;
 		for (uint32_t frame = 0; frame < frameLimit; ++frame) {
 			const SlipRaceFrameResult result =
@@ -513,8 +531,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 				++crossings;
 				previousSection = racer->trackComponent;
 			}
-			if (traceLapFrames || frame % 1000 == 0 || frame + 1 == frameLimit || racer->lapNumber != previousLap ||
-			    result != SLIP_RACE_FRAME_CONTINUE) {
+			if (traceLapFrames || frame % SLIP_DEBUG_RACE_TRACE_INTERVAL_FRAMES == 0 || frame + 1 == frameLimit ||
+			    racer->lapNumber != previousLap || result != SLIP_RACE_FRAME_CONTINUE) {
 				printf("race_laps track=%s frame=%u section=%04x crossings=%u lap=%u progress=%u finished=%u "
 				       "destroyed=%u result=%u\n",
 				       argv[3], frame, racer->trackComponent, crossings, racer->lapNumber, racer->trackProgress,
@@ -555,7 +573,7 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 	if (verifyMiniMines) {
 		/* Fixture input: select player two's Mini Mines, then use the ordinary fire binding. */
 		SlipRaceRacerState *const racer = &SlipRace_racerTable.records[1];
-		racer->primaryWeaponIndex = 11;
+		racer->primaryWeaponIndex = SLIP_RACE_WEAPON_BOMBER;
 		racer->primaryWeaponAmmo = 2;
 		bindings[1].select = SLIP_INPUT_SCAN_W;
 		bindings[1].fire = SLIP_INPUT_SCAN_X;
@@ -576,7 +594,7 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		unsigned mines = 0;
 		for (uint16_t object = SlipObject_Next(UINT16_MAX); object != UINT16_MAX; object = SlipObject_Next(object)) {
 			if (SlipObject_table[object / SLIP_OBJECT_DOS_STRIDE].actorHandle == 2 &&
-			    SlipRacePlayer_ProjectileWeaponIndex(object) == 11 &&
+			    SlipRacePlayer_ProjectileWeaponIndex(object) == SLIP_RACE_WEAPON_BOMBER &&
 			    SlipRacePlayer_ProjectileShooter(object) == SlipRacePlayer_playerTwoObject)
 				++mines;
 		}
@@ -591,7 +609,7 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		}
 		for (uint16_t object = SlipObject_Next(UINT16_MAX); object != UINT16_MAX; object = SlipObject_Next(object)) {
 			if (SlipObject_table[object / SLIP_OBJECT_DOS_STRIDE].actorHandle == 2 &&
-			    SlipRacePlayer_ProjectileWeaponIndex(object) == 11)
+			    SlipRacePlayer_ProjectileWeaponIndex(object) == SLIP_RACE_WEAPON_BOMBER)
 				return 4;
 		}
 		puts("mini_mines live_update_render_and_removal=passed");
@@ -601,7 +619,7 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		/* Fixture selects the existing Frag record and then fires using
 		 * player one's ordinary control binding. No camera state is injected. */
 		SlipRaceRacerState *const racer = &SlipRace_racerTable.records[0];
-		racer->primaryWeaponIndex = 2;
+		racer->primaryWeaponIndex = SLIP_RACE_WEAPON_FRAG;
 		racer->primaryWeaponAmmo = 2;
 		SlipConfig_weaponsMonitor = 1;
 		SlipConfig_rearMonitor = 1;
@@ -706,8 +724,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 				motion[frame][player] = (struct ReplayMotion){object->position, object->direction};
 			}
 		}
-		inputPressed[0x3b] = true;
-		inputPressed[0x40] = true;
+		inputPressed[SLIP_INPUT_SCAN_F1] = true;
+		inputPressed[SLIP_INPUT_SCAN_F6] = true;
 		for (unsigned frame = 0; frame < 400; ++frame) {
 			inputHeld1[bindings[0].fire] = frame < 200;
 			inputHeld1[bindings[1].fire] = frame >= 200;
@@ -730,7 +748,7 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 				motion[frame + 400][player] = (struct ReplayMotion){object->position, object->direction};
 			}
 			for (uint32_t beam = 0; beam < SlipTrackWorld_beams.queueCount; ++beam)
-				hitFrames += (SlipTrackWorld_beams.queue[beam].material & 0x80000000u) != 0;
+				hitFrames += (SlipTrackWorld_beams.queue[beam].material & SLIP_RACE_BEAM_HIT_FLAG) != 0;
 		}
 		printf("blaster_race frames=400 beam_frames=%u queued_hits=%u input_shooter_mask=%u\n", beamFrames, hitFrames,
 		       shooters);
@@ -768,11 +786,11 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 			       recording->writtenFrames, recording->elapsed);
 			if (verifyReplayLive) {
 				/* Exit through the ordinary pause menu, keeping the recorded stream for replay. */
-				inputPressed[1] = true;
+				inputPressed[SLIP_INPUT_SCAN_ESCAPE] = true;
 				if (SlipDebug_RunRaceFixtureFrame(803 * 14, bindings, inputHeld1, inputPressed, false, 0, 160, 89) !=
 				    SLIP_RACE_FRAME_CONTINUE)
 					return 4;
-				inputPressed[0x1c] = true;
+				inputPressed[SLIP_INPUT_SCAN_ENTER] = true;
 				if (SlipDebug_RunRaceFixtureFrame(804 * 14, bindings, inputHeld1, inputPressed, false, 0, 160, 89) !=
 				    SLIP_RACE_FRAME_ENDED)
 					return 4;
@@ -820,13 +838,15 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		for (unsigned i = 0; i < SlipTrackWorld_doorCount; ++i) {
 			const SlipTrackDoorRecord *const door = &SlipTrackWorld_doors[i];
 			if (door->object != 0 || door->shapeHandle != 0 || door->trackSlotAddress != 0 ||
-			    door->firstTrackRecord < 0x04000000 || door->secondTrackRecord < 0x04000000)
+			    door->firstTrackRecord < SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN ||
+			    door->secondTrackRecord < SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN)
 				return 4;
 			printf("door %u links=%x,%x size=%d,%d direction=%d,%d,%d plane=%d,%d,%d endpoints=%d,%d,%d/%d,%d,%d\n", i,
-			       door->firstTrackRecord - 0x04000000, door->secondTrackRecord - 0x04000000, door->halfWidth,
-			       door->halfHeight, door->directionX, door->directionY, door->directionZ, door->planeOrigin.x,
-			       door->planeOrigin.y, door->planeOrigin.z, door->openEndpoint.x, door->openEndpoint.y,
-			       door->openEndpoint.z, door->closedEndpoint.x, door->closedEndpoint.y, door->closedEndpoint.z);
+			       door->firstTrackRecord - SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN,
+			       door->secondTrackRecord - SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN, door->halfWidth, door->halfHeight,
+			       door->directionX, door->directionY, door->directionZ, door->planeOrigin.x, door->planeOrigin.y,
+			       door->planeOrigin.z, door->openEndpoint.x, door->openEndpoint.y, door->openEndpoint.z,
+			       door->closedEndpoint.x, door->closedEndpoint.y, door->closedEndpoint.z);
 			printf("matrix");
 			for (unsigned word = 0; word < 9; ++word)
 				printf(" %d", door->matrix.m[word]);
@@ -952,11 +972,11 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		/* Quit through the real menu twice, reopening the track in between. */
 		const uint16_t track = SlipRaceSession_track;
 		for (unsigned pass = 0; pass < 2; ++pass) {
-			inputPressed[1] = true;
+			inputPressed[SLIP_INPUT_SCAN_ESCAPE] = true;
 			if (SlipDebug_RunRaceFixtureFrame(42, bindings, inputHeld1, inputPressed, false, 0, 160, 89) !=
 			    SLIP_RACE_FRAME_CONTINUE)
 				return 4;
-			inputPressed[0x1c] = true;
+			inputPressed[SLIP_INPUT_SCAN_ENTER] = true;
 			if (SlipDebug_RunRaceFixtureFrame(56, bindings, inputHeld1, inputPressed, false, 0, 160, 89) !=
 			        SLIP_RACE_FRAME_ENDED ||
 			    SlipRaceSession_exitRequested != 1 || SlipObject_table != NULL || SlipRaceCollision_enabled != 0 ||
@@ -992,8 +1012,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		if (SlipRacePlayer_playerOneObject == 0 || SlipRacePlayer_playerTwoObject == 0 ||
 		    SlipRacePlayer_playerOneObject == SlipRacePlayer_playerTwoObject)
 			return 4;
-		inputPressed[0x3b] = true;
-		inputPressed[0x40] = true;
+		inputPressed[SLIP_INPUT_SCAN_F1] = true;
+		inputPressed[SLIP_INPUT_SCAN_F6] = true;
 		/* Diagnostic damage distinguishes the two racers and exercises compact bars. */
 		SlipRace_racerTable.records[0].movementDamageQ16 = 25u << 16;
 		SlipRace_racerTable.records[1].movementDamageQ16 = 75u << 16;
@@ -1061,7 +1081,7 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 			bindings[0].fire = SLIP_INPUT_SCAN_Z;
 			bindings[1].fire = SLIP_INPUT_SCAN_X;
 			for (unsigned player = 0; player < 2; ++player) {
-				SlipRace_racerTable.records[player].primaryWeaponIndex = 9;
+				SlipRace_racerTable.records[player].primaryWeaponIndex = SLIP_RACE_WEAPON_SMOKER;
 				SlipRace_racerTable.records[player].primaryWeaponAmmo = 2;
 			}
 		}
@@ -1332,8 +1352,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 			SlipDebug_PrintDebrisState("after", debris[i]);
 		}
 		unsigned movedFrames = 0, lastFrame = 0;
-		inputPressed[0x3c] = true;
-		inputPressed[0x41] = true;
+		inputPressed[SLIP_INPUT_SCAN_F2] = true;
+		inputPressed[SLIP_INPUT_SCAN_F7] = true;
 		bool captureSaved = false;
 		uint8_t capture[sizeof(g_displayFramebuffer)];
 		for (unsigned frame = 1; frame <= 720; ++frame) {
@@ -1513,9 +1533,12 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 			}
 			if (inputPressed[keys[key]])
 				return 4;
-			uint32_t hash = 2166136261u;
+
+			enum { FNV1A_OFFSET_BASIS = 2166136261u, FNV1A_PRIME = 16777619u };
+
+			uint32_t hash = FNV1A_OFFSET_BASIS;
 			for (size_t pixel = 0; pixel < sizeof(g_displayFramebuffer); ++pixel)
-				hash = (hash ^ g_displayFramebuffer[pixel]) * 16777619u;
+				hash = (hash ^ g_displayFramebuffer[pixel]) * FNV1A_PRIME;
 			printf("race_camera scan=%02x framebuffer=%08x rendered=%u raw_bsp_callbacks=%u rasterized=%u\n", keys[key],
 			       hash, SlipRaceSession_lastRenderSucceeded ? 1u : 0u, SlipRaceSession_lastRawBspCallbacks,
 			       SlipRaceSession_lastRasterizedPrimitives);
@@ -1524,11 +1547,12 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 				return 4;
 		}
 		for (unsigned pass = 0; pass < 2; ++pass, tick += 14) {
-			inputPressed[0x40] = true;
-			inputPressed[0x41] = true;
+			inputPressed[SLIP_INPUT_SCAN_F6] = true;
+			inputPressed[SLIP_INPUT_SCAN_F7] = true;
 			if (SlipDebug_RunRaceFixtureFrame(tick, bindings, inputHeld1, inputPressed, false, 0, -1, -1) !=
 			        SLIP_RACE_FRAME_CONTINUE ||
-			    inputPressed[0x40] || inputPressed[0x41] || SlipConfig_RearMonitor() != (rear ^ (pass == 0)) ||
+			    inputPressed[SLIP_INPUT_SCAN_F6] || inputPressed[SLIP_INPUT_SCAN_F7] ||
+			    SlipConfig_RearMonitor() != (rear ^ (pass == 0)) ||
 			    SlipConfig_WeaponsMonitor() != (weapons ^ (pass == 0)))
 				return 4;
 			tick += 14;
@@ -1665,7 +1689,8 @@ static int SlipDebug_VerifyRaceGpu(int argc, char **argv) {
 		return 4;
 	const char *size = getenv("SLIP_GPU_VERIFY_SIZE");
 	if (size && (sscanf(size, "%dx%d", &SlipDebug_gpuWidth, &SlipDebug_gpuHeight) != 2 || SlipDebug_gpuWidth < 2 ||
-	             SlipDebug_gpuHeight < 2 || SlipDebug_gpuWidth > 8192 || SlipDebug_gpuHeight > 8192))
+	             SlipDebug_gpuHeight < 2 || SlipDebug_gpuWidth > SLIP_DEBUG_GPU_MAXIMUM_DIMENSION ||
+	             SlipDebug_gpuHeight > SLIP_DEBUG_GPU_MAXIMUM_DIMENSION))
 		return 4;
 	SDL_Window *window =
 	    SDL_CreateWindow("Race GPU verification", SlipDebug_gpuWidth, SlipDebug_gpuHeight, SDL_WINDOW_HIDDEN);
@@ -1680,7 +1705,7 @@ static int SlipDebug_VerifyRaceGpu(int argc, char **argv) {
 	int result = SlipDebug_VerifyRaceRender(3, fixture);
 	if (result == 0 && strcmp(fixture[1], "--verify-race-cameras") == 0) {
 		SlipRaceControlBinding bindings[2] = {{0}};
-		bool held[256] = {false}, pressed[256] = {false};
+		bool held[SLIP_INPUT_CODE_COUNT] = {false}, pressed[SLIP_INPUT_CODE_COUNT] = {false};
 		SlipConfig_rearMonitor = 1;
 		SlipConfig_weaponsMonitor = 0;
 		if (SlipDebug_RunRaceFixtureFrame(4000, bindings, held, pressed, false, 0, -1, -1) !=
@@ -1690,7 +1715,7 @@ static int SlipDebug_VerifyRaceGpu(int argc, char **argv) {
 	}
 	if (result == 0 && strcmp(fixture[1], "--verify-race-fly-in") == 0) {
 		SlipRaceControlBinding bindings[2] = {{0}};
-		bool held[256] = {false}, pressed[256] = {false};
+		bool held[SLIP_INPUT_CODE_COUNT] = {false}, pressed[SLIP_INPUT_CODE_COUNT] = {false};
 		SlipRaceDisplay_Toggle(NULL);
 		if (SlipDebug_RunRaceFixtureFrame(2600, bindings, held, pressed, false, 0, -1, -1) !=
 		        SLIP_RACE_FRAME_CONTINUE ||
@@ -1747,7 +1772,7 @@ static int SlipDebug_VerifySpeedHud(int argc, char **argv) {
 	bool passed = true;
 	if (argc != 3 || strcmp(argv[1], "--verify-speed-hud") != 0)
 		return -1;
-	SlipResourceHost_Initialize(32u * 1024u * 1024u);
+	SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 	SlipResourceHost_OpenArchives(argv[2], NULL);
 	if (!SlipResourceHost_Load(NULL, "SPD.FNT", &assets.speedFont))
 		return 4;
@@ -1794,7 +1819,7 @@ static bool SlipDebug_RecordCameraActivation(void *context, uint16_t mode, uint1
 
 static int SlipDebug_VerifyCameraKeys(int argc, char **argv) {
 	SlipRaceCameraState state = {0};
-	bool pressed[256] = {false};
+	bool pressed[SLIP_INPUT_CODE_COUNT] = {false};
 	uint16_t activation[3] = {0};
 	if (argc != 2 || strcmp(argv[1], "--verify-camera-keys") != 0)
 		return -1;
@@ -1837,7 +1862,7 @@ static int SlipDebug_VerifyCameraKeys(int argc, char **argv) {
 			return 4;
 		for (unsigned i = 0; i < 9; ++i) {
 			const uint16_t original = i == 0 ? 0x8000u : (uint16_t)(0x111u * i);
-			const uint16_t expected = i >= 3 && i < 6 ? original : (uint16_t)((0u - original) & 0xffffu);
+			const uint16_t expected = i >= 3 && i < 6 ? original : (uint16_t)((0u - original) & UINT16_MAX);
 			if ((uint16_t)matrix.m[i] != expected)
 				return 4;
 		}
@@ -1848,7 +1873,7 @@ static int SlipDebug_VerifyCameraKeys(int argc, char **argv) {
 		SlipObjectPosition position;
 		SlipView3DMatrix matrix;
 		SlipObjectMatrixCopy copy;
-		for (size_t i = 0; i < 60; ++i)
+		for (size_t i = 0; i < SLIP_RACE_TV_POSITION_COUNT; ++i)
 			state.tvPositions[i] = (SlipView3DVec32){-1, 0, 0};
 		state.tvPositions[1] = (SlipView3DVec32){0, 0, -0x4000};
 		state.tvPositions[2] = (SlipView3DVec32){0, 0, 0x4000};
@@ -1872,41 +1897,41 @@ static int SlipDebug_VerifyCameraKeys(int argc, char **argv) {
 	state.viewOneMode = 3;
 	state.externalMatrix = (SlipView3DMatrix){{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
 	state.externalDistance = 0x4c40;
-	pressed[0x4e] = true;
+	pressed[SLIP_INPUT_SCAN_KEYPAD_PLUS] = true;
 	SlipRaceCamera_ExternalControls(&state, 0x2000, pressed, NULL);
 	if (state.externalDistance != 0x2250)
 		return 4;
-	pressed[0x4e] = false;
-	pressed[0x4a] = true;
+	pressed[SLIP_INPUT_SCAN_KEYPAD_PLUS] = false;
+	pressed[SLIP_INPUT_SCAN_KEYPAD_MINUS] = true;
 	state.externalDistance = 0xbea0;
 	SlipRaceCamera_ExternalControls(&state, 0x2000, pressed, NULL);
 	if (state.externalDistance != 0xbea0)
 		return 4;
-	pressed[0x4a] = false;
+	pressed[SLIP_INPUT_SCAN_KEYPAD_MINUS] = false;
 	state.viewTwoMode = 3;
 	/* F2 first selects Chase, then the duplicate F2 record selects Camera Dropped. */
 	for (unsigned i = 0; i < 3; ++i) {
 		const uint16_t expected = i == 1 ? 8 : 4;
-		pressed[0x3c] = true;
+		pressed[SLIP_INPUT_SCAN_F2] = true;
 		if (!SlipRaceCamera_PollKeys(&state, 0, pressed, SlipDebug_RecordCameraActivation, activation) ||
-		    state.viewOneMode != expected || pressed[0x3c] || activation[0] != 4 || activation[1] != 1 ||
+		    state.viewOneMode != expected || pressed[SLIP_INPUT_SCAN_F2] || activation[0] != 4 || activation[1] != 1 ||
 		    activation[2] != (i == 2 ? 2 : 1) || state.viewOneModeNameTimer != 6000)
 			return 4;
 	}
 	/* F7 is not a second-view camera key outside split-screen. */
-	pressed[0x41] = true;
-	if (!SlipRaceCamera_PollKeys(&state, 0, pressed, SlipDebug_RecordCameraActivation, activation) || !pressed[0x41] ||
-	    state.viewTwoMode != 3)
+	pressed[SLIP_INPUT_SCAN_F7] = true;
+	if (!SlipRaceCamera_PollKeys(&state, 0, pressed, SlipDebug_RecordCameraActivation, activation) ||
+	    !pressed[SLIP_INPUT_SCAN_F7] || state.viewTwoMode != 3)
 		return 4;
-	if (!SlipRaceCamera_PollKeys(&state, 1, pressed, SlipDebug_RecordCameraActivation, activation) || pressed[0x41] ||
-	    state.viewTwoMode != 4 || activation[1] != 2)
+	if (!SlipRaceCamera_PollKeys(&state, 1, pressed, SlipDebug_RecordCameraActivation, activation) ||
+	    pressed[SLIP_INPUT_SCAN_F7] || state.viewTwoMode != 4 || activation[1] != 2)
 		return 4;
 	/* Finished-racer modes block changes and leave the key unconsumed. */
 	for (uint16_t mode = 1; mode <= 2; ++mode) {
 		state.viewOneMode = mode;
-		pressed[0x3b] = true;
+		pressed[SLIP_INPUT_SCAN_F1] = true;
 		if (!SlipRaceCamera_PollKeys(&state, 0, pressed, SlipDebug_RecordCameraActivation, activation) ||
-		    state.viewOneMode != mode || !pressed[0x3b])
+		    state.viewOneMode != mode || !pressed[SLIP_INPUT_SCAN_F1])
 			return 4;
 	}
 	/* Event-driven changes must run the same activation hooks as keyboard changes. */
@@ -1949,16 +1974,16 @@ static void SlipDebug_PresenterFrame(void *context) {
 			campaignStage = campaignStage < 2 ? 1 : 3;
 		else
 			campaignStage = 2;
-		uint32_t state[16] = {campaignStage};
+		uint32_t state[SLIP_CAPTURE_STATE_WORD_COUNT] = {campaignStage};
 		if (SlipPresenter_state.active) {
-			for (unsigned layer = 0; layer < 4; ++layer)
+			for (unsigned layer = 0; layer < SLIP_PRESENTER_LAYER_COUNT; ++layer)
 				state[1 + layer] = SlipPresenter_state.layers[SlipPresenter_state.variant != 0][layer].frame;
 		}
 		SlipRandomState random = SlipRandom_GetState();
 		if (SlipHarness_WriteFrame(presenterFrames - 1, SlipFrameTimer_Values().deltaMilliseconds, 0, random.stateWords,
 		                           random.stateTail, state, g_displayFramebuffer, &g_vgaDacPalette[0][0]))
 			exit(0);
-		SlipDebug_clockMilliseconds += 16;
+		SlipDebug_clockMilliseconds += SLIP_DEBUG_PRESENTER_TICK_MS;
 	}
 	if (presenterFrames == presenterCaptureFrame && presenterCapturePath != NULL) {
 		FILE *const f = fopen(presenterCapturePath, "wb");
@@ -1974,7 +1999,7 @@ static void SlipDebug_PresenterFrame(void *context) {
 		fclose(f);
 	}
 	if (!presenterFast)
-		SDL_Delay(14);
+		SDL_Delay(SLIP_DEBUG_PRESENTER_DELAY_MS);
 }
 
 static bool SlipDebug_TestObjectClip(uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1, void *userData) {
@@ -2015,9 +2040,10 @@ static int SlipDebug_VerifyVisibility(void) {
 	    .projectState = &projection, .frustum = &frustum, .storeClipBounds = SlipDebug_TestObjectClip};
 	context.storeClipBoundsUserData = &context;
 	memset(objectList, 0, sizeof(objectList));
-	if (!(SlipTrackWorld_ObjectDraw(objectList + 4u, objectList, sizeof(objectList), 0x04000000u, 0x04000004u, object,
-	                                sizeof(object), 0x01002000u, 40, 30, 80, 70, 0, 0, 319, 199, 0, 0, 0x20, 123456, 0,
-	                                0, 0, matrix, sizeof(matrix), 0, trk, sizeof(trk), &context, &out)))
+	if (!(SlipTrackWorld_ObjectDraw(objectList + 4u, objectList, sizeof(objectList), SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN,
+	                                (SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN + 4u), object, sizeof(object), 0x01002000u, 40,
+	                                30, 80, 70, 0, 0, 319, 199, 0, 0, 0x20, 123456, 0, 0, 0, matrix, sizeof(matrix), 0,
+	                                trk, sizeof(trk), &context, &out)))
 		return 4;
 	if (!(context.chunkCounter == 2))
 		return 4;
@@ -2037,10 +2063,10 @@ static int SlipDebug_VerifyVisibility(void) {
 	                                           .primaryRight = &maxX,
 	                                           .primaryBottom = &maxY,
 	                                           .mask = &mask};
-	if (!SlipTrackWorld_ListSetup(objectList, sizeof(objectList), 0x04000000u, deferred, sizeof(deferred), 0, 1, 0, 0,
-	                              0, 319, 199, 40, 30, 80, 70, 0, 0, 123456, 0, 0, 0, matrix, sizeof(matrix), camera,
-	                              SLIP_OBJECT_DOS_STRIDE, trk, sizeof(trk), NULL, 0, NULL, 0, cells, sizeof(cells), 0,
-	                              0, &defaults, &setup))
+	if (!SlipTrackWorld_ListSetup(objectList, sizeof(objectList), SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN, deferred,
+	                              sizeof(deferred), 0, 1, 0, 0, 0, 319, 199, 40, 30, 80, 70, 0, 0, 123456, 0, 0, 0,
+	                              matrix, sizeof(matrix), camera, SLIP_OBJECT_DOS_STRIDE, trk, sizeof(trk), NULL, 0,
+	                              NULL, 0, cells, sizeof(cells), 0, 0, &defaults, &setup))
 		return 4;
 	if (!setup.noSelectedRecord || gate != 0 || renderContext != 1 || mask != 0xffff || minX != 0 || minY != 0 ||
 	    maxX != 319 || maxY != 199)
@@ -2239,10 +2265,10 @@ static int SlipDebug_VerifyBeamRender(const char *archive, const char *mathArchi
 	                                  .resourceRegistry = &registry,
 	                                  .maths = &maths,
 	                                  .chunkBase = sectionRecords,
-	                                  .chunkBaseToken = 0x04000000};
+	                                  .chunkBaseToken = SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN};
 	Raster_SetScreenBufferRows(g_framebuffer, SLIPSTREAM_SCREEN_WIDTH);
 	SlipTrackWorld_beams = (SlipTrackBeamState){.built = UINT32_MAX, .recordCount = 1};
-	SlipTrackWorld_beams.records[0] = (SlipTrackBeamRecord){.section = 0x04000042,
+	SlipTrackWorld_beams.records[0] = (SlipTrackBeamRecord){.section = (SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN + 0x42),
 	                                                        .midpoint = {0, 0, 30000},
 	                                                        .start = {-6000, 0, 30000},
 	                                                        .end = {6000, 0, 30000},
@@ -2377,7 +2403,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		return SlipMenuTest_Languages(argv[2], argv[3]);
 #endif
 	if (argc == 3 && strcmp(argv[1], "--verify-shape-material-cache") == 0) {
-		SlipResourceHost_Initialize(32u * 1024u * 1024u);
+		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 		SlipResourceHost_OpenArchives(argv[2], NULL);
 		SlipShape3D_Initialize();
 		SlipResourcePayload shape, cached;
@@ -2399,11 +2425,11 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		return 0;
 	}
 	if (argc == 3 && strcmp(argv[1], "--verify-vehicle-shapes") == 0) {
-		SlipResourceHost_Initialize(32u * 1024u * 1024u);
+		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 		SlipResourceHost_OpenArchives(argv[2], NULL);
 		SlipScreenHost_Initialize();
 		Raster_SetScreenBufferRows(g_framebuffer, SLIPSTREAM_SCREEN_WIDTH);
-		for (int driver = 0; driver < 10; ++driver) {
+		for (int driver = 0; driver < SLIP_RACE_RACER_COUNT; ++driver) {
 			SlipView3DMatrix matrix = TrackView_VehicleViewIdentityMatrix();
 			for (unsigned frame = 0; frame < 3; ++frame) {
 				memset(g_framebuffer, 0, sizeof(g_framebuffer));
@@ -2419,9 +2445,9 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 				printf("vehicle_shape driver=%d frame=%u pixels=%u\n", driver, frame, pixels);
 			}
 		}
-		for (uint16_t track = 0; track <= 10; ++track) {
+		for (uint16_t track = 0; track <= SLIP_RACE_TRACK_COUNT; ++track) {
 			memset(g_framebuffer, 0, sizeof(g_framebuffer));
-			if (!SlipTrackGlobe_UpdateMatrix(argv[2], track) || !SlipTrackGlobe_Draw(argv[2], track, 0x4000))
+			if (!SlipTrackGlobe_UpdateMatrix(argv[2], track) || !SlipTrackGlobe_Draw(argv[2], track, SLIP_Q14_ONE))
 				return 3;
 		}
 		puts("vehicle_shapes 30 animated ship frames and 11 globe/flag views=passed");
@@ -2590,9 +2616,10 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 				while (state.playbackFrame < state.writtenFrames) {
 					SlipRacePlayerControl controls[2] = {{111, 222, 333}, {444, 555, 666}};
 					state.playbackFrame = SlipRaceRecording_ReadFrame(&state, controls);
-					fprintf(file, "R %u %u %u %d %d %u %d %d %u\n", SlipFrameTimer_delta, SlipFrameTimer_step & 0xffffu,
-					        SlipFrameTimer_inverse, controls[0].steering, controls[0].pitch, controls[0].actions,
-					        controls[1].steering, controls[1].pitch, controls[1].actions);
+					fprintf(file, "R %u %u %u %d %d %u %d %d %u\n", SlipFrameTimer_delta,
+					        SlipFrameTimer_step & UINT16_MAX, SlipFrameTimer_inverse, controls[0].steering,
+					        controls[0].pitch, controls[0].actions, controls[1].steering, controls[1].pitch,
+					        controls[1].actions);
 				}
 			}
 		}
@@ -2609,13 +2636,14 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		for (size_t x = 0; x < sizeof(xs) / sizeof(xs[0]); ++x) {
 			for (size_t y = 0; y < sizeof(ys) / sizeof(ys[0]); ++y) {
 				for (unsigned mask = 0; mask < 8; ++mask) {
-					bool pressed[256] = {false};
-					pressed[1] = (mask & 1) != 0;
-					pressed[0x1c] = (mask & 2) != 0;
-					pressed[0x80] = (mask & 4) != 0;
+					bool pressed[SLIP_INPUT_CODE_COUNT] = {false};
+					pressed[SLIP_INPUT_SCAN_ESCAPE] = (mask & 1) != 0;
+					pressed[SLIP_INPUT_SCAN_ENTER] = (mask & 2) != 0;
+					pressed[SLIP_INPUT_MOUSE_LEFT] = (mask & 4) != 0;
 					const uint32_t hover = SlipRaceResults_HitTest(xs[x], ys[y]);
 					const SlipRaceResultsAction action = SlipRaceResults_ReadInput(hover, pressed);
-					const unsigned remaining = pressed[1] | (pressed[0x1c] << 1) | (pressed[0x80] << 2);
+					const unsigned remaining = pressed[SLIP_INPUT_SCAN_ESCAPE] | (pressed[SLIP_INPUT_SCAN_ENTER] << 1) |
+					                           (pressed[SLIP_INPUT_MOUSE_LEFT] << 2);
 					fprintf(file, "%d\t%d\t%u\t%u\t%d\t%u\n", xs[x], ys[y], mask, hover, action, remaining);
 				}
 			}
@@ -2687,15 +2715,15 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 				return 4;
 			for (unsigned hover = 0; hover < 3; ++hover) {
 				for (unsigned edges = 0; edges < 8; ++edges) {
-					bool pressed[256] = {false};
-					pressed[1] = (edges & 1) != 0;
-					pressed[28] = (edges & 2) != 0;
-					pressed[128] = (edges & 4) != 0;
+					bool pressed[SLIP_INPUT_CODE_COUNT] = {false};
+					pressed[SLIP_INPUT_SCAN_ESCAPE] = (edges & 1) != 0;
+					pressed[SLIP_INPUT_SCAN_ENTER] = (edges & 2) != 0;
+					pressed[SLIP_INPUT_MOUSE_LEFT] = (edges & 4) != 0;
 					uint8_t result[4];
 					result[0] = SlipChampionshipFinal_ReadInput(hover, pressed);
-					result[1] = pressed[1];
-					result[2] = pressed[28];
-					result[3] = pressed[128];
+					result[1] = pressed[SLIP_INPUT_SCAN_ESCAPE];
+					result[2] = pressed[SLIP_INPUT_SCAN_ENTER];
+					result[3] = pressed[SLIP_INPUT_MOUSE_LEFT];
 					if (fwrite(result, 1, sizeof(result), file) != sizeof(result)) {
 						fclose(file);
 						return 4;
@@ -3438,7 +3466,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 	}
 
 	if (argc == 3 && strcmp(argv[1], "--verify-resource-case") == 0) {
-		SlipResourceHost_Initialize(32u * 1024u * 1024u);
+		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 		SlipResourceHost_OpenArchives(argv[2], NULL);
 		for (unsigned c = 0; c < 256; ++c) {
 			const unsigned expected = c >= 97 && c <= 122 ? c - 32 : c;
@@ -4988,7 +5016,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		return passed ? 0 : 4;
 	}
 	if (argc == 3 && strcmp(argv[1], "--verify-split-garage") == 0) {
-		SlipResourceHost_Initialize(32u * 1024u * 1024u);
+		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 		SlipResourceHost_OpenArchives(argv[2], NULL);
 
 		if (!SlipResourceHost_Load(NULL, "SMALL.FNT", &SlipMenu_resources.smallFont) ||
@@ -5005,7 +5033,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		if (!SDL_Init(SDL_INIT_EVENTS))
 			return 4;
 		SlipVgaDac_InitializeHostBiosDefaults();
-		SlipFrameTimer_InitializeHostRate(70);
+		SlipFrameTimer_InitializeHostRate(SLIP_FRAME_TIMER_MAXIMUM_RATE_HZ);
 		presenterFast = true;
 		SlipConfigHost_Initialize(argv[2]);
 		SlipMenu_Init(argv[2], NULL, NULL, SlipDebug_PresenterFrame, NULL);
@@ -5032,9 +5060,10 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		if (!SDL_Init(SDL_INIT_EVENTS))
 			return 4;
 		SlipVgaDac_InitializeHostBiosDefaults();
-		SlipFrameTimer_InitializeHostRate(70);
+		SlipFrameTimer_InitializeHostRate(SLIP_FRAME_TIMER_MAXIMUM_RATE_HZ);
 		presenterFast = true;
-		presenterCaptureFrame = argc == 5 ? (unsigned)strtoul(argv[4], NULL, 10) : 3000;
+		presenterCaptureFrame =
+		    argc == 5 ? (unsigned)strtoul(argv[4], NULL, 10) : SLIP_DEBUG_PRESENTER_DEFAULT_CAPTURE_FRAME;
 		presenterCapturePath = argv[3];
 		SlipConfigHost_Initialize(argv[2]);
 		SlipMenu_Init(argv[2], NULL, NULL, SlipDebug_PresenterFrame, NULL);
@@ -5044,8 +5073,8 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		       garage, presenterFrames, SlipRaceSession_lastRenderSucceeded, SlipRaceSession_lastRasterizedPrimitives,
 		       SlipRace_racerTable.racerCount, flybyFrames, flybyFailures);
 		SDL_Quit();
-		return garage && presenterFrames > 3000 && flybyFrames > 1 && flybyFailures == 0 &&
-		               SlipRaceSession_lastRenderSucceeded
+		return garage && presenterFrames > SLIP_DEBUG_PRESENTER_DEFAULT_CAPTURE_FRAME && flybyFrames > 1 &&
+		               flybyFailures == 0 && SlipRaceSession_lastRenderSucceeded
 		           ? 0
 		           : 4;
 	}
@@ -5053,7 +5082,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		if (!SDL_Init(SDL_INIT_EVENTS))
 			return 4;
 		SlipVgaDac_InitializeHostBiosDefaults();
-		SlipFrameTimer_InitializeHostRate(70);
+		SlipFrameTimer_InitializeHostRate(SLIP_FRAME_TIMER_MAXIMUM_RATE_HZ);
 		presenterCapturePath = argv[3];
 		SlipConfigHost_Initialize(argv[2]);
 		SlipMenu_Init(argv[2], NULL, NULL, SlipDebug_PresenterFrame, NULL);
@@ -5070,7 +5099,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		Raster_SetScreenBufferRows(g_framebuffer, SLIPSTREAM_SCREEN_WIDTH);
 		for (unsigned outline = 0; outline < 2; ++outline) {
 			memset(g_framebuffer, 0x5a, sizeof(g_framebuffer));
-			Raster_FillRectUnchecked(outline ? 0x8000u : 0u, 210, 99, 301, 147);
+			Raster_FillRectUnchecked(outline ? RASTER_RECTANGLE_OUTLINE_FLAG : 0u, 210, 99, 301, 147);
 			for (int y = 0; y < SLIPSTREAM_SCREEN_HEIGHT; ++y) {
 				for (int x = 0; x < SLIPSTREAM_SCREEN_WIDTH; ++x) {
 					bool inside = x >= 210 && x <= 301 && y >= 99 && y <= 147;
@@ -5087,11 +5116,11 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 	if (argc == 3 && strcmp(argv[1], "--verify-camera-positions") == 0) {
 		SlipRaceCameraState state = {0};
 		const char *archive = argv[2];
-		for (uint16_t track = 1; track <= 10; ++track) {
+		for (uint16_t track = 1; track <= SLIP_RACE_TRACK_COUNT; ++track) {
 			unsigned active = 0;
 			if (!SlipRaceCamera_LoadPositions(&state, &archive, 1, track))
 				return 4;
-			for (size_t i = 0; i < 60; ++i)
+			for (size_t i = 0; i < SLIP_RACE_TV_POSITION_COUNT; ++i)
 				if (state.tvPositions[i].x != -1)
 					++active;
 			printf("camera_positions track=%u active=%u\n", (unsigned)track, active);

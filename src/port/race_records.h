@@ -3,15 +3,17 @@
 
 #include "race.h"
 
+enum { SLIP_LAP_RECORDS_ROW_COUNT = 3, SLIP_LAP_RECORDS_NAME_BYTES = 32 };
+
 typedef struct SlipLapRecord {
 	uint16_t driverIndex;
-	char name[32];
+	char name[SLIP_LAP_RECORDS_NAME_BYTES];
 	uint32_t lapTime;
 	uint16_t editing;
 } SlipLapRecord;
 
 typedef struct SlipLapRecordTable {
-	SlipLapRecord tracks[10][3];
+	SlipLapRecord tracks[SLIP_RACE_TRACK_COUNT][SLIP_LAP_RECORDS_ROW_COUNT];
 } SlipLapRecordTable;
 
 typedef struct SlipLapRecordNameInput {

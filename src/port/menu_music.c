@@ -1,4 +1,5 @@
 #include "menu_music.h"
+#include "config_settings.h"
 #include "game_errors.h"
 #include "game_music.h"
 #include "hmi_opl_output.h"
@@ -7,6 +8,13 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+enum {
+	SLIP_MENU_MUSIC_TIMER_RATE_HZ = 1000,
+	SLIP_MENU_MUSIC_CALLBACK_RATE_HZ = 120,
+	/* Each track has an eight-bit branch count. */
+	SLIP_MENU_MUSIC_BRANCH_VIEW_CAPACITY = HMI_MUSIC_TRACK_COUNT * UINT8_MAX
+};
 
 static struct {
 	HmiMusicState music;
@@ -37,7 +45,9 @@ static struct {
 } menuMusic;
 
 /* No BIOS runs on the host. This acknowledges the modeled PIC boundary. */
-static void SlipMenuMusic_BiosIrq(SlipGameTimerState *timer) { timer->picEndOfInterruptCommand = 0x20; }
+static void SlipMenuMusic_BiosIrq(SlipGameTimerState *timer) {
+	timer->picEndOfInterruptCommand = HMI_TIMER_PIC_END_OF_INTERRUPT;
+}
 
 bool SlipMenuMusic_Open(const char *archive, SlipGameSoundState *game) {
 	uint32_t i, error;
@@ -46,24 +56,24 @@ bool SlipMenuMusic_Open(const char *archive, SlipGameSoundState *game) {
 	HmiMusic_Construct(&menuMusic.music);
 	HmiA002_ConstructStatic(&menuMusic.driver);
 	HmiTimer_Construct(&menuMusic.timer);
-	HmiTimer_Initialize(&menuMusic.timer, 0, 1);
+	HmiTimer_Initialize(&menuMusic.timer, 0, HMI_TIMER_SKIP_HARDWARE);
 	menuMusic.gameTimer = (SlipGameTimerState){0};
 	menuMusic.music.gameSound = game;
 	menuMusic.gameTimer.gameSound = game;
 	menuMusic.gameTimer.musicTimer = &menuMusic.timer;
-	menuMusic.gameTimer.rate = 1000;
-	menuMusic.gameTimer.divisor = 0x1234dc / 1000;
-	menuMusic.gameTimer.savedDivisor = 65535;
-	menuMusic.gameTimer.biosCountdown = 65535;
+	menuMusic.gameTimer.rate = SLIP_MENU_MUSIC_TIMER_RATE_HZ;
+	menuMusic.gameTimer.divisor = HMI_TIMER_PIT_CLOCK_HZ / SLIP_MENU_MUSIC_TIMER_RATE_HZ;
+	menuMusic.gameTimer.savedDivisor = HMI_TIMER_MAXIMUM_DIVISOR;
+	menuMusic.gameTimer.biosCountdown = HMI_TIMER_MAXIMUM_DIVISOR;
 	menuMusic.gameTimer.savedVector = SlipMenuMusic_BiosIrq;
 	HmiOplOutput_Construct(&menuMusic.output, &menuMusic.driver, &menuMusic.gameTimer);
 	HmiA002_BindNativeFunctions(&menuMusic.music, 0, &menuMusic.driver);
-	menuMusic.music.driverIds[0] = 0xa002;
-	error = menuMusic.music.driverInit[0](&menuMusic.music, 0, 0x388);
+	menuMusic.music.driverIds[0] = HMI_MUSIC_DRIVER_A002;
+	error = menuMusic.music.driverInit[0](&menuMusic.music, 0, HMI_OPL_ADDRESS_PORT);
 	assert(error == 0);
 	if (error != 0)
 		goto failure;
-	for (i = 0; i < 16; ++i)
+	for (i = 0; i < HMI_MIDI_CHANNEL_COUNT; ++i)
 		HmiA002_Reset(&menuMusic.driver, i);
 
 	if (!SlipResourceHost_Load(NULL, "MELODIC.BNK", &menuMusic.melodicHandle))
@@ -85,13 +95,13 @@ bool SlipMenuMusic_Open(const char *archive, SlipGameSoundState *game) {
 		HmiMusic_SetBank(&menuMusic.music, 0, size, data);
 	}
 
-	error = SlipGameTimer_Register(&menuMusic.gameTimer, 120, SlipGameMusic_TimerCallback);
+	error = SlipGameTimer_Register(&menuMusic.gameTimer, SLIP_MENU_MUSIC_CALLBACK_RATE_HZ, SlipGameMusic_TimerCallback);
 	assert(error == 0);
 	if (error != 0)
 		goto failure;
 	if (!HmiOplOutput_Open(&menuMusic.output))
 		goto failure;
-	game->musicCard = 0xa002;
+	game->musicCard = HMI_MUSIC_DRIVER_A002;
 	game->musicVolumeSetting = 1;
 	menuMusic.ready = true;
 	if (!HmiOplOutput_Resume(&menuMusic.output))
@@ -106,7 +116,7 @@ static void SlipMenuMusic_ResumeLocked(void) {
 	if (menuMusic.playbackHandle == 0 && menuMusic.songResource != 0) {
 		uint8_t *const song = SlipResourceHost_LockWritable(NULL, menuMusic.songResource);
 		if (menuMusic.branches == NULL) {
-			menuMusic.branches = calloc(32 * 255, sizeof(*menuMusic.branches));
+			menuMusic.branches = calloc(SLIP_MENU_MUSIC_BRANCH_VIEW_CAPACITY, sizeof(*menuMusic.branches));
 			if (menuMusic.branches == NULL) {
 				fprintf(stderr, "Unable to allocate native HMI branch pointer views.\n");
 				return; /* Host pointer-view execution limitation. */
@@ -222,7 +232,7 @@ uint64_t SlipMenuMusic_NonzeroFrames(void) {
 void SlipMenuMusic_SetSetting(uint16_t setting) {
 	if (!menuMusic.ready)
 		return;
-	assert(setting < 3);
+	assert(setting < SLIP_CONFIG_MUSIC_SETTING_COUNT);
 	SDL_LockAudioStream(menuMusic.output.stream);
 	menuMusic.game->musicVolumeSetting = setting;
 	SlipGameMusic_ApplySetting(menuMusic.game, &menuMusic.music);
@@ -243,7 +253,7 @@ uint32_t SlipMenuMusic_PendingBranch(void) {
 bool SlipMenuMusic_RaceStart(uint32_t selection) {
 	if (!menuMusic.ready)
 		return false;
-	assert(selection < 4);
+	assert(selection < SLIP_RACE_MUSIC_SONG_COUNT);
 	SDL_LockAudioStream(menuMusic.output.stream);
 	assert(menuMusic.raceResource == 0);
 	menuMusic.race.selection = selection;
@@ -251,7 +261,7 @@ bool SlipMenuMusic_RaceStart(uint32_t selection) {
 		if (!SlipResourceHost_Load(NULL, SlipRaceMusic_names[selection], &menuMusic.raceResource))
 			SlipGame_ResourceFailure();
 		menuMusic.race.song = SlipResourceHost_LockWritable(NULL, menuMusic.raceResource);
-		menuMusic.raceBranches = calloc(32 * 255, sizeof(*menuMusic.raceBranches));
+		menuMusic.raceBranches = calloc(SLIP_MENU_MUSIC_BRANCH_VIEW_CAPACITY, sizeof(*menuMusic.raceBranches));
 		if (menuMusic.raceBranches == NULL) {
 			SlipResourceHost_Unlock(NULL, menuMusic.raceResource);
 			SlipResourceHost_Release(NULL, menuMusic.raceResource);
@@ -314,7 +324,7 @@ bool SlipMenuMusic_ResultsStart(const struct SlipRaceRacerTable *racers) {
 		if (!SlipResourceHost_Load(NULL, name, &menuMusic.resultsResource))
 			SlipGame_ResourceFailure();
 		uint8_t *const song = SlipResourceHost_LockWritable(NULL, menuMusic.resultsResource);
-		menuMusic.resultsBranches = calloc(32 * 255, sizeof(*menuMusic.resultsBranches));
+		menuMusic.resultsBranches = calloc(SLIP_MENU_MUSIC_BRANCH_VIEW_CAPACITY, sizeof(*menuMusic.resultsBranches));
 		if (menuMusic.resultsBranches == NULL) {
 			SlipResourceHost_Unlock(NULL, menuMusic.resultsResource);
 			SlipResourceHost_Release(NULL, menuMusic.resultsResource);
@@ -355,7 +365,8 @@ bool SlipMenuMusic_StandingsStart(void) {
 		if (!SlipResourceHost_Load(NULL, "WIN.HMP", &menuMusic.standingsResource))
 			SlipGame_ResourceFailure();
 		uint8_t *const song = SlipResourceHost_LockWritable(NULL, menuMusic.standingsResource);
-		menuMusic.standingsBranches = calloc(32 * 255, sizeof(*menuMusic.standingsBranches));
+		menuMusic.standingsBranches =
+		    calloc(SLIP_MENU_MUSIC_BRANCH_VIEW_CAPACITY, sizeof(*menuMusic.standingsBranches));
 		if (menuMusic.standingsBranches == NULL) {
 			SlipResourceHost_Unlock(NULL, menuMusic.standingsResource);
 			SlipResourceHost_Release(NULL, menuMusic.standingsResource);
@@ -387,17 +398,18 @@ void SlipMenuMusic_StandingsStop(void) {
 }
 
 bool SlipMenuMusic_ScriptedStart(uint32_t selection) {
-	static const char *const names[4] = {"INGAME2.HMP", "INGAME3.HMP", "INGAME4.HMP", "INGAME6.HMP"};
+	static const char *const names[SLIP_RACE_MUSIC_SONG_COUNT] = {"INGAME2.HMP", "INGAME3.HMP", "INGAME4.HMP",
+	                                                              "INGAME6.HMP"};
 	if (!menuMusic.ready)
 		return false;
-	assert(selection < 4);
+	assert(selection < SLIP_RACE_MUSIC_SONG_COUNT);
 	SDL_LockAudioStream(menuMusic.output.stream);
 	if (menuMusic.game->musicCard != 0) {
 		assert(menuMusic.scriptedResource == 0);
 		if (!SlipResourceHost_Load(NULL, names[selection], &menuMusic.scriptedResource))
 			SlipGame_ResourceFailure();
 		uint8_t *const song = SlipResourceHost_LockWritable(NULL, menuMusic.scriptedResource);
-		menuMusic.scriptedBranches = calloc(32 * 255, sizeof(*menuMusic.scriptedBranches));
+		menuMusic.scriptedBranches = calloc(SLIP_MENU_MUSIC_BRANCH_VIEW_CAPACITY, sizeof(*menuMusic.scriptedBranches));
 		if (menuMusic.scriptedBranches == NULL) {
 			SDL_UnlockAudioStream(menuMusic.output.stream);
 			return false; /* Native HMI pointer view allocation failure. */

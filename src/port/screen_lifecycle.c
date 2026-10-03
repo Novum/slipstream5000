@@ -1,11 +1,18 @@
 #include "screen_lifecycle.h"
 #include <string.h>
 
+enum {
+	SLIP_SCREEN_PAGE_BYTES = SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT,
+	/* Preserve the original allocation, including unused trailing space. */
+	SLIP_SCREEN_PERSPECTIVE_ALLOCATION_BYTES = 32768,
+	SLIP_SCREEN_SIGNATURE = 0x5a4a
+};
+
 void SlipScreen_InstallPerspective(SlipScreenLifecycle *state, const SlipScreenLifecycleCalls *calls) {
 	if (state->perspectiveHandle != 0)
 		return;
 	uint16_t handle;
-	if (!calls->allocate(calls->context, 32768, 0, &handle)) {
+	if (!calls->allocate(calls->context, SLIP_SCREEN_PERSPECTIVE_ALLOCATION_BYTES, 0, &handle)) {
 		calls->fatal(calls->context, "TextMapTabInstall - out of memory");
 		return;
 	}
@@ -57,49 +64,49 @@ void SlipScreen_Install(SlipScreenLifecycle *state, uint32_t mode, const SlipScr
 	}
 
 	uint16_t handle;
-	if (!calls->allocate(calls->context, 64000, 0, &handle)) {
+	if (!calls->allocate(calls->context, SLIP_SCREEN_PAGE_BYTES, 0, &handle)) {
 		calls->fatal(calls->context, "Video Error: Memory problem.");
 		return;
 	}
 	state->drawHandle = handle;
 	state->drawPage = calls->lockPixels(calls->context, handle);
 	if (mode == SLIP_SCREEN_CHANGED_PAGES) {
-		if (!calls->allocate(calls->context, 64000, 0, &handle)) {
+		if (!calls->allocate(calls->context, SLIP_SCREEN_PAGE_BYTES, 0, &handle)) {
 			calls->fatal(calls->context, "Video Error: Memory problem.");
 			return;
 		}
 		state->previousHandle = handle;
 		state->previousPage = calls->lockPixels(calls->context, handle);
-		state->pitch = 320;
+		state->pitch = SLIPSTREAM_SCREEN_WIDTH;
 		state->present = calls->presentChangedPages;
-		calls->setBiosMode(calls->context, 0x13);
-		memset(state->drawPage, 0, 64000);
-		memset(state->previousPage, 0, 64000);
+		calls->setBiosMode(calls->context, SLIP_SCREEN_BIOS_MODE_320X200_256_COLOURS);
+		memset(state->drawPage, 0, SLIP_SCREEN_PAGE_BYTES);
+		memset(state->previousPage, 0, SLIP_SCREEN_PAGE_BYTES);
 		state->mode = SLIP_SCREEN_CHANGED_PAGES;
 	} else {
-		state->pitch = 320;
+		state->pitch = SLIPSTREAM_SCREEN_WIDTH;
 		state->present = calls->presentSinglePage;
-		calls->setBiosMode(calls->context, 0x13);
-		memset(state->drawPage, 0, 64000);
+		calls->setBiosMode(calls->context, SLIP_SCREEN_BIOS_MODE_320X200_256_COLOURS);
+		memset(state->drawPage, 0, SLIP_SCREEN_PAGE_BYTES);
 		state->mode = SLIP_SCREEN_SINGLE_PAGE;
 	}
 	state->spriteTarget = false;
 	state->transparentColor = UINT16_MAX;
-	state->signature = 0x5a4a;
+	state->signature = SLIP_SCREEN_SIGNATURE;
 	state->cursor.updatesSuspended = 0;
 	calls->bindRows(calls->context, state->drawPage, 0, state->pitch);
 	uint32_t offset = 0;
-	for (unsigned row = 0; row < 200; ++row) {
+	for (unsigned row = 0; row < SLIPSTREAM_SCREEN_HEIGHT; ++row) {
 		state->rowOffsets[row] = offset;
 		offset += state->pitch;
 	}
 	calls->readDac(calls->context, state->palette);
 	memset(state->dirtyColors, 0, sizeof(state->dirtyColors));
 
-	state->clip = (SlipScreenClip){0, 0, 319, 199};
+	state->clip = (SlipScreenClip){0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1};
 	calls->setClip(calls->context, state->clip);
 	calls->registerExit(calls->context, calls->cleanup);
-	state->cursorClip = (SlipScreenClip){0, 0, 319, 199};
+	state->cursorClip = (SlipScreenClip){0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1};
 	SlipScreen_InstallPerspective(state, calls);
 	state->textureRowScroll = 0;
 	state->installed = 1;

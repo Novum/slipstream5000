@@ -1,14 +1,44 @@
 #include "renderer.h"
 #include "byte_order.h"
 #include "draw.h"
+#include "fixed_point.h"
 #include "port_app_bridge.h"
+#include "renderer_flags.h"
 #include "shaders.h"
+#include "sprite_format.h"
+#include "vga_dac.h"
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "../../third_party/stb_image_resize2.h"
+
+enum {
+	SLIP_GPU_TEXTURE_RETENTION_FRAMES = 120,
+	SLIP_GPU_SAMPLER_MAX_LOD = 32,
+	SLIP_GPU_INITIAL_DRAW_CAPACITY = 1024,
+	SLIP_GPU_MAXIMUM_POLYGON_VERTICES = 128,
+	SLIP_GPU_RGBA_BYTES = 4,
+	SLIP_GPU_OVERLAY_PIXEL_COUNT = SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT,
+	SLIP_GPU_SQUARE_PIXEL_REFERENCE_WIDTH =
+	    SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_DISPLAY_ASPECT_HEIGHT / SLIPSTREAM_DISPLAY_ASPECT_WIDTH
+};
+
+static const float SLIP_GPU_MAP_LEFT = 8.0f;
+static const float SLIP_GPU_POLYLINE_MINIMUM_SEGMENT_LENGTH = 0.0001f;
+/* Clamp the join denominator to limit sharp-corner miters to four half-widths. */
+static const float SLIP_GPU_POLYLINE_MINIMUM_MITER_DOT = 0.25f;
+static const float SLIP_GPU_MAP_TOP = 44.0f;
+static const float SLIP_GPU_COLOUR_CHANNEL_MAXIMUM = UINT8_MAX;
+static const float SLIP_GPU_SHADE_FRACTION_ONE = 256.f;
+/* Shader alpha above 1.5 selects palette-indexed shading. */
+static const float SLIP_GPU_INDEXED_SHADE_ALPHA = 2.f;
+static const float SLIP_GPU_UV_FRACTION_ONE = SLIP_Q14_ONE;
+static const float SLIP_GPU_TEXTURE_EDGE_FRACTION_ONE = 65536.f;
+static const uint64_t SLIP_GPU_TEXTURE_HASH_SEED = UINT64_C(1469598103934665603);
+static const uint64_t SLIP_GPU_TEXTURE_HASH_MULTIPLIER = UINT64_C(1099511628211);
 
 typedef struct Vertex {
 	float position[4], uv[2], color[4];
@@ -46,7 +76,7 @@ static size_t vertexCount, vertexCapacity, drawCount, drawCapacity;
 static Texture *textures;
 static int width, height, lineWidth;
 static bool active, failed;
-static uint32_t lastPalette[256];
+static uint32_t lastPalette[SLIP_VGA_DAC_PALETTE_COUNT];
 static uint64_t frame;
 
 static void Fail(void) {
@@ -80,7 +110,7 @@ static SDL_GPUTexture *Upload(const uint8_t *rgba, int w, int h, bool mips) {
 	mw = w;
 	mh = h;
 	for (uint32_t l = 0; l < levels; l++) {
-		total += (size_t)mw * mh * 4;
+		total += (size_t)mw * mh * SLIP_GPU_RGBA_BYTES;
 		mw = mw > 1 ? mw / 2 : 1;
 		mh = mh > 1 ? mh / 2 : 1;
 	}
@@ -99,13 +129,13 @@ static SDL_GPUTexture *Upload(const uint8_t *rgba, int w, int h, bool mips) {
 		Fail();
 		return NULL;
 	}
-	memcpy(data, rgba, (size_t)w * h * 4);
+	memcpy(data, rgba, (size_t)w * h * SLIP_GPU_RGBA_BYTES);
 	size_t offset = 0;
 	mw = w;
 	mh = h;
 	for (uint32_t l = 1; l < levels; l++) {
 		int nw = mw > 1 ? mw / 2 : 1, nh = mh > 1 ? mh / 2 : 1;
-		size_t next = offset + (size_t)mw * mh * 4;
+		size_t next = offset + (size_t)mw * mh * SLIP_GPU_RGBA_BYTES;
 		if (!stbir_resize_uint8_linear(data + offset, mw, mh, 0, data + next, nw, nh, 0, STBIR_RGBA)) {
 			SDL_UnmapGPUTransferBuffer(device, transfer);
 			SDL_CancelGPUCommandBuffer(cmd);
@@ -129,7 +159,7 @@ static SDL_GPUTexture *Upload(const uint8_t *rgba, int w, int h, bool mips) {
 		    .transfer_buffer = transfer, .offset = (uint32_t)offset, .pixels_per_row = mw, .rows_per_layer = mh};
 		SDL_GPUTextureRegion dst = {.texture = texture, .mip_level = l, .w = mw, .h = mh, .d = 1};
 		SDL_UploadToGPUTexture(copy, &src, &dst, false);
-		offset += (size_t)mw * mh * 4;
+		offset += (size_t)mw * mh * SLIP_GPU_RGBA_BYTES;
 		mw = mw > 1 ? mw / 2 : 1;
 		mh = mh > 1 ? mh / 2 : 1;
 	}
@@ -204,9 +234,10 @@ bool SlipRaceGpu_Initialize(SDL_Renderer *r) {
 	}
 	SDL_GPUVertexBufferDescription buffer = {
 	    .slot = 0, .pitch = sizeof(Vertex), .input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX};
-	SDL_GPUVertexAttribute attributes[] = {{.location = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, .offset = 0},
-	                                       {.location = 1, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, .offset = 16},
-	                                       {.location = 2, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, .offset = 24}};
+	SDL_GPUVertexAttribute attributes[] = {
+	    {.location = 0, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, .offset = offsetof(Vertex, position)},
+	    {.location = 1, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, .offset = offsetof(Vertex, uv)},
+	    {.location = 2, .format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4, .offset = offsetof(Vertex, color)}};
 	SDL_GPUColorTargetDescription color = {.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM};
 	SDL_GPUGraphicsPipelineCreateInfo info = {
 	    .vertex_shader = vs,
@@ -226,9 +257,9 @@ bool SlipRaceGpu_Initialize(SDL_Renderer *r) {
 	                               .address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
 	                               .address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
 	                               .address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE,
-	                               .max_lod = 32};
+	                               .max_lod = SLIP_GPU_SAMPLER_MAX_LOD};
 	sampler = SDL_CreateGPUSampler(device, &si);
-	const uint8_t pixel[] = {255, 255, 255, 255};
+	const uint8_t pixel[] = {UINT8_MAX, UINT8_MAX, UINT8_MAX, UINT8_MAX};
 	white = Upload(pixel, 1, 1, false);
 	if (!pipeline || !sampler || !white) {
 		Fail();
@@ -248,7 +279,7 @@ void SlipRaceGpu_BeginFrame(int w, int h) {
 	Texture **link = &textures;
 	while (*link) {
 		Texture *t = *link;
-		if (frame - t->frame > 120) {
+		if (frame - t->frame > SLIP_GPU_TEXTURE_RETENTION_FRAMES) {
 			*link = t->next;
 			SDL_ReleaseGPUTexture(device, t->texture);
 			free(t);
@@ -265,15 +296,15 @@ void SlipRaceGpu_BeginFrame(int w, int h) {
 		palette = NULL;
 	}
 	if (!palette) {
-		uint8_t rgba[256 * 4];
-		for (int i = 0; i < 256; i++) {
+		uint8_t rgba[SLIP_VGA_DAC_PALETTE_COUNT * SLIP_GPU_RGBA_BYTES];
+		for (int i = 0; i < SLIP_VGA_DAC_PALETTE_COUNT; i++) {
 			uint32_t c = g_palette[i];
-			rgba[i * 4] = (uint8_t)(c >> 16);
-			rgba[i * 4 + 1] = (uint8_t)(c >> 8);
-			rgba[i * 4 + 2] = (uint8_t)c;
-			rgba[i * 4 + 3] = 255;
+			rgba[i * SLIP_GPU_RGBA_BYTES] = (uint8_t)(c >> 16);
+			rgba[i * SLIP_GPU_RGBA_BYTES + 1] = (uint8_t)(c >> 8);
+			rgba[i * SLIP_GPU_RGBA_BYTES + 2] = (uint8_t)c;
+			rgba[i * SLIP_GPU_RGBA_BYTES + 3] = UINT8_MAX;
 		}
-		palette = Upload(rgba, 256, 1, false);
+		palette = Upload(rgba, SLIP_VGA_DAC_PALETTE_COUNT, 1, false);
 	}
 	if (w != width || h != height) {
 		if (target)
@@ -303,7 +334,9 @@ void SlipRaceGpu_EndWorld(void) {
 void SlipRaceGpu_BeginMap(void) {
 	mapActive = true;
 	mapFirstVertex = vertexCount;
-	SlipRaceGpu_BeginWorld((height + 100) / 200 > 1 ? (height + 100) / 200 : 1);
+	SlipRaceGpu_BeginWorld((height + SLIPSTREAM_SCREEN_HEIGHT / 2) / SLIPSTREAM_SCREEN_HEIGHT > 1
+	                           ? (height + SLIPSTREAM_SCREEN_HEIGHT / 2) / SLIPSTREAM_SCREEN_HEIGHT
+	                           : 1);
 }
 
 void SlipRaceGpu_EndMap(void) {
@@ -317,8 +350,8 @@ void SlipRaceGpu_EndMap(void) {
 			if (y < top)
 				top = y;
 		}
-		float dx = 2 * (height * 8.0f / 200 - left) / width;
-		float dy = -2 * (height * 44.0f / 200 - top) / height;
+		float dx = 2 * (height * SLIP_GPU_MAP_LEFT / SLIPSTREAM_SCREEN_HEIGHT - left) / width;
+		float dy = -2 * (height * SLIP_GPU_MAP_TOP / SLIPSTREAM_SCREEN_HEIGHT - top) / height;
 		for (size_t i = mapFirstVertex; i < vertexCount; ++i) {
 			vertices[i].position[0] += dx;
 			vertices[i].position[1] += dy;
@@ -341,7 +374,7 @@ static bool Reserve(size_t count) {
 		vertexCapacity = capacity;
 	}
 	if (drawCount == drawCapacity) {
-		size_t capacity = drawCapacity ? drawCapacity * 2 : 1024;
+		size_t capacity = drawCapacity ? drawCapacity * 2 : SLIP_GPU_INITIAL_DRAW_CAPACITY;
 		Draw *p = realloc(draws, capacity * sizeof(*p));
 		if (!p) {
 			SDL_SetError("GPU draw allocation failed");
@@ -356,14 +389,16 @@ static bool Reserve(size_t count) {
 
 static Vertex Point(float x, float y, float depth, float u, float v, uint8_t color) {
 	if (mapActive) {
-		x *= (float)height / 240;
-		y *= (float)height / 200;
+		x *= (float)height / SLIP_GPU_SQUARE_PIXEL_REFERENCE_WIDTH;
+		y *= (float)height / SLIPSTREAM_SCREEN_HEIGHT;
 	}
 	float z = depth > 0 ? depth : 1;
 	uint32_t c = g_palette[color];
 	Vertex p = {{(2 * x / width - 1) * z, (1 - 2 * y / height) * z, 0, z},
 	            {u, v},
-	            {((c >> 16) & 255) / 255.f, ((c >> 8) & 255) / 255.f, (c & 255) / 255.f, 1}};
+	            {((c >> 16) & UINT8_MAX) / SLIP_GPU_COLOUR_CHANNEL_MAXIMUM,
+	             ((c >> 8) & UINT8_MAX) / SLIP_GPU_COLOUR_CHANNEL_MAXIMUM,
+	             (c & UINT8_MAX) / SLIP_GPU_COLOUR_CHANNEL_MAXIMUM, 1}};
 	return p;
 }
 
@@ -376,8 +411,9 @@ static float Area(const float a[2], const float b[2], const float c[2]) {
 static void Polygon(const Vertex *p, uint32_t count, SDL_GPUTexture *texture, const float (*sourceXY)[2]) {
 	if (count < 3 || !texture || failed || !Reserve((count - 2) * 3))
 		return;
-	float xy[128][2], winding = 0;
-	uint32_t ring[128], triangles[126 * 3], triangleCount = 0;
+	float xy[SLIP_GPU_MAXIMUM_POLYGON_VERTICES][2], winding = 0;
+	uint32_t ring[SLIP_GPU_MAXIMUM_POLYGON_VERTICES], triangles[(SLIP_GPU_MAXIMUM_POLYGON_VERTICES - 2) * 3],
+	    triangleCount = 0;
 	for (uint32_t i = 0; i < count; i++) {
 		xy[i][0] = sourceXY ? sourceXY[i][0] : p[i].position[0] / p[i].position[3];
 		xy[i][1] = sourceXY ? sourceXY[i][1] : p[i].position[1] / p[i].position[3];
@@ -463,33 +499,33 @@ static void Polygon(const Vertex *p, uint32_t count, SDL_GPUTexture *texture, co
 }
 
 void SlipRaceGpu_Flat(const RasterPoint *p, uint32_t n, uint8_t c, uint8_t dither) {
-	if (n > 128) {
+	if (n > SLIP_GPU_MAXIMUM_POLYGON_VERTICES) {
 		SDL_SetError("GPU polygon exceeds point capacity");
 		Fail();
 		return;
 	}
-	Vertex v[128];
+	Vertex v[SLIP_GPU_MAXIMUM_POLYGON_VERTICES];
 	for (uint32_t i = 0; i < n; i++) {
 		v[i] = Point((float)p[i].x, (float)p[i].y, 1, 0, 0, c);
 		v[i].color[0] = c;
-		v[i].color[1] = (float)(uint8_t)((1u << (dither & 31u)) - 1u);
-		v[i].color[3] = 2;
+		v[i].color[1] = (float)(uint8_t)((1u << (dither & SLIP_DWORD_SHIFT_COUNT_MASK)) - 1u);
+		v[i].color[3] = SLIP_GPU_INDEXED_SHADE_ALPHA;
 	}
 	Polygon(v, n, white, NULL);
 }
 
 void SlipRaceGpu_Shaded(const RasterShadedPoint *p, uint32_t n) {
-	if (n > 128) {
+	if (n > SLIP_GPU_MAXIMUM_POLYGON_VERTICES) {
 		SDL_SetError("GPU polygon exceeds point capacity");
 		Fail();
 		return;
 	}
-	Vertex v[128];
+	Vertex v[SLIP_GPU_MAXIMUM_POLYGON_VERTICES];
 	for (uint32_t i = 0; i < n; i++) {
 		v[i] = Point((float)p[i].x, (float)p[i].y, 1, 0, 0, 0);
-		v[i].color[0] = p[i].shade / 256.f;
+		v[i].color[0] = p[i].shade / SLIP_GPU_SHADE_FRACTION_ONE;
 		v[i].color[1] = 0;
-		v[i].color[3] = 2;
+		v[i].color[3] = SLIP_GPU_INDEXED_SHADE_ALPHA;
 	}
 	Polygon(v, n, white, NULL);
 }
@@ -515,14 +551,14 @@ void SlipRaceGpu_MapRibbon(const SDL_FPoint *points, uint32_t count, bool closed
 		Fail();
 		return;
 	}
-	float sx = (float)height / 240, sy = (float)height / 200;
+	float sx = (float)height / SLIP_GPU_SQUARE_PIXEL_REFERENCE_WIDTH, sy = (float)height / SLIPSTREAM_SCREEN_HEIGHT;
 	uint32_t n = 0;
 	for (uint32_t i = 0; i < count; i++) {
 		SDL_FPoint v = {points[i].x * sx, points[i].y * sy};
-		if (!n || hypotf(v.x - p[n - 1].x, v.y - p[n - 1].y) > 0.0001f)
+		if (!n || hypotf(v.x - p[n - 1].x, v.y - p[n - 1].y) > SLIP_GPU_POLYLINE_MINIMUM_SEGMENT_LENGTH)
 			p[n++] = v;
 	}
-	if (closed && n > 1 && hypotf(p[0].x - p[n - 1].x, p[0].y - p[n - 1].y) < 0.0001f)
+	if (closed && n > 1 && hypotf(p[0].x - p[n - 1].x, p[0].y - p[n - 1].y) < SLIP_GPU_POLYLINE_MINIMUM_SEGMENT_LENGTH)
 		--n;
 	if (n < 2) {
 		free(p);
@@ -543,7 +579,7 @@ void SlipRaceGpu_MapRibbon(const SDL_FPoint *points, uint32_t count, bool closed
 			ny1 = ny0;
 		}
 		float mx = nx0 + nx1, my = ny0 + ny1, length = hypotf(mx, my);
-		if (length < 0.0001f) {
+		if (length < SLIP_GPU_POLYLINE_MINIMUM_SEGMENT_LENGTH) {
 			mx = nx1;
 			my = ny1;
 		} else {
@@ -551,7 +587,7 @@ void SlipRaceGpu_MapRibbon(const SDL_FPoint *points, uint32_t count, bool closed
 			my /= length;
 		}
 		float dot = mx * nx1 + my * ny1;
-		float distance = lineWidth * .5f / fmaxf(dot, .25f);
+		float distance = lineWidth * .5f / fmaxf(dot, SLIP_GPU_POLYLINE_MINIMUM_MITER_DOT);
 		pairs[i * 2] = Point((b.x + mx * distance) / sx, (b.y + my * distance) / sy, 1, 0, 0, color);
 		pairs[i * 2 + 1] = Point((b.x - mx * distance) / sx, (b.y - my * distance) / sy, 1, 0, 0, color);
 	}
@@ -578,7 +614,7 @@ void SlipRaceGpu_Line(uint8_t c, int x0, int y0, int x1, int y1) {
 	}
 	float ox = dy / len * lineWidth * .5f, oy = -dx / len * lineWidth * .5f;
 	if (mapActive) {
-		float sx = (float)height / 240, sy = (float)height / 200;
+		float sx = (float)height / SLIP_GPU_SQUARE_PIXEL_REFERENCE_WIDTH, sy = (float)height / SLIPSTREAM_SCREEN_HEIGHT;
 		float nativeLength = sqrtf(dx * dx * sx * sx + dy * dy * sy * sy);
 		ox = dy * sy / nativeLength * lineWidth * .5f / sx;
 		oy = -dx * sx / nativeLength * lineWidth * .5f / sy;
@@ -590,13 +626,14 @@ void SlipRaceGpu_Line(uint8_t c, int x0, int y0, int x1, int y1) {
 
 static void TexturePolygon(const uint8_t *payload, size_t bytes, uint32_t scroll, const RasterTexturedPoint *p,
                            const SlipRaceGpuWorldPoint *world, uint32_t n, const SlipDraw3DProjectState *projection) {
-	if (bytes < 16 || n > 128) {
+	if (bytes < SLIP_SPRITE_HEADER_BYTES || n > SLIP_GPU_MAXIMUM_POLYGON_VERTICES) {
 		SDL_SetError("Invalid GPU texture polygon");
 		Fail();
 		return;
 	}
-	int w = SlipBytes_ReadLE16(payload), h = SlipBytes_ReadLE16(payload + 2);
-	if (!w || !h || (size_t)w * h > bytes - 16) {
+	int w = SlipBytes_ReadLE16(payload + SLIP_SPRITE_WIDTH_OFFSET),
+	    h = SlipBytes_ReadLE16(payload + SLIP_SPRITE_HEIGHT_OFFSET);
+	if (!w || !h || (size_t)w * h > bytes - SLIP_SPRITE_HEADER_BYTES) {
 		SDL_SetError("Invalid GPU texture dimensions");
 		Fail();
 		return;
@@ -604,30 +641,31 @@ static void TexturePolygon(const uint8_t *payload, size_t bytes, uint32_t scroll
 	Texture *t = textures;
 	for (; t && !(t->payload == payload && t->frame == frame); t = t->next) {
 	}
-	uint64_t hash = 1469598103934665603ull;
+	uint64_t hash = SLIP_GPU_TEXTURE_HASH_SEED;
 	if (!t) {
-		for (size_t i = 0; i < (size_t)w * h + 16; i++)
-			hash = (hash ^ payload[i]) * 1099511628211ull;
+		for (size_t i = 0; i < (size_t)w * h + SLIP_SPRITE_HEADER_BYTES; i++)
+			hash = (hash ^ payload[i]) * SLIP_GPU_TEXTURE_HASH_MULTIPLIER;
 		t = textures;
 		for (; t && t->hash != hash; t = t->next) {
 		}
 	}
 	if (!t) {
-		uint8_t *rgba = malloc((size_t)w * h * 4);
+		uint8_t *rgba = malloc((size_t)w * h * SLIP_GPU_RGBA_BYTES);
 		if (!rgba) {
 			SDL_SetError("GPU texture allocation failed");
 			Fail();
 			return;
 		}
 		/* All DOS texture entry points honor the key when the texture has one. */
-		uint16_t transparent = SlipBytes_ReadLE16(payload + 8);
+		uint16_t transparent = SlipBytes_ReadLE16(payload + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 		for (int i = 0; i < w * h; i++) {
-			uint8_t index = payload[16 + i];
+			uint8_t index = payload[SLIP_SPRITE_HEADER_BYTES + i];
 			uint32_t c = g_palette[index];
-			rgba[i * 4] = (uint8_t)(c >> 16);
-			rgba[i * 4 + 1] = (uint8_t)(c >> 8);
-			rgba[i * 4 + 2] = (uint8_t)c;
-			rgba[i * 4 + 3] = transparent != 0xffff && index == (uint8_t)transparent ? 0 : 255;
+			rgba[i * SLIP_GPU_RGBA_BYTES] = (uint8_t)(c >> 16);
+			rgba[i * SLIP_GPU_RGBA_BYTES + 1] = (uint8_t)(c >> 8);
+			rgba[i * SLIP_GPU_RGBA_BYTES + 2] = (uint8_t)c;
+			rgba[i * SLIP_GPU_RGBA_BYTES + 3] =
+			    transparent != SLIP_SPRITE_NO_TRANSPARENT_COLOUR && index == (uint8_t)transparent ? 0 : UINT8_MAX;
 		}
 		SDL_GPUTexture *image = Upload(rgba, w, h, true);
 		free(rgba);
@@ -645,8 +683,8 @@ static void TexturePolygon(const uint8_t *payload, size_t bytes, uint32_t scroll
 	}
 	t->payload = payload;
 	t->frame = frame;
-	Vertex v[128];
-	float sourceXY[128][2];
+	Vertex v[SLIP_GPU_MAXIMUM_POLYGON_VERTICES];
+	float sourceXY[SLIP_GPU_MAXIMUM_POLYGON_VERTICES][2];
 	int axis = 2;
 	if (world) {
 		double normal[3] = {0};
@@ -661,10 +699,11 @@ static void TexturePolygon(const uint8_t *payload, size_t bytes, uint32_t scroll
 			axis = 2;
 	}
 	for (uint32_t i = 0; i < n; i++) {
-		float u = (world ? world[i].u : p[i].u) / 16384.f;
-		float uv = (world ? world[i].v : p[i].v) / 16384.f;
+		float u = (world ? world[i].u : p[i].u) / SLIP_GPU_UV_FRACTION_ONE;
+		float uv = (world ? world[i].v : p[i].v) / SLIP_GPU_UV_FRACTION_ONE;
 		/* Original row scrolling wraps texture rows, rather than changing geometry. */
-		uv = SDL_clamp(uv, 0.f, 1.f) * (1.f - 1.f / (65536.f * h)) + (float)(((uint64_t)scroll * h >> 14) % h) / h;
+		uv = SDL_clamp(uv, 0.f, 1.f) * (1.f - 1.f / (SLIP_GPU_TEXTURE_EDGE_FRACTION_ONE * h)) +
+		     (float)(((uint64_t)scroll * h >> SLIP_Q14_FRACTION_BITS) % h) / h;
 		if (world) {
 			const SlipDraw3DVec32 a = world[i].source, c = world[i].view;
 			sourceXY[i][0] = axis == 0 ? (float)a.y : (float)a.x;
@@ -673,7 +712,9 @@ static void TexturePolygon(const uint8_t *payload, size_t bytes, uint32_t scroll
 			float nearZ = (float)projection->minZ, farZ = (float)projection->maxZ;
 			float depthScale = farZ / (farZ - nearZ);
 			float scaleX =
-			    (float)(projection->squarePixels ? projection->projectionScale * 5 / 6 : projection->projectionScale);
+			    (float)(projection->squarePixels ? projection->projectionScale * SLIPSTREAM_PIXEL_ASPECT_WIDTH /
+			                                           SLIPSTREAM_PIXEL_ASPECT_HEIGHT
+			                                     : projection->projectionScale);
 			v[i] = (Vertex){
 			    {(2.f * projection->centerX / width - 1) * z + 2.f * scaleX * c.x / width,
 			     (1 - 2.f * projection->centerY / height) * z + 2.f * projection->projectionScale * c.y / height,
@@ -700,9 +741,9 @@ void SlipRaceGpu_WorldTexture(const uint8_t *payload, size_t bytes, uint32_t scr
 
 void SlipRaceGpu_Sprite(const uint8_t *p, size_t bytes, int left, int top, int right, int bottom) {
 	RasterTexturedPoint v[4] = {{.x = left, .y = top, .depth = 1},
-	                            {.x = right + 1, .y = top, .u = 16384, .depth = 1},
-	                            {.x = right + 1, .y = bottom + 1, .u = 16384, .v = 16384, .depth = 1},
-	                            {.x = left, .y = bottom + 1, .v = 16384, .depth = 1}};
+	                            {.x = right + 1, .y = top, .u = SLIP_Q14_ONE, .depth = 1},
+	                            {.x = right + 1, .y = bottom + 1, .u = SLIP_Q14_ONE, .v = SLIP_Q14_ONE, .depth = 1},
+	                            {.x = left, .y = bottom + 1, .v = SLIP_Q14_ONE, .depth = 1}};
 	SlipRaceGpu_Texture(p, bytes, 0, v, 4);
 }
 
@@ -754,11 +795,12 @@ bool SlipRaceGpu_Present(void) {
 		SDL_EndGPUCopyPass(copy);
 	}
 	uint32_t clear = g_palette[0];
-	SDL_GPUColorTargetInfo ct = {
-	    .texture = image,
-	    .clear_color = {((clear >> 16) & 255) / 255.f, ((clear >> 8) & 255) / 255.f, (clear & 255) / 255.f, 1},
-	    .load_op = SDL_GPU_LOADOP_CLEAR,
-	    .store_op = SDL_GPU_STOREOP_STORE};
+	SDL_GPUColorTargetInfo ct = {.texture = image,
+	                             .clear_color = {((clear >> 16) & UINT8_MAX) / SLIP_GPU_COLOUR_CHANNEL_MAXIMUM,
+	                                             ((clear >> 8) & UINT8_MAX) / SLIP_GPU_COLOUR_CHANNEL_MAXIMUM,
+	                                             (clear & UINT8_MAX) / SLIP_GPU_COLOUR_CHANNEL_MAXIMUM, 1},
+	                             .load_op = SDL_GPU_LOADOP_CLEAR,
+	                             .store_op = SDL_GPU_STOREOP_STORE};
 	SDL_GPURenderPass *pass = SDL_BeginGPURenderPass(cmd, &ct, 1, NULL);
 	SDL_BindGPUGraphicsPipeline(pass, pipeline);
 	if (vertexCount) {
@@ -785,7 +827,8 @@ void SlipRaceGpu_Overlay(const uint8_t *pixels, const uint8_t *mask, int left, i
 	/* DOS draw pages alternate; the HUD texture persists across draw pages. */
 	SDL_Texture *texture = overlayTexture;
 	if (!texture) {
-		texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, 320, 200);
+		texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC,
+		                            SLIPSTREAM_SCREEN_WIDTH, SLIPSTREAM_SCREEN_HEIGHT);
 		if (!texture) {
 			Fail();
 			return;
@@ -795,10 +838,10 @@ void SlipRaceGpu_Overlay(const uint8_t *pixels, const uint8_t *mask, int left, i
 		SDL_SetTextureScaleMode(texture, SDL_SCALEMODE_NEAREST);
 	}
 	if (!overlayUpdated) {
-		uint32_t rgba[64000];
-		for (int i = 0; i < 64000; i++)
+		uint32_t rgba[SLIP_GPU_OVERLAY_PIXEL_COUNT];
+		for (int i = 0; i < SLIP_GPU_OVERLAY_PIXEL_COUNT; i++)
 			rgba[i] = mask[i] ? g_palette[pixels[i]] : 0;
-		SDL_UpdateTexture(texture, NULL, rgba, 320 * 4);
+		SDL_UpdateTexture(texture, NULL, rgba, SLIPSTREAM_SCREEN_WIDTH * SLIP_GPU_RGBA_BYTES);
 		overlayUpdated = true;
 	}
 	SDL_FRect source = {(float)left, (float)top, (float)(right - left), (float)(bottom - top)};

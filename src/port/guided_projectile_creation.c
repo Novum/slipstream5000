@@ -1,13 +1,14 @@
 #include "guided_projectile_creation.h"
+#include "race_collision.h"
 
 uint16_t SlipGuidedProjectile_superSeekerShooter;
 
 void SlipGuidedProjectile_FireSuperSeeker(uint16_t shooter, uint16_t target, const SlipGuidedProjectileCalls *calls) {
 	enum {
 		TARGETED_VOICE = 0x3a,
-		SUPER_SEEKER = 5,
+		SUPER_SEEKER = SLIP_RACE_WEAPON_SUPER_SEEKER,
 		PROJECTILE_OBJECT_FLAGS = 2,
-		PROJECTILE_BODY_FLAGS = 3,
+		PROJECTILE_BODY_FLAGS = SLIP_COLLISION_BODY_PROJECTILE,
 		SHAPE_TRACK_FLAGS = 1,
 		SPEED_INCREMENT = 0x22e98,
 		TRAIL_OFFSET_Z = -2151,
@@ -61,9 +62,9 @@ uint16_t SlipGuidedProjectile_superFragShooter;
 void SlipGuidedProjectile_FireSuperFrag(uint16_t shooter, uint16_t target, const SlipGuidedProjectileCalls *calls) {
 	enum {
 		TARGETED_VOICE = 0x38,
-		SUPER_FRAG = 3,
+		SUPER_FRAG = SLIP_RACE_WEAPON_SUPER_FRAG,
 		PROJECTILE_OBJECT_FLAGS = 2,
-		PROJECTILE_BODY_FLAGS = 3,
+		PROJECTILE_BODY_FLAGS = SLIP_COLLISION_BODY_PROJECTILE,
 		SHAPE_TRACK_FLAGS = 1,
 		SPEED_INCREMENT = 0x22e98,
 		TRAIL_OFFSET_Z = -2151,
@@ -117,9 +118,9 @@ uint16_t SlipGuidedProjectile_fragShooter;
 void SlipGuidedProjectile_FireFrag(uint16_t shooter, uint16_t target, const SlipGuidedProjectileCalls *calls) {
 	enum {
 		TARGETED_VOICE = 0x37,
-		FRAG = 2,
+		FRAG = SLIP_RACE_WEAPON_FRAG,
 		PROJECTILE_OBJECT_FLAGS = 2,
-		PROJECTILE_BODY_FLAGS = 3,
+		PROJECTILE_BODY_FLAGS = SLIP_COLLISION_BODY_PROJECTILE,
 		SHAPE_TRACK_FLAGS = 1,
 		SPEED_INCREMENT = 0x22e98,
 		TRAIL_OFFSET_Z = -2151,
@@ -173,9 +174,9 @@ uint16_t SlipGuidedProjectile_scramblerShooter;
 void SlipGuidedProjectile_FireScrambler(uint16_t shooter, uint16_t target, const SlipGuidedProjectileCalls *calls) {
 	enum {
 		TARGETED_VOICE = 0x3c,
-		SCRAMBLER = 7,
+		SCRAMBLER = SLIP_RACE_WEAPON_SCRAMBLER,
 		PROJECTILE_OBJECT_FLAGS = 2,
-		PROJECTILE_BODY_FLAGS = 3,
+		PROJECTILE_BODY_FLAGS = SLIP_COLLISION_BODY_PROJECTILE,
 		SHAPE_TRACK_FLAGS = 1,
 		SPEED_INCREMENT = 0x1174c,
 		TRAIL_OFFSET_Z = -2151,
@@ -235,9 +236,9 @@ uint16_t SlipGuidedProjectile_seekerShooter;
 void SlipGuidedProjectile_FireSeeker(uint16_t shooter, uint16_t target, const SlipGuidedProjectileCalls *calls) {
 	enum {
 		TARGETED_VOICE = 0x39,
-		SEEKER = 4,
+		SEEKER = SLIP_RACE_WEAPON_SEEKER,
 		PROJECTILE_OBJECT_FLAGS = 2,
-		PROJECTILE_BODY_FLAGS = 3,
+		PROJECTILE_BODY_FLAGS = SLIP_COLLISION_BODY_PROJECTILE,
 		SHAPE_TRACK_FLAGS = 1,
 		SPEED_INCREMENT = 0x22e98,
 		TRAIL_OFFSET_Z = -2151,
@@ -293,7 +294,7 @@ void SlipGuidedProjectile_FireBomber(uint16_t shooter, uint16_t target, const Sl
 		TARGETED_VOICE = 0x3e,
 		BOMBER = 10,
 		PROJECTILE_OBJECT_FLAGS = 2,
-		PROJECTILE_BODY_FLAGS = 3,
+		PROJECTILE_BODY_FLAGS = SLIP_COLLISION_BODY_PROJECTILE,
 		SHAPE_TRACK_FLAGS = 1,
 		SPEED_INCREMENT = 0x22e98,
 		TRAIL_OFFSET_Z = -2151,
@@ -347,7 +348,7 @@ uint16_t SlipGuidedProjectile_disrupterTarget;
 
 static void SlipGuidedProjectile_CreateDisrupter(uint16_t shooter, uint32_t side,
                                                  const SlipGuidedProjectileCalls *calls) {
-	enum { PROJECTILE_OBJECT_FLAGS = 2, DISRUPTER = 1, PROJECTILE_LIFETIME = 5000 };
+	enum { PROJECTILE_OBJECT_FLAGS = 2, DISRUPTER = SLIP_RACE_WEAPON_DISRUPTER, PROJECTILE_LIFETIME = 5000 };
 
 	void *const context = calls->context;
 	SlipView3DVec32 position = calls->weaponMountPosition(context, shooter, side);
@@ -377,7 +378,13 @@ static void SlipGuidedProjectile_CreateDisrupter(uint16_t shooter, uint32_t side
 }
 
 void SlipGuidedProjectile_FireDisrupter(uint16_t shooter, uint16_t target, const SlipGuidedProjectileCalls *calls) {
-	enum { TARGETED_VOICE = 0x36, FIRST_LASER = 1, SECOND_LASER = 2, SHOT_SOUND = 4, OBJECT_SOUND_MODE = 1 };
+	enum {
+		TARGETED_VOICE = 0x36,
+		FIRST_LASER = SLIP_RACE_WEAPON_MUZZLE_RIGHT,
+		SECOND_LASER = SLIP_RACE_WEAPON_MUZZLE_LEFT,
+		SHOT_SOUND = 4,
+		OBJECT_SOUND_MODE = 1
+	};
 
 	SlipGuidedProjectile_disrupterShooter = shooter;
 	SlipGuidedProjectile_disrupterTarget = target;
@@ -393,9 +400,9 @@ uint16_t SlipGuidedProjectile_amblerTarget;
 
 void SlipGuidedProjectile_FireAmbler(uint16_t shooter, uint16_t target, const SlipGuidedProjectileCalls *calls) {
 	enum {
-		WEAPON_INDEX = 6,
+		WEAPON_INDEX = SLIP_RACE_WEAPON_AMBLER,
 		OBJECT_FLAGS = 2,
-		BODY_FLAGS = 3,
+		BODY_FLAGS = SLIP_COLLISION_BODY_PROJECTILE,
 		TRACK_FLAGS = 1,
 		INITIAL_SPEED_INCREMENT = 0x45d30,
 		SHOT_SOUND = 5,
@@ -450,9 +457,9 @@ uint16_t SlipGuidedProjectile_hyperNeuroTarget;
 
 void SlipGuidedProjectile_FireHyperNeuro(uint16_t shooter, uint16_t target, const SlipGuidedProjectileCalls *calls) {
 	enum {
-		WEAPON_INDEX = 8,
+		WEAPON_INDEX = SLIP_RACE_WEAPON_HYPER_NEURO,
 		OBJECT_FLAGS = 2,
-		BODY_FLAGS = 3,
+		BODY_FLAGS = SLIP_COLLISION_BODY_PROJECTILE,
 		TRACK_FLAGS = 1,
 		INITIAL_SPEED_INCREMENT = 0x45d30,
 		SHOT_SOUND = 5,
@@ -499,6 +506,7 @@ SlipGuidedProjectileMiniMinesContinuation
 SlipGuidedProjectile_FireMiniMines(uint16_t shooter, const SlipGuidedProjectileMiniMinesCalls *calls) {
 	enum {
 		MINE_COUNT = 4,
+		MINE_SPREAD = 4880,
 		OFFSET_PAIR_BYTES = 8,
 		LAUNCH_OFFSET_Z = -9760,
 		MATRIX_FIRST_ROW_Y = 1,
@@ -513,7 +521,10 @@ SlipGuidedProjectile_FireMiniMines(uint16_t shooter, const SlipGuidedProjectileM
 		MINES_DEPLOYED_VOICE = 1
 	};
 
-	static const int32_t offsets[MINE_COUNT][2] = {{4880, 4880}, {-4880, -4880}, {-4880, 4880}, {4880, -4880}};
+	static const int32_t offsets[MINE_COUNT][2] = {{MINE_SPREAD, MINE_SPREAD},
+	                                               {-MINE_SPREAD, -MINE_SPREAD},
+	                                               {-MINE_SPREAD, MINE_SPREAD},
+	                                               {MINE_SPREAD, -MINE_SPREAD}};
 	const SlipGuidedProjectileCalls *const p = &calls->projectile;
 	void *const context = p->context;
 	SlipGuidedProjectile_miniMinesShooter = shooter;

@@ -4,16 +4,40 @@
 #include <setjmp.h>
 #include <stdint.h>
 
+/* Timer slot layout, PIT/PIC commands, and Q16 callback-rate scaling.
+ * SYSTEM_RATE is the middleware sentinel; SYSTEM_RATE_Q16 is the BIOS
+ * callback rate used when the PIT divisor changes. */
+enum {
+	HMI_TIMER_SLOT_COUNT = 16,
+	HMI_TIMER_SYSTEM_SLOT = HMI_TIMER_SLOT_COUNT - 1,
+	HMI_TIMER_PIT_CLOCK_HZ = 0x1234dc,
+	HMI_TIMER_SYSTEM_RATE_Q16 = 0x123333,
+	HMI_TIMER_SYSTEM_RATE = 0xff00,
+	HMI_TIMER_MAXIMUM_DIVISOR = 0xffff,
+	HMI_TIMER_FRACTION_BITS = 16,
+	HMI_TIMER_FRACTION_ONE = 1 << HMI_TIMER_FRACTION_BITS,
+	HMI_TIMER_HIGH_BYTES_MASK = 0xffffff00u,
+	HMI_TIMER_NO_SONG = 0xff,
+	HMI_TIMER_IRQ0_MASK = 1,
+	HMI_TIMER_IRQ0_CLEAR_MASK = 0xfe,
+	HMI_TIMER_PIT_CHANNEL0_SQUARE_WAVE = 0x36,
+	HMI_TIMER_PIC_END_OF_INTERRUPT = 0x20,
+	HMI_TIMER_USE_DPMI = 2,
+	HMI_TIMER_SKIP_HARDWARE = 1,
+	HMI_TIMER_ERROR_INVALID_HANDLE = 10,
+	HMI_TIMER_ERROR_NO_HANDLES = 11
+};
+
 typedef struct HmiTimerState HmiTimerState;
 typedef void (*HmiTimerCallback)(HmiTimerState *);
 
 struct HmiTimerState {
 	uint32_t divisor;
-	HmiTimerCallback callbacks[16];
-	uint32_t rates[16];
-	uint32_t increments[16];
-	uint32_t accumulators[16];
-	uint8_t songForSlot[16];
+	HmiTimerCallback callbacks[HMI_TIMER_SLOT_COUNT];
+	uint32_t rates[HMI_TIMER_SLOT_COUNT];
+	uint32_t increments[HMI_TIMER_SLOT_COUNT];
+	uint32_t accumulators[HMI_TIMER_SLOT_COUNT];
+	uint8_t songForSlot[HMI_TIMER_SLOT_COUNT];
 	uint8_t currentSong;
 	uint32_t dispatchDepth;
 	uint32_t currentSlot;

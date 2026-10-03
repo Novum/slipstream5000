@@ -3,11 +3,37 @@
 
 #include "artic_slot.h"
 #include "draw3d.h"
+#include "input.h"
 #include "view3d.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+typedef enum SlipRaceCameraMode {
+	SLIP_RACE_CAMERA_MODE_INTRO = 0,
+	SLIP_RACE_CAMERA_MODE_DESTROYED = 1,
+	SLIP_RACE_CAMERA_MODE_FINISH = 2,
+	SLIP_RACE_CAMERA_MODE_COCKPIT = 3,
+	SLIP_RACE_CAMERA_MODE_CHASE = 4,
+	SLIP_RACE_CAMERA_MODE_REAR = 5,
+	SLIP_RACE_CAMERA_MODE_TV = 6,
+	SLIP_RACE_CAMERA_MODE_EXTERNAL = 7,
+	SLIP_RACE_CAMERA_MODE_DROPPED = 8,
+	SLIP_RACE_CAMERA_MODE_COUNT = 9
+} SlipRaceCameraMode;
+
+enum { SLIP_RACE_CAMERA_SELECT_TV_ONE = 0x3e };
+
+/* CAM resources contain sixty signed XYZ triples. */
+enum {
+	SLIP_RACE_TV_POSITION_COUNT = 60,
+	SLIP_RACE_CAM_POSITION_BYTES = 12,
+	SLIP_RACE_CAM_X_OFFSET = 0,
+	SLIP_RACE_CAM_Y_OFFSET = 4,
+	SLIP_RACE_CAM_Z_OFFSET = 8,
+	SLIP_RACE_CAM_FILE_BYTES = SLIP_RACE_TV_POSITION_COUNT * SLIP_RACE_CAM_POSITION_BYTES
+};
 
 typedef struct SlipRaceCameraState {
 
@@ -29,7 +55,7 @@ typedef struct SlipRaceCameraState {
 	SlipView3DVec32 chasePosition[2];
 	int32_t tvSoundDistance;
 	uint32_t tvSoundCamera;
-	SlipView3DVec32 tvPositions[60];
+	SlipView3DVec32 tvPositions[SLIP_RACE_TV_POSITION_COUNT];
 	uint32_t tvPreviousCamera;
 	SlipView3DMatrix externalMatrix;
 	int32_t externalDistance;
@@ -44,8 +70,8 @@ bool SlipRaceCamera_External(SlipRaceCameraState *state, SlipObject *objects, si
                              const uint8_t *trd, size_t trdBytes, const uint8_t *components, size_t componentBytes,
                              const uint8_t *cells, size_t cellBytes, uint32_t trackDataAddress);
 
-void SlipRaceCamera_ExternalControls(SlipRaceCameraState *state, uint16_t frameStep, const bool held[256],
-                                     const SlipView3DMaths *maths);
+void SlipRaceCamera_ExternalControls(SlipRaceCameraState *state, uint16_t frameStep,
+                                     const bool held[SLIP_INPUT_CODE_COUNT], const SlipView3DMaths *maths);
 
 bool SlipRaceCamera_SelectTv(SlipRaceCameraState *state, SlipView3DVec32 craft, const uint8_t *trd, size_t trdBytes,
                              const uint8_t *components, size_t componentBytes, const uint8_t *cells, size_t cellBytes,
@@ -99,7 +125,7 @@ bool SlipRaceCamera_Event(SlipRaceCameraState *state, uint16_t selectionEvent, S
 
 const char *SlipRaceCamera_ModeName(uint16_t mode);
 
-bool SlipRaceCamera_PollKeys(SlipRaceCameraState *state, uint32_t gameMode, bool pressed[256],
+bool SlipRaceCamera_PollKeys(SlipRaceCameraState *state, uint32_t gameMode, bool pressed[SLIP_INPUT_CODE_COUNT],
                              SlipRaceCameraActivation activate, void *context);
 
 bool SlipRaceCamera_GroundClearance(const uint8_t *trdBase, size_t trdBytes, const uint8_t *componentBase,

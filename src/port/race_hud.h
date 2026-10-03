@@ -2,6 +2,7 @@
 #define SLIPSTREAM5000_RACE_HUD_H
 
 #include "font.h"
+#include "race_time_format.h"
 #include "resource.h"
 #include "sprite.h"
 #include "text_layout.h"
@@ -11,15 +12,29 @@
 #include <stddef.h>
 #include <stdint.h>
 
-void SlipRaceHud_FormatTime(uint32_t milliseconds, char text[12]);
+void SlipRaceHud_FormatTime(uint32_t milliseconds, char text[SLIP_RACE_TIME_TEXT_BYTES]);
 
 typedef struct SlipObject SlipObject;
 
+enum {
+	SLIP_RACE_HUD_POSITION_SPRITE_COUNT = 10,
+	SLIP_RACE_HUD_SIGHT_FRAME_COUNT = 2,
+	SLIP_RACE_HUD_CONSOLE_VARIANT_COUNT = 2,
+	SLIP_RACE_HUD_REDRAW_FRAME_COUNT = 2
+};
+
+/* Zero uses the full indicator layout without console sprites. */
+typedef enum SlipRaceHudConsoleSelection {
+	SLIP_RACE_HUD_CONSOLE_FULL = 0,
+	SLIP_RACE_HUD_CONSOLE_COMPACT_LIGHT = 1,
+	SLIP_RACE_HUD_CONSOLE_COMPACT_DARK = 2
+} SlipRaceHudConsoleSelection;
+
 typedef struct SlipRaceHudAssets {
 	uint16_t timeFont, speedFont;
-	uint16_t positionSprites[10], targetSightSprites[2];
+	uint16_t positionSprites[SLIP_RACE_HUD_POSITION_SPRITE_COUNT], targetSightSprites[SLIP_RACE_HUD_SIGHT_FRAME_COUNT];
 	uint16_t normalSightSprite;
-	uint16_t topSprites[2], bottomSprites[2];
+	uint16_t topSprites[SLIP_RACE_HUD_CONSOLE_VARIANT_COUNT], bottomSprites[SLIP_RACE_HUD_CONSOLE_VARIANT_COUNT];
 	uint16_t consoleExtensionSprite, turboSprite;
 	uint32_t flags;
 	bool active;

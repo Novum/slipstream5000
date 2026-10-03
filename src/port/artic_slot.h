@@ -1,6 +1,7 @@
 #ifndef SLIPSTREAM5000_ARTIC_SLOT_H
 #define SLIPSTREAM5000_ARTIC_SLOT_H
 
+#include "actor_format.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -28,12 +29,12 @@ typedef struct SlipArticPartHeader {
 	uint32_t drawShape;
 	SlipView3DVec32 worldPosition;
 	SlipView3DVec32 drawPosition;
-	uint16_t shapes[8];
-	uint16_t replayShapes[8];
+	uint16_t shapes[SLIP_ART_LOD_COUNT];
+	uint16_t replayShapes[SLIP_ART_LOD_COUNT];
 	uint16_t debrisCount;
-	SlipArticDebrisEntry debris[4];
+	SlipArticDebrisEntry debris[SLIP_ART_DEBRIS_COUNT];
 	uint16_t destructionCount;
-	SlipArticDebrisEntry destruction[4];
+	SlipArticDebrisEntry destruction[SLIP_ART_DESTRUCTION_COUNT];
 } SlipArticPartHeader;
 
 typedef struct SlipArticNamedPoint {
@@ -49,8 +50,10 @@ typedef struct SlipArticPartRecord {
 	uint16_t matrixValid;
 	uint16_t angle;
 	uint32_t namedPointCount;
-	SlipArticNamedPoint namedPoints[5];
+	SlipArticNamedPoint namedPoints[SLIP_ART_POINT_CAPACITY];
 } SlipArticPartRecord;
+
+enum { SLIP_ARTIC_PART_DRAW_MATRICES_END = offsetof(SlipArticPartRecord, drawMatrix) + sizeof(SlipView3DMatrix) };
 
 typedef struct SlipArticActorHeader {
 	uint32_t next;
@@ -59,11 +62,11 @@ typedef struct SlipArticActorHeader {
 	SlipView3DVec32 minimum;
 	SlipView3DVec32 maximum;
 	uint32_t radius;
-	uint32_t parts[17];
+	uint32_t parts[SLIP_ACTOR_PART_SLOT_COUNT];
 	uint32_t partCount;
 	uint32_t cachedPartTag;
-	uint32_t lodDistances[8];
-	uint32_t replayLodDistances[8];
+	uint32_t lodDistances[SLIP_ART_LOD_COUNT];
+	uint32_t replayLodDistances[SLIP_ART_LOD_COUNT];
 	uint32_t childrenInSortTree;
 	uint16_t owner;
 	uint16_t resource;
@@ -153,7 +156,8 @@ typedef struct SlipArticSlotCreate {
 	bool creationFailed;
 } SlipArticSlotCreate;
 
-typedef int (*SlipArticSlotFindResource)(void *user, const char name[13], uint32_t *resourceHandle);
+typedef int (*SlipArticSlotFindResource)(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES],
+                                         uint32_t *resourceHandle);
 
 extern uint32_t SlipArticSlot_initialized;
 

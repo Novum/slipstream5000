@@ -5,12 +5,15 @@
 #include "vehicle_select.h"
 #include "vehicle_view_animation.h"
 
+/* Fixed world position shared by the live viewer and the actor preview. */
+enum { SLIP_VIEWER_OBJECT_X = 0x374986, SLIP_VIEWER_OBJECT_Y = 0x603e1, SLIP_VIEWER_OBJECT_Z = 0x473546 };
+
 typedef struct SlipVehicleViewParameters {
 	uint32_t distance;
 	int16_t pitch, centerOffset;
 } SlipVehicleViewParameters;
 
-extern const SlipVehicleViewParameters SlipVehicleView_parameters[10];
+extern const SlipVehicleViewParameters SlipVehicleView_parameters[SLIP_RACE_RACER_COUNT];
 
 typedef struct SlipVehicleViewer {
 	uint32_t vehicle, descriptionTag;

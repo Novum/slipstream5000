@@ -76,8 +76,9 @@ static void SlipVehicleSelector_Palette(void *context, const uint8_t *packet) {
 	(void)context;
 
 	const uint16_t first = (uint16_t)(packet[0] | (uint16_t)packet[1] << 8);
-	const uint16_t count = (uint16_t)(packet[2] | (uint16_t)packet[3] << 8);
-	SlipVgaDac_WriteRange(first, count, packet + 4);
+	const uint16_t count =
+	    (uint16_t)(packet[SLIP_PALETTE_COUNT_OFFSET] | (uint16_t)packet[SLIP_PALETTE_COUNT_OFFSET + 1] << 8);
+	SlipVgaDac_WriteRange(first, count, packet + SLIP_PALETTE_HEADER_BYTES);
 }
 
 static uint16_t SlipVehicleSelector_BlendPalette(void *context, const uint8_t *first, const uint8_t *second,
@@ -169,7 +170,7 @@ static void SlipVehicleSelector_BindSprite(void *context, uint16_t resource, Sli
 	SlipVehicleSelectorHost *const host = context;
 	host->boundSpriteHandle = resource;
 	uint8_t *const payload = SlipResourceHost_LockWritable(context, resource);
-	Raster_BindSprite(payload + 16, size.width, size.height, &host->previousScreenSurface);
+	Raster_BindSprite(payload + SLIP_SPRITE_HEADER_BYTES, size.width, size.height, &host->previousScreenSurface);
 }
 
 static void SlipVehicleSelector_RestoreScreen(void *context) {
@@ -185,7 +186,7 @@ static void SlipVehicleSelector_BakeText(void *context, uint16_t resource, const
 	SlipText_SetColor(&SlipText_state, color);
 	SlipSelectorDimensions size = SlipVehicleSelector_Dimensions(context, resource);
 	SlipVehicleSelector_BindSprite(context, resource, size);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 0, (int16_t)(size.width - 1));
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, (int16_t)(size.width - 1));
 	SlipTextPosition position = {0, y};
 	SlipText_Draw(&SlipText_state, text, NULL, &position);
 	SlipVehicleSelector_RestoreScreen(context);
@@ -204,23 +205,23 @@ static void SlipVehicleSelector_Background(void *context, SlipVehicleSelector *s
 	Raster_SetClipRect((int16_t)surface.left, (int16_t)surface.top, (int16_t)surface.right, (int16_t)surface.bottom);
 	SlipVehicleSelector_Sprite(context, selector->assets.background, 0, 0);
 	SlipVehicleSelector_Font(context, selector->assets.titleFont);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 0, 319);
-	SlipText_SetColor(&SlipText_state, 0x90);
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
+	SlipText_SetColor(&SlipText_state, SLIP_VEHICLE_SELECTION_TITLE_COLOUR);
 	const char *const title = SlipStringTable_Get(selector->assets.strings, selector->animation.titleTag, &strings);
-	SlipTextPosition position = {0, 10};
+	SlipTextPosition position = {0, SLIP_VEHICLE_SELECTION_TITLE_TOP};
 	SlipText_Draw(&SlipText_state, title, NULL, &position);
 	SlipStringTable_Unlock(selector->assets.strings, &strings);
 	SlipVehicleSelector_Font(context, host->smallFontHandle);
 	const int32_t markerIndex = (int32_t)selector->excludedVehicle - 1;
 	if (markerIndex >= 0) {
-		static const int16_t positions[10][2] = {{109, 116}, {13, 107}, {206, 115}, {250, 76}, {200, 45},
-		                                         {93, 77},   {2, 66},   {167, 73},  {123, 43}, {74, 50}};
+		static const int16_t positions[SLIP_RACE_RACER_COUNT][2] = {
+		    {109, 116}, {13, 107}, {206, 115}, {250, 76}, {200, 45}, {93, 77}, {2, 66}, {167, 73}, {123, 43}, {74, 50}};
 		SlipVehicleSelector_Sprite(context, selector->playerMarker, positions[markerIndex][0],
 		                           positions[markerIndex][1]);
 	}
-	for (unsigned i = 0; i < 10; ++i) {
+	for (unsigned i = 0; i < SLIP_RACE_RACER_COUNT; ++i) {
 		if (selector->animation.doors[i].frame != 0)
-			selector->animation.doors[i].redrawPasses = 2;
+			selector->animation.doors[i].redrawPasses = SLIP_VEHICLE_SELECTION_REDRAW_PASSES;
 	}
 }
 

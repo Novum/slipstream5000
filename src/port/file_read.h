@@ -1,14 +1,18 @@
 #ifndef SLIPSTREAM5000_FILE_READ_H
 #define SLIPSTREAM5000_FILE_READ_H
+#include "archive_format.h"
+#include "resource.h"
 #include <stdbool.h>
 #include <stdint.h>
+
+enum { SLIP_FILE_ARCHIVE_CAPACITY = 3 };
 
 /* Serialized .RES directory entry, read from disk and decrypted in place. */
 #pragma pack(push, 1)
 
 typedef struct SlipArchiveEntry {
 	uint32_t kind;
-	uint8_t name[16];
+	uint8_t name[SLIP_ARCHIVE_INDEX_NAME_BYTES];
 	uint32_t offset, length;
 } SlipArchiveEntry;
 
@@ -20,9 +24,9 @@ typedef struct SlipArchive {
 	uint32_t count;
 } SlipArchive;
 
-extern SlipArchive SlipFile_archives[3];
+extern SlipArchive SlipFile_archives[SLIP_FILE_ARCHIVE_CAPACITY];
 extern SlipArchive *SlipFile_primaryArchive, *SlipFile_secondaryArchive;
-extern uint8_t SlipArchive_readName[12], SlipArchive_sizeName[12];
+extern uint8_t SlipArchive_readName[SLIP_RESOURCE_NAME_BYTES], SlipArchive_sizeName[SLIP_RESOURCE_NAME_BYTES];
 extern uint8_t *SlipArchive_readDestination;
 extern uint32_t SlipArchive_countWord, SlipArchive_indexOffset;
 

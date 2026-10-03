@@ -10,8 +10,8 @@ void SlipResource_Protect(uint16_t handle) {
 		block->flags &= (uint16_t)~SLIP_RESOURCE_BLOCK_RECLAIM_WHEN_UNLOCKED;
 }
 
-bool SlipResource_LoadNamedHandle(const char name[12], uint16_t *handle, const SlipResourceNameCalls *names,
-                                  const SlipResourceAccessCalls *access) {
+bool SlipResource_LoadNamedHandle(const char name[SLIP_RESOURCE_NAME_BYTES], uint16_t *handle,
+                                  const SlipResourceNameCalls *names, const SlipResourceAccessCalls *access) {
 	if (!SlipResource_FindOrCreateName(name, handle, names))
 		return false;
 	return SlipResource_EnsureResident(*handle, access);
@@ -22,7 +22,7 @@ bool SlipResource_EnsureResident(uint16_t handle, const SlipResourceAccessCalls 
 	if (record->block == NULL) {
 		bool loaded = calls->load(calls->context, record);
 		if (!loaded)
-			SlipRuntime_error = 6;
+			SlipRuntime_error = SLIP_RUNTIME_ERROR_MEMORY_EXHAUSTED;
 		return loaded;
 	}
 	SlipResource_ActivateResident(record);

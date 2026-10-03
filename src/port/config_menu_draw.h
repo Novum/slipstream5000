@@ -5,25 +5,25 @@
 #include "text_layout.h"
 
 typedef SlipInputRectangle SlipConfigMenuRectangle;
-extern const SlipConfigMenuRectangle SlipConfigMenu_mainRectangles[7];
-extern const SlipConfigMenuRectangle SlipConfigMenu_difficultyRectangles[4];
-extern const uint32_t SlipConfigMenu_mainTags[7];
-extern const uint32_t SlipConfigMenu_difficultyTags[4];
+extern const SlipConfigMenuRectangle SlipConfigMenu_mainRectangles[SLIP_CONFIG_MAIN_RECTANGLE_COUNT];
+extern const SlipConfigMenuRectangle SlipConfigMenu_difficultyRectangles[SLIP_CONFIG_DIFFICULTY_RECTANGLE_COUNT];
+extern const uint32_t SlipConfigMenu_mainTags[SLIP_CONFIG_MAIN_RECTANGLE_COUNT];
+extern const uint32_t SlipConfigMenu_difficultyTags[SLIP_CONFIG_DIFFICULTY_RECTANGLE_COUNT];
 extern const uint32_t *SlipConfigMenu_mainTagCursor;
 extern const uint32_t *SlipConfigMenu_difficultyTagCursor;
 extern const SlipTextArgument *SlipMenu_panelArguments;
 
-extern const SlipConfigMenuRectangle SlipConfigMenu_generalRectangles[7];
-extern const uint32_t SlipConfigMenu_generalTags[7];
+extern const SlipConfigMenuRectangle SlipConfigMenu_generalRectangles[SLIP_CONFIG_GENERAL_RECTANGLE_COUNT];
+extern const uint32_t SlipConfigMenu_generalTags[SLIP_CONFIG_GENERAL_RECTANGLE_COUNT];
 extern const uint32_t *SlipConfigMenu_generalTagCursor;
-extern const SlipConfigMenuRectangle SlipConfigMenu_detailRectangles[8];
-extern const uint32_t SlipConfigMenu_detailTags[8];
+extern const SlipConfigMenuRectangle SlipConfigMenu_detailRectangles[SLIP_CONFIG_DETAIL_RECTANGLE_COUNT];
+extern const uint32_t SlipConfigMenu_detailTags[SLIP_CONFIG_DETAIL_RECTANGLE_COUNT];
 extern const uint32_t *SlipConfigMenu_detailTagCursor;
-extern const SlipConfigMenuRectangle SlipConfigMenu_soundRectangles[6];
-extern const uint32_t SlipConfigMenu_soundTags[6];
+extern const SlipConfigMenuRectangle SlipConfigMenu_soundRectangles[SLIP_CONFIG_SOUND_RECTANGLE_COUNT];
+extern const uint32_t SlipConfigMenu_soundTags[SLIP_CONFIG_SOUND_RECTANGLE_COUNT];
 extern const uint32_t *SlipConfigMenu_soundTagCursor;
-extern const SlipConfigMenuRectangle SlipConfigMenu_controlsRectangles[7];
-extern const uint32_t SlipConfigMenu_controlsTags[7];
+extern const SlipConfigMenuRectangle SlipConfigMenu_controlsRectangles[SLIP_CONFIG_CONTROLS_RECTANGLE_COUNT];
+extern const uint32_t SlipConfigMenu_controlsTags[SLIP_CONFIG_CONTROLS_RECTANGLE_COUNT];
 extern const uint32_t *SlipConfigMenu_controlsTagCursor;
 
 typedef struct SlipConfigMenuDrawCalls {

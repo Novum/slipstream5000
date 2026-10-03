@@ -5,6 +5,15 @@
 #include "raster/raster.h"
 #include "renderer_flags.h"
 #include "resource.h"
+#include "view3d.h"
+
+/* DOS allocation sizes are independent of native pointers and structure padding. */
+enum {
+	SLIP_RENDERER_DRAW_STATE_DOS_BYTES = 56,
+	SLIP_RENDERER_DRAW_STATE_CAPACITY = 32,
+	SLIP_RENDERER_RESERVED_WORKSPACE_BYTES = 0x380,
+	SLIP_RENDERER_POINT_BUFFER_BYTES = 0x402
+};
 
 typedef struct SlipRendererPolygonPoint {
 	SlipDraw3DVec32 world;
@@ -34,7 +43,7 @@ typedef struct SlipRendererDrawState {
 
 typedef struct SlipRendererState {
 	SlipDraw3DProjectState projection;
-	int32_t boundingBox[30];
+	int32_t boundingBox[SLIP_VIEW_BOX_BOUNDS_AND_CORNERS_COUNT];
 	uint32_t boxAnyClipMask, boxAllClipMask;
 	uint32_t interpolationFlags;
 	uint32_t polygonDrawMode;

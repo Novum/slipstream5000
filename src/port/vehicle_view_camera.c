@@ -1,18 +1,20 @@
 #include "vehicle_view_camera.h"
+#include "fixed_point.h"
 #include "frame_timer.h"
+#include "track_world.h"
 
 void SlipVehicleView_CameraMatrix(SlipVehicleViewer *viewer, const SlipVehicleViewCameraCalls *calls) {
 	const int16_t step = (int16_t)SlipFrameTimer_Step();
-	viewer->cameraStep = (int16_t)(((int32_t)0x4000 * step) >> 14);
+	viewer->cameraStep = (int16_t)(((int32_t)SLIP_ANGLE_QUARTER_TURN * step) >> SLIP_Q14_FRACTION_BITS);
 	calls->yaw(calls->context, (int16_t)viewer->yaw, &viewer->cameraMatrix);
 	calls->pitch(calls->context, viewer->parameters->pitch, &viewer->cameraMatrix);
 	calls->normalize(calls->context, &viewer->cameraMatrix);
 }
 
 uint32_t SlipVehicleView_ObjectEvent(uint32_t event, uint16_t object, const SlipVehicleViewCameraCalls *calls) {
-	if (event == 0x104) {
+	if (event == SLIP_OBJECT_EVENT_UPDATE) {
 		const int16_t step = (int16_t)SlipFrameTimer_Step();
-		const int16_t angle = (int16_t)(((int32_t)0x4000 * step) >> 14);
+		const int16_t angle = (int16_t)(((int32_t)SLIP_ANGLE_QUARTER_TURN * step) >> SLIP_Q14_FRACTION_BITS);
 		calls->rotate(calls->context, object, 0, 0, angle, 0);
 		return 0;
 	}

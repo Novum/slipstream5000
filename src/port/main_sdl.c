@@ -32,6 +32,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+	SLIP_SDL_BIOS_PIT_CLOCK_HZ = 1193182,
+	SLIP_SDL_BIOS_PIT_COUNTS_PER_TICK = 1u << 16,
+	SLIP_SDL_MILLISECONDS_PER_SECOND = 1000,
+	SLIP_SDL_FILTER_WEIGHT_BITS = 8,
+	SLIP_SDL_FILTER_WEIGHT_ONE = 1u << SLIP_SDL_FILTER_WEIGHT_BITS,
+	SLIP_SDL_ARGB_RED_BLUE_MASK = 0x00ff00ffu,
+	SLIP_SDL_ARGB_GREEN_MASK = 0x0000ff00u,
+	SLIP_SDL_DIGITAL_DMA_BUFFER_BYTES = 1024,
+	SLIP_SDL_DIGITAL_DMA_CHANNEL = 1,
+	SLIP_SDL_DIGITAL_DRIVER_VERSION = 0xe015,
+	SLIP_SDL_DIGITAL_OUTPUT_RATE_HZ = 11025,
+	SLIP_SDL_MIXER_TIMER_RATE_HZ = 60,
+	/* Older display settings omit the optional high-resolution field. */
+	SLIP_SDL_REQUIRED_DISPLAY_SETTINGS_FIELDS = 3
+};
+
+static const uint32_t SLIP_SDL_ARGB_OPAQUE_ALPHA = 0xff000000u;
+
 uint32_t g_presentPixels[SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT];
 bool g_presentPixelsReady;
 static const SlipStartupIntroHost *SlipSdl_startupIntroHost;
@@ -50,7 +69,8 @@ static bool SlipSdl_Init(void) {
 uint64_t SlipSdl_TicksMs(void) { return SlipDebug_fixedClock ? SlipDebug_clockMilliseconds : (uint64_t)SDL_GetTicks(); }
 
 uint8_t SlipDebug_BiosTickLow(void) {
-	return (uint8_t)(((SlipSdl_TicksMs() - SlipDebug_biosClockOrigin) * UINT64_C(1193182)) / UINT64_C(65536000));
+	return (uint8_t)(((SlipSdl_TicksMs() - SlipDebug_biosClockOrigin) * SLIP_SDL_BIOS_PIT_CLOCK_HZ) /
+	                 (SLIP_SDL_BIOS_PIT_COUNTS_PER_TICK * SLIP_SDL_MILLISECONDS_PER_SECOND));
 }
 
 void SlipSdl_DelayMs(uint32_t ms) { SDL_Delay(ms); }
@@ -70,7 +90,8 @@ static void SlipSdl_LoadDisplaySettings(void) {
 	if (file == NULL)
 		return;
 	int fullscreen, width, height, highRes = 0;
-	if (fscanf(file, "%d %d %d %d", &fullscreen, &width, &height, &highRes) >= 3 &&
+	if (fscanf(file, "%d %d %d %d", &fullscreen, &width, &height, &highRes) >=
+	        SLIP_SDL_REQUIRED_DISPLAY_SETTINGS_FIELDS &&
 	    (fullscreen == 0 || fullscreen == 1) && width > 0 && height > 0) {
 		displaySettings.fullscreen = fullscreen != 0;
 		displaySettings.width = width;
@@ -200,15 +221,19 @@ static void SlipSdl_BuildFilterAxis(uint16_t *indices, uint16_t *weights, int ou
 			t = 0.0;
 		}
 		indices[outIndex] = (uint16_t)lower;
-		weights[outIndex] = (uint16_t)(t * 256.0 + 0.5);
+		weights[outIndex] = (uint16_t)(t * SLIP_SDL_FILTER_WEIGHT_ONE + 0.5);
 	}
 }
 
 static uint32_t SlipSdl_LerpArgb(uint32_t a, uint32_t b, uint32_t w) {
-	const uint32_t rb = ((a & 0x00ff00ffu) * (256u - w) + (b & 0x00ff00ffu) * w) >> 8;
-	const uint32_t g = ((a & 0x0000ff00u) * (256u - w) + (b & 0x0000ff00u) * w) >> 8;
+	const uint32_t rb = ((a & SLIP_SDL_ARGB_RED_BLUE_MASK) * (SLIP_SDL_FILTER_WEIGHT_ONE - w) +
+	                     (b & SLIP_SDL_ARGB_RED_BLUE_MASK) * w) >>
+	                    SLIP_SDL_FILTER_WEIGHT_BITS;
+	const uint32_t g =
+	    ((a & SLIP_SDL_ARGB_GREEN_MASK) * (SLIP_SDL_FILTER_WEIGHT_ONE - w) + (b & SLIP_SDL_ARGB_GREEN_MASK) * w) >>
+	    SLIP_SDL_FILTER_WEIGHT_BITS;
 
-	return 0xff000000u | (rb & 0x00ff00ffu) | (g & 0x0000ff00u);
+	return SLIP_SDL_ARGB_OPAQUE_ALPHA | (rb & SLIP_SDL_ARGB_RED_BLUE_MASK) | (g & SLIP_SDL_ARGB_GREEN_MASK);
 }
 
 static void SlipSdl_UpscaleBandlimited(void) {
@@ -283,8 +308,8 @@ typedef struct SlipSdlStartupIntroContext {
 	SlipSdlPresentContext *presentContext;
 	bool presenterInstalled;
 	HmiSdlOutput *soundOutput;
-	bool inputHeld[256];
-	bool inputPressed[256];
+	bool inputHeld[SLIP_INPUT_CODE_COUNT];
+	bool inputPressed[SLIP_INPUT_CODE_COUNT];
 	bool running;
 } SlipSdlStartupIntroContext;
 
@@ -304,7 +329,7 @@ static void SlipSdl_PresentFrame(void *context) {
 	/* The host display replaces the 70 Hz VGA presentation boundary. */
 	if (!SlipDebug_fixedClock) {
 		static uint64_t previousPresentation;
-		const uint64_t frameNanoseconds = SDL_NS_PER_SECOND / 70;
+		const uint64_t frameNanoseconds = SDL_NS_PER_SECOND / SLIP_FRAME_TIMER_MAXIMUM_RATE_HZ;
 		const uint64_t now = SDL_GetTicksNS();
 		if (previousPresentation != 0 && now - previousPresentation < frameNanoseconds)
 			SDL_DelayPrecise(frameNanoseconds - (now - previousPresentation));
@@ -385,7 +410,7 @@ static void SlipSdl_StartupIntroPollSdlEvents(void *context) {
 			}
 			inputDown = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
 		}
-		if (inputCode >= 0 && inputCode < 256) {
+		if (inputCode >= 0 && inputCode < SLIP_INPUT_CODE_COUNT) {
 			if (inputDown && !introContext->inputHeld[inputCode]) {
 				introContext->inputPressed[inputCode] = true;
 			}
@@ -397,14 +422,14 @@ static void SlipSdl_StartupIntroPollSdlEvents(void *context) {
 static bool SlipSdl_StartupIntroInputHeld(void *context, SlipInputCode inputCode) {
 	SlipSdlStartupIntroContext *const introContext = (SlipSdlStartupIntroContext *)context;
 
-	return inputCode >= 0 && inputCode < 256 && introContext->inputHeld[inputCode];
+	return inputCode >= 0 && inputCode < SLIP_INPUT_CODE_COUNT && introContext->inputHeld[inputCode];
 }
 
 static SlipInputCode SlipSdl_StartupIntroPopInput(void *context) {
 	SlipSdlStartupIntroContext *const introContext = (SlipSdlStartupIntroContext *)context;
 	int inputCode;
 
-	for (inputCode = 0; inputCode < 256; ++inputCode) {
+	for (inputCode = 0; inputCode < SLIP_INPUT_CODE_COUNT; ++inputCode) {
 		if (introContext->inputPressed[inputCode]) {
 			introContext->inputPressed[inputCode] = false;
 			return (SlipInputCode)inputCode;
@@ -417,7 +442,7 @@ static bool SlipSdl_StartupIntroTestAndClearInput(void *context, SlipInputCode i
 	SlipSdlStartupIntroContext *const introContext = (SlipSdlStartupIntroContext *)context;
 	bool pressed;
 
-	if (inputCode < 0 || inputCode >= 256) {
+	if (inputCode < 0 || inputCode >= SLIP_INPUT_CODE_COUNT) {
 		return false;
 	}
 	pressed = introContext->inputPressed[inputCode];
@@ -470,9 +495,9 @@ static int SlipSdl_Run(int argc, char **argv) {
 	HmiMixer1000State mixer1000;
 	HmiSdlOutput soundOutput;
 	SlipGameSoundState gameSound;
-	uint8_t digitalDmaBuffer[0x400];
+	uint8_t digitalDmaBuffer[SLIP_SDL_DIGITAL_DMA_BUFFER_BYTES];
 
-	SlipFrameTimer_InitializeHostRate(0x46u);
+	SlipFrameTimer_InitializeHostRate(SLIP_FRAME_TIMER_MAXIMUM_RATE_HZ);
 #ifdef SLIP_DEBUG
 	const int dumpResult = SlipDebug_RunDumpCommand(argc, argv);
 	if (dumpResult >= 0) {
@@ -556,9 +581,10 @@ static int SlipSdl_Run(int argc, char **argv) {
 		return 1;
 	}
 
-	HmiDigitalDriver_Reset(&digitalDriver, 0xe015u);
-	HmiMixer1000_Initialize(&mixer1000, &digitalDriver, digitalDmaBuffer, sizeof(digitalDmaBuffer), 1);
-	if (!HmiSdlOutput_Open(&soundOutput, &mixer1000, 0x2b11u, 0x3cu)) {
+	HmiDigitalDriver_Reset(&digitalDriver, SLIP_SDL_DIGITAL_DRIVER_VERSION);
+	HmiMixer1000_Initialize(&mixer1000, &digitalDriver, digitalDmaBuffer, sizeof(digitalDmaBuffer),
+	                        SLIP_SDL_DIGITAL_DMA_CHANNEL);
+	if (!HmiSdlOutput_Open(&soundOutput, &mixer1000, SLIP_SDL_DIGITAL_OUTPUT_RATE_HZ, SLIP_SDL_MIXER_TIMER_RATE_HZ)) {
 		fprintf(stderr, "SDL audio output failed: %s\n", SDL_GetError());
 		SDL_DestroyTexture(texture);
 		SDL_DestroyRenderer(renderer);
@@ -570,7 +596,7 @@ static int SlipSdl_Run(int argc, char **argv) {
 	SlipGameSound_Reset(&gameSound, &digitalDriver);
 	gameSound.initialized = 1;
 	SlipSoundEffects_Install();
-	gameSound.digitalCard = 0xe015u;
+	gameSound.digitalCard = SLIP_SDL_DIGITAL_DRIVER_VERSION;
 	SlipRaceSession_BindSoundHost(&gameSound, 0u, SlipSdl_RaceLockSound, SlipSdl_RaceUnlockSound, &soundOutput);
 	SlipMenu_BindSoundHost(&gameSound, SlipSdl_RaceLockSound, SlipSdl_RaceUnlockSound, &soundOutput);
 

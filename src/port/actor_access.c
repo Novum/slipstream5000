@@ -1,4 +1,5 @@
 #include "actor_access.h"
+#include "actor_tags.h"
 
 bool SlipActor_TestOwner(uint16_t object, SlipActorRecord **actor, const SlipActorAccessCalls *calls) {
 	*actor = calls->actor(calls->context, object);
@@ -10,18 +11,18 @@ bool SlipActor_SelectPart(uint16_t object, uint32_t tag, SlipActorPartRecord **p
 	SlipActorRecord *actor;
 	if (!SlipActor_TestOwner(object, &actor, calls))
 		return false;
-	if (tag == 0x6d61696e) {
+	if (tag == SLIP_ACTOR_PART_MAIN) {
 		*part = actor->parts[0];
 		return true;
 	}
 	if (tag == actor->cachedPartTag) {
-		*part = actor->parts[16];
+		*part = actor->parts[SLIP_ACTOR_CACHED_PART_INDEX];
 		return true;
 	}
 	for (uint32_t i = 0; i < actor->partCount; ++i) {
 		SlipActorPartRecord *const candidate = actor->parts[i];
 		if (tag == candidate->tag) {
-			actor->parts[16] = candidate;
+			actor->parts[SLIP_ACTOR_CACHED_PART_INDEX] = candidate;
 			actor->cachedPartTag = tag;
 			*part = candidate;
 			return true;

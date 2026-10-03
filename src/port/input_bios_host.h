@@ -38,7 +38,9 @@ SlipInputBiosKey SlipInputBiosHost_TranslateNavigation(uint8_t scan, SlipInputBi
                                                        uint8_t *altDigits);
 /* Platform key event: modifiers describe BIOS state after this event. */
 void SlipInputBiosHost_KeyEvent(SlipInputBiosHostQueue *, uint8_t scan, bool down, bool extended,
-                                SlipInputBiosModifiers, bool pressed[256], bool held[256]);
+                                SlipInputBiosModifiers, bool pressed[SLIP_INPUT_CODE_COUNT],
+                                bool held[SLIP_INPUT_CODE_COUNT]);
 extern const SlipInputBiosCalls SlipInputBiosHost_calls;
-void SlipInputBiosHost_ApplyKey(uint8_t scan, bool down, bool extended, bool pressed[256], bool held[256]);
+void SlipInputBiosHost_ApplyKey(uint8_t scan, bool down, bool extended, bool pressed[SLIP_INPUT_CODE_COUNT],
+                                bool held[SLIP_INPUT_CODE_COUNT]);
 #endif

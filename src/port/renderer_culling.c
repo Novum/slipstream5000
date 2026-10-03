@@ -1,4 +1,5 @@
 #include "renderer_culling.h"
+#include "fixed_point.h"
 #include "shape_format.h"
 
 SlipDraw3DVertexRecord *SlipRenderer_TransformVertex(SlipRendererState *state, uint16_t index, void *transformContext) {
@@ -72,12 +73,12 @@ int SlipRenderer_ClassifyPolygon(SlipRendererState *state, uint16_t countAndFlag
 
 bool SlipRenderer_PlaneVisible(SlipRendererState *state, int16_t normalX, int16_t normalY, int16_t normalZ,
                                uint16_t index, void *sourceContext) {
-	if (state->projection.projectionMode == 1) {
+	if (state->projection.projectionMode == SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC) {
 		const SlipView3DMatrix *const matrix = &state->currentState->matrix;
 		uint32_t sum = (uint32_t)((int32_t)normalZ * matrix->m[8]);
 		sum += (uint32_t)((int32_t)normalY * matrix->m[5]);
 		sum += (uint32_t)((int32_t)normalX * matrix->m[2]);
-		return (int16_t)((int32_t)sum >> 14) <= 0;
+		return (int16_t)((int32_t)sum >> SLIP_Q14_FRACTION_BITS) <= 0;
 	}
 	SlipDraw3DVertexRecord *const vertex = state->activeVertices + index;
 	SlipView3DVec32 source = state->activeSource(vertex->sourceX, vertex->sourceY, vertex->sourceZ, sourceContext);
@@ -110,5 +111,5 @@ int32_t SlipRenderer_PolygonDepth(SlipRendererState *state, uint16_t countAndFla
 			minimum = vertex->world.z;
 	} while (--count != 0);
 	const int64_t product = (int64_t)(int32_t)state->projection.inverseProjectionScale * minimum;
-	return (int32_t)((uint64_t)product >> SLIP_WORD_BITS);
+	return (int32_t)((uint64_t)product >> SLIP_DRAW3D_SCALE_FRACTION_BITS);
 }

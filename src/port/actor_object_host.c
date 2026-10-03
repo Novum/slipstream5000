@@ -21,13 +21,13 @@ SlipView3DVec32 SlipActorObject_Position(void *context, uint16_t object) {
 SlipView3DVec32 SlipActorObject_ViewPosition(void *context, uint16_t object) {
 	(void)context;
 	SlipObject *const entry = &SlipObject_table[object / SLIP_OBJECT_DOS_STRIDE];
-	if ((entry->flags & 1u) == 0) {
+	if ((entry->flags & SLIP_OBJECT_VIEW_POSITION_VALID) == 0) {
 		SlipObject *const camera = SlipObject_table;
 		SlipView3DVec32 relative = {(int32_t)((uint32_t)entry->position.x - (uint32_t)camera->position.x),
 		                            (int32_t)((uint32_t)entry->position.y - (uint32_t)camera->position.y),
 		                            (int32_t)((uint32_t)entry->position.z - (uint32_t)camera->position.z)};
 		entry->viewPosition = SlipView3D_TransformPositionByRows(&camera->matrix, relative);
-		entry->flags |= 1u;
+		entry->flags |= SLIP_OBJECT_VIEW_POSITION_VALID;
 	}
 	return entry->viewPosition;
 }

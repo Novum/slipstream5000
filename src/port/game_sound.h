@@ -11,7 +11,7 @@ typedef struct SlipGameSoundState {
 	uint32_t digitalCard;
 	uint32_t musicCard;
 	uint16_t musicVolumeSetting;
-	uint32_t musicRouting[32];
+	uint32_t musicRouting[HMI_MUSIC_TRACK_COUNT];
 	HmiMusicSongDescriptor musicDescriptor;
 	uint32_t branchRequest, branchSong;
 	uint32_t timerGuard;

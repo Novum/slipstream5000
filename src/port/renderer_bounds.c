@@ -1,12 +1,12 @@
 #include "renderer_bounds.h"
 
 void SlipRenderer_SetBounds(SlipRendererState *state, SlipView3DVec32 minimum, SlipView3DVec32 maximum) {
-	state->boundingBox[0] = minimum.x;
-	state->boundingBox[1] = minimum.y;
-	state->boundingBox[2] = minimum.z;
-	state->boundingBox[3] = maximum.x;
-	state->boundingBox[4] = maximum.y;
-	state->boundingBox[5] = maximum.z;
+	state->boundingBox[SLIP_VIEW_BOX_MIN_X] = minimum.x;
+	state->boundingBox[SLIP_VIEW_BOX_MIN_Y] = minimum.y;
+	state->boundingBox[SLIP_VIEW_BOX_MIN_Z] = minimum.z;
+	state->boundingBox[SLIP_VIEW_BOX_MAX_X] = maximum.x;
+	state->boundingBox[SLIP_VIEW_BOX_MAX_Y] = maximum.y;
+	state->boundingBox[SLIP_VIEW_BOX_MAX_Z] = maximum.z;
 }
 
 void SlipRenderer_ClipBoxCorner(SlipRendererState *state, const SlipDraw3DProjectState *projection,
@@ -41,22 +41,38 @@ SlipActorShapeBounds SlipRenderer_ProjectBounds(SlipRendererState *state, SlipVi
 	state->boxAllClipMask = UINT32_MAX;
 	SlipView3D_BuildBoxCorners(matrix, state->boundingBox, translation);
 
-	SlipRenderer_ClipBoxCorner(
-	    state, projection, (SlipDraw3DVec32){state->boundingBox[18], state->boundingBox[19], state->boundingBox[20]});
-	SlipRenderer_ClipBoxCorner(
-	    state, projection, (SlipDraw3DVec32){state->boundingBox[27], state->boundingBox[28], state->boundingBox[29]});
-	SlipRenderer_ClipBoxCorner(
-	    state, projection, (SlipDraw3DVec32){state->boundingBox[24], state->boundingBox[25], state->boundingBox[26]});
-	SlipRenderer_ClipBoxCorner(
-	    state, projection, (SlipDraw3DVec32){state->boundingBox[21], state->boundingBox[22], state->boundingBox[23]});
 	SlipRenderer_ClipBoxCorner(state, projection,
-	                           (SlipDraw3DVec32){state->boundingBox[6], state->boundingBox[7], state->boundingBox[8]});
-	SlipRenderer_ClipBoxCorner(
-	    state, projection, (SlipDraw3DVec32){state->boundingBox[15], state->boundingBox[16], state->boundingBox[17]});
-	SlipRenderer_ClipBoxCorner(
-	    state, projection, (SlipDraw3DVec32){state->boundingBox[12], state->boundingBox[13], state->boundingBox[14]});
-	SlipRenderer_ClipBoxCorner(
-	    state, projection, (SlipDraw3DVec32){state->boundingBox[9], state->boundingBox[10], state->boundingBox[11]});
+	                           (SlipDraw3DVec32){state->boundingBox[SLIP_VIEW_BOX_MIN_MIN_MIN],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MIN_MIN_MIN + 1],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MIN_MIN_MIN + 2]});
+	SlipRenderer_ClipBoxCorner(state, projection,
+	                           (SlipDraw3DVec32){state->boundingBox[SLIP_VIEW_BOX_MAX_MIN_MIN],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MAX_MIN_MIN + 1],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MAX_MIN_MIN + 2]});
+	SlipRenderer_ClipBoxCorner(state, projection,
+	                           (SlipDraw3DVec32){state->boundingBox[SLIP_VIEW_BOX_MAX_MAX_MIN],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MAX_MAX_MIN + 1],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MAX_MAX_MIN + 2]});
+	SlipRenderer_ClipBoxCorner(state, projection,
+	                           (SlipDraw3DVec32){state->boundingBox[SLIP_VIEW_BOX_MIN_MAX_MIN],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MIN_MAX_MIN + 1],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MIN_MAX_MIN + 2]});
+	SlipRenderer_ClipBoxCorner(state, projection,
+	                           (SlipDraw3DVec32){state->boundingBox[SLIP_VIEW_BOX_MIN_MIN_MAX],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MIN_MIN_MAX + 1],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MIN_MIN_MAX + 2]});
+	SlipRenderer_ClipBoxCorner(state, projection,
+	                           (SlipDraw3DVec32){state->boundingBox[SLIP_VIEW_BOX_MAX_MIN_MAX],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MAX_MIN_MAX + 1],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MAX_MIN_MAX + 2]});
+	SlipRenderer_ClipBoxCorner(state, projection,
+	                           (SlipDraw3DVec32){state->boundingBox[SLIP_VIEW_BOX_MAX_MAX_MAX],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MAX_MAX_MAX + 1],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MAX_MAX_MAX + 2]});
+	SlipRenderer_ClipBoxCorner(state, projection,
+	                           (SlipDraw3DVec32){state->boundingBox[SLIP_VIEW_BOX_MIN_MAX_MAX],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MIN_MAX_MAX + 1],
+	                                             state->boundingBox[SLIP_VIEW_BOX_MIN_MAX_MAX + 2]});
 	if (state->boxAllClipMask != 0)
 		return SLIP_ACTOR_SHAPE_OUTSIDE;
 	if (state->boxAnyClipMask != 0)

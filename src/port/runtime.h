@@ -3,6 +3,18 @@
 
 #include <stdint.h>
 
+enum { SLIP_RUNTIME_CLEANUP_CALLBACK_CAPACITY = 40 };
+
+enum {
+	SLIP_RUNTIME_ERROR_FILE_UNAVAILABLE = 2,
+	SLIP_RUNTIME_ERROR_READ_FAILED = 3,
+	SLIP_RUNTIME_ERROR_CREATE_FAILED = 4,
+	SLIP_RUNTIME_ERROR_WRITE_FAILED = 5,
+	SLIP_RUNTIME_ERROR_MEMORY_EXHAUSTED = 6,
+	SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED = 7,
+	SLIP_RUNTIME_ERROR_HANDLES_EXHAUSTED = 8
+};
+
 typedef void (*SlipRuntimeCleanup)(void);
 
 #if defined(_MSC_VER)
@@ -14,9 +26,12 @@ typedef void (*SlipRuntimeCleanup)(void);
 #endif
 
 extern uint16_t SlipRuntime_cleanupCount;
-extern SlipRuntimeCleanup SlipRuntime_cleanupCallbacks[40];
+extern SlipRuntimeCleanup SlipRuntime_cleanupCallbacks[SLIP_RUNTIME_CLEANUP_CALLBACK_CAPACITY];
 extern uint8_t SlipRuntime_active;
 extern uint32_t SlipRuntime_error;
+
+/* Random samples contain 16 bits; scaling a sample by a range divides by 2^16. */
+enum { SLIP_RANDOM_SAMPLE_BITS = 16 };
 
 typedef struct SlipRandomState {
 	uint32_t stateWords;

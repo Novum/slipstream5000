@@ -5,7 +5,7 @@ void SlipObject_DrawVisible(struct TrackViewRawBspContext *context) {
 	uint32_t remaining = (uint32_t)SlipObject_count - 1u;
 	do {
 		if (object->allocated != 0 && object->drawData != 0 && object->slotDrawCallback != NULL &&
-		    (object->flags & 2u) == 0) {
+		    (object->flags & SLIP_OBJECT_RENDER_HIDDEN) == 0) {
 			const uint32_t objectOffset = (uint32_t)(object - SlipObject_table) * SLIP_OBJECT_DOS_STRIDE;
 			(void)object->slotDrawCallback(context, objectOffset);
 		}

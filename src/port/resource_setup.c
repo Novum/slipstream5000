@@ -1,6 +1,8 @@
 #include "resource_setup.h"
 #include "runtime.h"
 
+enum { SLIP_RESOURCE_ALLOCATION_RESERVE_BYTES = 4096, SLIP_RESOURCE_NAME_TABLE_INITIAL_BYTES = 40000 };
+
 uint32_t SlipResource_allocationReserveBytes;
 SlipResourceSetupServices SlipResource_setupServices;
 uint32_t SlipResource_installed;
@@ -19,7 +21,8 @@ void SlipResource_Initialize(uint16_t handleCount, uint32_t reservedConventional
 		return;
 	SlipResource_installed = UINT32_MAX;
 	SlipResource_handleCount = handleCount;
-	SlipResource_reservedConventionalParagraphs = (uint16_t)((reservedConventionalBytes + 15u) >> 4);
+	SlipResource_reservedConventionalParagraphs =
+	    (uint16_t)((reservedConventionalBytes + (SLIP_RESOURCE_PARAGRAPH_BYTES - 1)) >> SLIP_RESOURCE_PARAGRAPH_SHIFT);
 	SlipResource_InitializeHeap(&SlipResource_setupServices.heap);
 	SlipResource_InitializeHandles(&SlipResource_setupServices.handles);
 	SlipResource_InitializeNames(&SlipResource_setupServices.names);
@@ -53,7 +56,7 @@ void SlipResource_InitializeHeap(const SlipResourceHeapCalls *calls) {
 	SlipResource_freeBytes = 0;
 	SlipResource_cachedBytes = 0;
 	SlipResource_totalBytes = 0;
-	SlipResource_allocationReserveBytes = 4096;
+	SlipResource_allocationReserveBytes = SLIP_RESOURCE_ALLOCATION_RESERVE_BYTES;
 	SlipResource_allocatedBlocks.next = &SlipResource_allocatedBlocks;
 	SlipResource_allocatedBlocks.previous = &SlipResource_allocatedBlocks;
 	SlipResource_freeBlocks.next = &SlipResource_freeBlocks;
@@ -91,7 +94,7 @@ void SlipResource_InitializeHandles(const SlipResourceHandleCalls *calls) {
 }
 
 void SlipResource_InitializeNames(const SlipResourceNameAllocationCalls *calls) {
-	SlipResource_nameTableCapacity = 40000u;
+	SlipResource_nameTableCapacity = SLIP_RESOURCE_NAME_TABLE_INITIAL_BYTES;
 	SlipResourceNameAllocation allocation;
 	if (!calls->allocate(calls->context, SlipResource_nameTableCapacity, &allocation))
 		SlipRuntime_Fatal("ResNamesInstall - out of memory");

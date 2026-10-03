@@ -1,29 +1,102 @@
 #include "track_world.h"
 #include "artic_slot.h"
 #include "byte_order.h"
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "race_collision.h"
+#include "random_sequence.h"
 #include "raster/raster.h"
+#include "renderer_flags.h"
 #include "resource_host.h"
 #include "resource_storage.h"
 #include "runtime.h"
 #include "shape_format.h"
+#include "text_layout.h"
+#include "track_format.h"
 #include "track_view_render.h"
 
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+	SLIP_TRACK_WORLD_WORLD_MATRIX_TOKEN = 0x00037b20u,
+	SLIP_TRACK_WORLD_VIEW_MATRIX_TOKEN = 0x00037b34u,
+	SLIP_TRACK_WORLD_CAMERA_MATRIX_TOKEN = 0x00033d48u,
+	SLIP_TRACK_WORLD_MATRIX_CONTINUATION_TOKEN = 0x00037a46u,
+	SLIP_TRACK_WORLD_DRAW_FLAGS_CONTINUATION_TOKEN = 0x0003a7e7u,
+	SLIP_TRACK_WORLD_REPLAY_LIST_TOKEN = 0x00033ef4u,
+	SLIP_TRACK_WORLD_POLYGON_INDICES_TOKEN = 0x0003fdf2u,
+	SLIP_TRACK_WORLD_SHADE_ENTRIES_TOKEN = 0x0003fd90u,
+	SLIP_TRACK_WORLD_PRIMITIVE_DRAW_LIST_TOKEN = 0x00033e74u,
+	SLIP_TRACK_WORLD_OBJECT_SCHEDULING_CALLBACK_TOKEN = 0x00037c93u,
+	SLIP_TRACK_MATERIAL_HANDLER_MAXIMUM_DEPTH = 1561600,
+	SLIP_TRACK_SHADE_ENTRY_BYTES = 6,
+	SLIP_TRACK_SHADE_SELECTOR_OFFSET = 4,
+	SLIP_TRACK_COMPONENT_RANGE_MINIMUM_DEPTH = -256,
+	SLIP_TRACK_PRIMITIVE_RANGE_DISTANCE = 19520,
+	SLIP_TRACK_SPECIAL_RENDER_MODE = SLIP_TRC_COMPONENT_SPECIAL_PASS,
+	SLIP_TRACK_SPECIAL_RENDER_MASK = SLIP_TRC_COMPONENT_SPECIAL_PASS_MASK,
+	SLIP_TRACK_DEPTH_FADE_THRESHOLD = 4096,
+	SLIP_REFUEL_FACE_SKIP_INTERSECTION = SLIP_TRC_PRIMITIVE_TRENCH,
+	SLIP_REFUEL_SHADE_MASK = SLIP_Q14_ONE - 1,
+	SLIP_TRACK_DEFERRED_VISIT_CAPACITY = 128,
+	SLIP_TRACK_REGISTER_UPPER_WORD_MASK = 0xffff0000u,
+	SLIP_TRACK_REGISTER_UPPER_BYTES_MASK = 0xffffff00u,
+	SLIP_TRACK_DWORD_SIGN_BIT = 0x80000000u,
+	SLIP_TRACK_WORD_SIGN_BIT = 0x8000u,
+	SLIP_TRACK_SIGN_EXTENSION_20 = 0xfff00000u,
+	SLIP_TRACK_LOCAL_VERTEX_TRANSFORM_SHIFT = SLIP_Q14_FRACTION_BITS - SLIP_TRC_POINT_COORDINATE_SHIFT,
+	SLIP_TRACK_LOCAL_VERTEX_SIGN_EXTENSION = UINT32_MAX << (32 - SLIP_TRACK_LOCAL_VERTEX_TRANSFORM_SHIFT),
+	SLIP_TRACK_AXIS_WRAPPED_LOOP_COUNT = UINT16_MAX + 1u,
+	SLIP_TRACK_REFLECTION_MATERIAL_NAME_TOKEN = 0x34436,
+	SLIP_TRACK_REFLECTION_SAVED_MATRIX_TOKEN = 0x34424,
+	SLIP_TRACK_REFLECTION_VIEWPORT_READ_MODE = 16,
+	SLIP_TRACK_REFLECTION_MAXIMUM_DEPTH = 4880000,
+	SLIP_TRACK_CAMERA_VIEWPORT_SELECTOR = 0x8000,
+	SLIP_TRACK_FRAME_STATE_TOKEN = 0x3d0,
+	SLIP_TRACK_WEAPON_LABEL_COLOUR = 255,
+	SLIP_TRACK_WEAPON_LABEL_TOP_INSET = 2,
+	SLIP_TRACK_RAY_MINIMUM_FACING_Q14 = 16,
+	SLIP_TRACK_COLLISION_BISECTION_STEPS = 16,
+	/* Scale both operands before division, retaining a Q14 result. */
+	SLIP_TRACK_COLLISION_DIVISOR_SHIFT = 16,
+	SLIP_TRACK_COLLISION_DIVIDEND_SHIFT = SLIP_TRACK_COLLISION_DIVISOR_SHIFT + SLIP_Q14_FRACTION_BITS,
+	SLIP_TRACK_SLOT_DRAW_CAPACITY_MULTIPLIER = 2,
+	SLIP_TRACK_COLLISION_SURFACE_CLEARANCE = 488,
+	SLIP_TRACK_REFUEL_PLANE_OFFSET = 976,
+	SLIP_TRACK_COLLISION_ALIGNED_FACING_Q14 = SLIP_Q14_ONE - 16,
+	SLIP_TRACK_COLLISION_ALIGNED_SAMPLE_COUNT = 4,
+	SLIP_TRACK_COLLISION_BACKOFF_SHIFT = 4,
+	SLIP_TRACK_COLLISION_BACKOFF_STEPS = (1 << SLIP_TRACK_COLLISION_BACKOFF_SHIFT) - 1,
+	SLIP_TRACK_RECORD_BOUNDARY_BISECTION_STEPS = 12,
+	SLIP_TRACK_OBJECT_LIST_RECORD_BYTES = 52,
+	SLIP_TRACK_OBJECT_LIST_WORLD_X_OFFSET = 4,
+	SLIP_TRACK_OBJECT_LIST_WORLD_Y_OFFSET = 8,
+	SLIP_TRACK_OBJECT_LIST_WORLD_Z_OFFSET = 12,
+	SLIP_TRACK_OBJECT_LIST_POSITION_END = 16,
+	SLIP_TRACK_OBJECT_LIST_CONTINUATION_TOKEN = 0x3db46,
+	SLIP_TRACK_MATCHED_COMPONENT_LIMIT_START = 64,
+	SLIP_TRACK_MATCHED_COMPONENT_LIMIT_END = 79,
+	SLIP_OBJECT_SERVER_COUNT = 10,
+	SLIP_OBJECT_SERVER_DOS_STRIDE = 6,
+	SLIP_OBJECT_SERVER_TABLE_TOKEN = 0x2670c,
+	SLIP_OBJECT_DEFERRED_SLOTS_TOKEN = 0x26644,
+	SLIP_OBJECT_DEFERRED_SLOT_BYTES = sizeof(uint16_t),
+	SLIP_OBJECT_DOS_MATRIX_OFFSET = 72,
+	SLIP_OBJECT_DRAW_MATRIX_TOKEN = 0x27254
+};
+
 SlipView3DVec32 SlipTrackWorld_doorPosition;
 SlipView3DVec16 SlipTrackWorld_doorDirection;
 uint32_t SlipTrackWorld_doorsInitialized;
 uint16_t SlipTrackWorld_doorCount;
-SlipTrackDoorRecord SlipTrackWorld_doors[8];
-SlipResourcePayload SlipTrackWorld_doorShapes[8];
+SlipTrackDoorRecord SlipTrackWorld_doors[SLIP_TRACK_DOOR_CAPACITY];
+SlipResourcePayload SlipTrackWorld_doorShapes[SLIP_TRACK_DOOR_CAPACITY];
 
 uint32_t SlipTrackWorld_refuelInitialized;
 uint32_t SlipTrackWorld_lastRecord;
 uint16_t SlipTrackWorld_slotObject;
-static uint16_t SlipTrackWorld_hitPrimitive = 0xffffu;
+static uint16_t SlipTrackWorld_hitPrimitive = UINT16_MAX;
 static int16_t SlipTrackWorld_hitNormalX;
 static int16_t SlipTrackWorld_hitNormalY;
 static int16_t SlipTrackWorld_hitNormalZ;
@@ -56,11 +129,11 @@ static bool SlipTrackWorld_DosAddressToOffset(uint32_t dosAddress, uint32_t base
 }
 
 static uint32_t SlipTrackWorld_SignedShiftRight20(uint32_t value) {
-	return (value >> 20) | ((value & 0x80000000u) != 0 ? 0xfff00000u : 0);
+	return (value >> 20) | ((value & SLIP_TRACK_DWORD_SIGN_BIT) != 0 ? SLIP_TRACK_SIGN_EXTENSION_20 : 0);
 }
 
 static int32_t SlipTrackWorld_ScaleSignedWordBy64(uint16_t value) {
-	return (int32_t)((uint32_t)(int32_t)(int16_t)value << 6);
+	return (int32_t)((uint32_t)(int32_t)(int16_t)value << SLIP_TRC_POINT_COORDINATE_SHIFT);
 }
 
 static int32_t SlipTrackWorld_MultiplySignedShift(uint32_t lhs, uint32_t rhs, unsigned shift) {
@@ -85,16 +158,16 @@ static int32_t SlipTrackWorld_DotProduct32x16Shift14(uint32_t x, uint32_t y, uin
 	nextHigh = (uint32_t)(product >> 32);
 	carry = low + nextLow < low;
 	low += nextLow;
-	high = (high & 0xffff0000u) | (uint16_t)((uint16_t)high + (uint16_t)nextHigh + carry);
+	high = (high & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | (uint16_t)((uint16_t)high + (uint16_t)nextHigh + carry);
 
 	product = (uint64_t)((int64_t)(int32_t)z * (int64_t)(int16_t)nz);
 	nextLow = (uint32_t)product;
 	nextHigh = (uint32_t)(product >> 32);
 	carry = nextLow + low < nextLow;
 	low += nextLow;
-	high = (nextHigh & 0xffff0000u) | (uint16_t)((uint16_t)nextHigh + (uint16_t)high + carry);
+	high = (nextHigh & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | (uint16_t)((uint16_t)nextHigh + (uint16_t)high + carry);
 
-	return (int32_t)((low >> 14) | (high << 18));
+	return (int32_t)((low >> SLIP_Q14_FRACTION_BITS) | (high << SLIP_Q14_DWORD_HIGH_SHIFT));
 }
 
 static uint32_t SlipTrackWorld_RoundedDotProductShift14(uint32_t x, uint32_t y, uint32_t z, uint32_t nx, uint32_t ny,
@@ -109,8 +182,8 @@ static uint32_t SlipTrackWorld_RoundedDotProductShift14(uint32_t x, uint32_t y, 
 	sum += (uint64_t)((int64_t)(int32_t)z * (int64_t)(int32_t)nz);
 	low = (uint32_t)sum;
 	high = (uint32_t)(sum >> 32);
-	shifted = (low >> 14) | (high << 18);
-	if ((low & 0x00002000u) != 0) {
+	shifted = (low >> SLIP_Q14_FRACTION_BITS) | (high << SLIP_Q14_DWORD_HIGH_SHIFT);
+	if ((low & (1u << (SLIP_Q14_FRACTION_BITS - 1))) != 0) {
 		++shifted;
 	}
 	return shifted;
@@ -122,7 +195,7 @@ static uint16_t SlipTrackWorld_MultiplyWordsShift14(uint32_t source, uint16_t mu
 	if (product != 0) {
 		*product = p;
 	}
-	return (uint16_t)(p >> 14);
+	return (uint16_t)(p >> SLIP_Q14_FRACTION_BITS);
 }
 
 static bool SlipTrackWorld_ReplaySourceChild(uint16_t offset, const uint8_t *chunkBase, size_t chunkBaseBytes,
@@ -167,25 +240,25 @@ void SlipTrackWorld_ClearSlotRecordLinks(uint16_t trackHandle, uint8_t *trdBase)
 		return;
 	}
 	groupCursor = trdBase;
-	groupAdvance = SlipBytes_ReadLE16(groupCursor + 0x02u);
+	groupAdvance = SlipBytes_ReadLE16(groupCursor + SLIP_TRD_GROUP_TABLE_OFFSET);
 	groupCursor += groupAdvance;
 	remainingGroups = SlipBytes_ReadLE16(groupCursor);
 	if (remainingGroups == 0) {
 		return;
 	}
-	groupCursor += 2u;
+	groupCursor += SLIP_TRD_TABLE_COUNT_BYTES;
 	do {
 		uint8_t *const savedGroupCursor = groupCursor;
-		const uint32_t childOffset = SlipBytes_ReadLE16(groupCursor + 0x04u);
+		const uint32_t childOffset = SlipBytes_ReadLE16(groupCursor + SLIP_TRACK_LINKED_OFFSET);
 
 		if (childOffset != 0) {
 			uint8_t *child = trdBase + childOffset;
 			uint32_t childCount = SlipBytes_ReadLE16(child);
 
-			child += 2u;
+			child += SLIP_TRD_TABLE_COUNT_BYTES;
 			do {
-				SlipTrackWorld_WriteLE16(child + 0x10u, 0);
-				child += 0x22u;
+				SlipTrackWorld_WriteLE16(child + SLIP_TRD_SECTION_DRAW_LIST_OFFSET, 0);
+				child += SLIP_TRD_SECTION_BYTES;
 				--childCount;
 			} while (childCount != 0);
 		}
@@ -260,8 +333,8 @@ bool SlipTrackWorld_BindAxisRampWorkspace(uint8_t *workspace, size_t workspaceBy
 	if (workspace == 0 || result == 0 || workspaceBytes < SLIP_TRACK_WORLD_AXIS_RAMP_BYTES) {
 		return false;
 	}
-	rampPointCount = 0x0027u;
-	pointStrideBytes = 0x000cu;
+	rampPointCount = SLIP_TRACK_WORLD_AXIS_RAMP_POINT_COUNT;
+	pointStrideBytes = SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES;
 	allocationBytes = (uint32_t)pointStrideBytes * (uint32_t)rampPointCount;
 	base = workspace;
 	*result = (SlipTrackWorldAxisRampWorkspace){.rampPointCount = rampPointCount,
@@ -272,8 +345,8 @@ bool SlipTrackWorld_BindAxisRampWorkspace(uint8_t *workspace, size_t workspaceBy
 	                                            .callLockResource = true,
 	                                            .base = base,
 	                                            .rampX = base,
-	                                            .rampY = base + 0x009cu,
-	                                            .rampZ = base + 0x00d8u,
+	                                            .rampY = base + SLIP_TRACK_WORLD_AXIS_RAMP_Y_OFFSET,
+	                                            .rampZ = base + SLIP_TRACK_WORLD_AXIS_RAMP_Z_OFFSET,
 	                                            .clearsCarry = true,
 	                                            .ret = true};
 	return allocationBytes == SLIP_TRACK_WORLD_AXIS_RAMP_BYTES;
@@ -291,12 +364,12 @@ bool SlipTrackWorld_BindAxisTestWorkspace(uint8_t *workspace, size_t workspaceBy
 	if (workspace == 0 || result == 0 || workspaceBytes < SLIP_TRACK_WORLD_AXIS_TEST_BYTES) {
 		return false;
 	}
-	testWordCount = (uint16_t)((0x000cu + 0x0004u + 0x0014u) - 0x0003u);
-	testWordBytes = 0x0002u;
+	testWordCount = SLIP_TRACK_WORLD_AXIS_TEST_COUNT;
+	testWordBytes = sizeof(uint16_t);
 	allocationBytes = (uint32_t)testWordBytes * (uint32_t)testWordCount;
 	tableBase = workspace;
-	secondTableOffset = (uint32_t)(uint16_t)((0x000cu - 1u) * testWordBytes);
-	thirdTableOffset = secondTableOffset + (uint32_t)(uint16_t)((0x0004u - 1u) * testWordBytes);
+	secondTableOffset = (uint32_t)(uint16_t)((SLIP_TRACK_WORLD_AXIS_TEST_X_COUNT)*testWordBytes);
+	thirdTableOffset = secondTableOffset + (uint32_t)(uint16_t)((SLIP_TRACK_WORLD_AXIS_TEST_Y_COUNT)*testWordBytes);
 	*result = (SlipTrackWorldAxisTestWorkspace){.testWordCount = testWordCount,
 	                                            .testWordBytes = testWordBytes,
 	                                            .allocationBytes = allocationBytes,
@@ -320,33 +393,32 @@ bool SlipTrackWorld_ClearRecordClassificationCache(uint8_t *trkBase, size_t trkS
 	if (clearedCount != 0) {
 		*clearedCount = 0;
 	}
-	if (trkBase == 0 || trkSize < 0x10u) {
+	if (trkBase == 0 || trkSize < SLIP_TRK_CLASSIFICATION_LIST_END) {
 		return false;
 	}
-	listOffset = SlipBytes_ReadLE16(trkBase + 0x0eu);
+	listOffset = SlipBytes_ReadLE16(trkBase + SLIP_TRK_CLASSIFICATION_LIST_OFFSET);
 	if (listOffset == 0) {
 		return true;
 	}
-	if ((size_t)listOffset + 2u > trkSize) {
+	if ((size_t)listOffset + SLIP_TRK_TABLE_COUNT_BYTES > trkSize) {
 		return false;
 	}
 	recordOffset = listOffset;
 	recordCount = SlipBytes_ReadLE16(trkBase + recordOffset);
-	recordOffset += 2u;
+	recordOffset += SLIP_TRK_TABLE_COUNT_BYTES;
 	if (recordCount == 0) {
 		return false;
 	}
-	do {
-		if ((size_t)recordOffset + 7u > trkSize) {
+	for (; recordCount != 0; --recordCount) {
+		if ((size_t)recordOffset + SLIP_TRK_CLASSIFICATION_CACHE_OFFSET + 1u > trkSize) {
 			return false;
 		}
-		trkBase[recordOffset + 0x06u] = 0;
+		trkBase[recordOffset + SLIP_TRK_CLASSIFICATION_CACHE_OFFSET] = 0;
 		if (clearedCount != 0) {
 			++*clearedCount;
 		}
-		recordOffset += 8u;
-		--recordCount;
-	} while (recordCount != 0);
+		recordOffset += SLIP_TRK_CLASSIFICATION_RECORD_BYTES;
+	}
 	return true;
 }
 
@@ -361,20 +433,20 @@ bool SlipTrackWorld_TraversalEntry(uint8_t *trkBase, size_t trkSize, SlipTrackWo
 		return false;
 	}
 	*result = (SlipTrackWorldTraversalEntry){.callClearRecordCache = true, .ret = true};
-	if (trkBase == 0 || trkSize < 0x0eu) {
+	if (trkBase == 0 || trkSize < SLIP_TRK_ROOT_LIST_END) {
 		return false;
 	}
 	if (!SlipTrackWorld_ClearRecordClassificationCache(trkBase, trkSize, &clearedCount)) {
 		return false;
 	}
 	result->clearedCount = clearedCount;
-	rootListOffset = SlipBytes_ReadLE16(trkBase + 0x0cu);
+	rootListOffset = SlipBytes_ReadLE16(trkBase + SLIP_TRK_ROOT_LIST_OFFSET);
 	result->rootListOffset = rootListOffset;
 	result->zeroRootBranch = rootListOffset == 0;
 	if (rootListOffset == 0) {
 		return true;
 	}
-	rootRecordOffset = (uint32_t)rootListOffset + 2u;
+	rootRecordOffset = (uint32_t)rootListOffset + SLIP_TRK_TABLE_COUNT_BYTES;
 	if ((size_t)rootRecordOffset > trkSize) {
 		return false;
 	}
@@ -412,9 +484,9 @@ SlipView3DVec32 SlipTrackWorld_SourceChunkPoint(uint16_t sourceX, uint16_t sourc
 	worldX = (uint32_t)sourceX;
 	worldY = (uint32_t)sourceY;
 	worldZ = (uint32_t)sourceZ;
-	worldX <<= 6;
-	worldY <<= 6;
-	worldZ <<= 6;
+	worldX <<= SLIP_TRK_CHUNK_POINT_COORDINATE_SHIFT;
+	worldY <<= SLIP_TRK_CHUNK_POINT_COORDINATE_SHIFT;
+	worldZ <<= SLIP_TRK_CHUNK_POINT_COORDINATE_SHIFT;
 	worldX += (uint32_t)currentChunkOrigin.x;
 	worldY += (uint32_t)currentChunkOrigin.y;
 	worldZ += (uint32_t)currentChunkOrigin.z;
@@ -426,14 +498,14 @@ bool SlipTrackWorld_NodeTest(const uint8_t *tableBase, size_t tableSize, uint16_
 	uint32_t tableOffset;
 	uint16_t tableWord;
 
-	if (tableBase == 0 || result == 0 || (size_t)nodeWordOffset + 2u > tableSize) {
+	if (tableBase == 0 || result == 0 || (size_t)nodeWordOffset + sizeof(uint16_t) > tableSize) {
 		return false;
 	}
 	tableOffset = (uint32_t)nodeWordOffset;
 	tableWord = SlipBytes_ReadLE16(tableBase + tableOffset);
 	result->nodeWordOffset = (uint16_t)tableOffset;
 	result->carryFromSar = (tableWord & 1u) != 0;
-	result->classificationWord = (uint16_t)((tableWord >> 1) | (tableWord & 0x8000u));
+	result->classificationWord = (uint16_t)((tableWord >> 1) | (tableWord & SLIP_TRACK_WORD_SIGN_BIT));
 	return true;
 }
 
@@ -444,30 +516,30 @@ bool SlipTrackWorld_SumThreePoints(const uint8_t *record, size_t recordBytesRema
 	uint32_t sumY;
 	uint32_t sumZ;
 
-	if (record == 0 || pointBase == 0 || result == 0 || recordBytesRemaining < 6u) {
+	if (record == 0 || pointBase == 0 || result == 0 || recordBytesRemaining < SLIP_TRK_POINT_TRIPLE_BYTES) {
 		return false;
 	}
 	pointOffset = SlipBytes_ReadLE16(record);
-	if ((size_t)pointOffset + 12u > pointBaseSize) {
+	if ((size_t)pointOffset + SLIP_TRK_POSITION_BYTES > pointBaseSize) {
 		return false;
 	}
 	sumX = SlipBytes_ReadLE32(pointBase + pointOffset);
-	sumZ = SlipBytes_ReadLE32(pointBase + pointOffset + 0x08u);
-	sumY = SlipBytes_ReadLE32(pointBase + pointOffset + 0x04u);
-	pointOffset = SlipBytes_ReadLE16(record + 0x02u);
-	if ((size_t)pointOffset + 12u > pointBaseSize) {
+	sumZ = SlipBytes_ReadLE32(pointBase + pointOffset + SLIP_TRK_POSITION_Z_OFFSET);
+	sumY = SlipBytes_ReadLE32(pointBase + pointOffset + SLIP_TRK_POSITION_Y_OFFSET);
+	pointOffset = SlipBytes_ReadLE16(record + SLIP_TRK_POINT_TRIPLE_SECOND_OFFSET);
+	if ((size_t)pointOffset + SLIP_TRK_POSITION_BYTES > pointBaseSize) {
 		return false;
 	}
 	sumX += SlipBytes_ReadLE32(pointBase + pointOffset);
-	sumY += SlipBytes_ReadLE32(pointBase + pointOffset + 0x04u);
-	sumZ += SlipBytes_ReadLE32(pointBase + pointOffset + 0x08u);
-	pointOffset = SlipBytes_ReadLE16(record + 0x04u);
-	if ((size_t)pointOffset + 12u > pointBaseSize) {
+	sumY += SlipBytes_ReadLE32(pointBase + pointOffset + SLIP_TRK_POSITION_Y_OFFSET);
+	sumZ += SlipBytes_ReadLE32(pointBase + pointOffset + SLIP_TRK_POSITION_Z_OFFSET);
+	pointOffset = SlipBytes_ReadLE16(record + SLIP_TRK_POINT_TRIPLE_THIRD_OFFSET);
+	if ((size_t)pointOffset + SLIP_TRK_POSITION_BYTES > pointBaseSize) {
 		return false;
 	}
 	sumX += SlipBytes_ReadLE32(pointBase + pointOffset);
-	sumY += SlipBytes_ReadLE32(pointBase + pointOffset + 0x04u);
-	sumZ += SlipBytes_ReadLE32(pointBase + pointOffset + 0x08u);
+	sumY += SlipBytes_ReadLE32(pointBase + pointOffset + SLIP_TRK_POSITION_Y_OFFSET);
+	sumZ += SlipBytes_ReadLE32(pointBase + pointOffset + SLIP_TRK_POSITION_Z_OFFSET);
 	sumX += (uint32_t)origin.x;
 	sumY += (uint32_t)origin.y;
 	sumZ += (uint32_t)origin.z;
@@ -511,9 +583,12 @@ bool SlipTrackWorld_TransformPoint(SlipView3DVec32 input, const SlipView3DMatrix
 	outputX = xFromZ + xFromY + xFromX;
 	outputY = yFromZ + yFromY + yFromX;
 	outputZ = zFromZ + zFromY + zFromX;
-	outputX = (outputX >> 8) | ((outputX & 0x80000000u) != 0 ? 0xff000000u : 0);
-	outputY = (outputY >> 8) | ((outputY & 0x80000000u) != 0 ? 0xff000000u : 0);
-	outputZ = (outputZ >> 8) | ((outputZ & 0x80000000u) != 0 ? 0xff000000u : 0);
+	outputX = (outputX >> SLIP_TRACK_LOCAL_VERTEX_TRANSFORM_SHIFT) |
+	          ((outputX & SLIP_TRACK_DWORD_SIGN_BIT) != 0 ? SLIP_TRACK_LOCAL_VERTEX_SIGN_EXTENSION : 0);
+	outputY = (outputY >> SLIP_TRACK_LOCAL_VERTEX_TRANSFORM_SHIFT) |
+	          ((outputY & SLIP_TRACK_DWORD_SIGN_BIT) != 0 ? SLIP_TRACK_LOCAL_VERTEX_SIGN_EXTENSION : 0);
+	outputZ = (outputZ >> SLIP_TRACK_LOCAL_VERTEX_TRANSFORM_SHIFT) |
+	          ((outputZ & SLIP_TRACK_DWORD_SIGN_BIT) != 0 ? SLIP_TRACK_LOCAL_VERTEX_SIGN_EXTENSION : 0);
 	outputX += (uint32_t)offset.x;
 	outputY += (uint32_t)offset.y;
 	outputZ += (uint32_t)offset.z;
@@ -535,25 +610,25 @@ bool SlipTrackWorld_ChunkSetup(const uint8_t *currentChunk, size_t chunkBytesRem
 		result->skippedByFilter = true;
 		return true;
 	}
-	if (chunkBytesRemaining < 0x16u) {
+	if (chunkBytesRemaining < SLIP_TRK_CHUNK_ORIGIN_END) {
 		return false;
 	}
 	result->chunkCounter = chunkCounter + 1u;
 	result->currentChunk = currentChunk;
-	chunkOriginX = SlipBytes_ReadLE32(currentChunk + 0x0au);
-	chunkOriginY = SlipBytes_ReadLE32(currentChunk + 0x0eu);
-	chunkOriginZ = SlipBytes_ReadLE32(currentChunk + 0x12u);
+	chunkOriginX = SlipBytes_ReadLE32(currentChunk + SLIP_TRK_CHUNK_ORIGIN_X_OFFSET);
+	chunkOriginY = SlipBytes_ReadLE32(currentChunk + SLIP_TRK_CHUNK_ORIGIN_Y_OFFSET);
+	chunkOriginZ = SlipBytes_ReadLE32(currentChunk + SLIP_TRK_CHUNK_ORIGIN_Z_OFFSET);
 	result->currentChunkOrigin = (SlipView3DVec32){(int32_t)chunkOriginX, (int32_t)chunkOriginY, (int32_t)chunkOriginZ};
 	result->savedChunkPointer = currentChunk;
 	return true;
 }
 
 bool SlipTrackWorld_StoreRecordCacheResult(uint8_t *record, size_t recordBytesRemaining, uint8_t classificationMask) {
-	if (record == 0 || recordBytesRemaining < 8u) {
+	if (record == 0 || recordBytesRemaining < SLIP_TRK_RECORD_CACHE_END) {
 		return false;
 	}
-	record[0x07u] = classificationMask;
-	record[0x06u] = 0xffu;
+	record[SLIP_TRK_RECORD_CLASSIFICATION_OFFSET] = classificationMask;
+	record[SLIP_TRK_RECORD_CACHE_VALID_OFFSET] = UINT8_MAX;
 	return true;
 }
 
@@ -620,12 +695,12 @@ bool SlipTrackWorld_RecordScan(uint8_t *trkBase, size_t trkSize, uint32_t record
 	uint32_t remainingChildCount;
 	uint16_t visitIndex;
 
-	if (trkBase == 0 || result == 0 || (size_t)recordOffset + 0x18u > trkSize) {
+	if (trkBase == 0 || result == 0 || (size_t)recordOffset + SLIP_TRK_RECORD_CHILD_LIST_END > trkSize) {
 		return false;
 	}
-	scanOffset = (uintptr_t)recordOffset + 0x08u;
-	combinedMask = 0xffu;
-	remainingChildCount = 8u;
+	scanOffset = (uintptr_t)recordOffset + SLIP_TRK_RECORD_CHILD_LIST_OFFSET;
+	combinedMask = UINT8_MAX;
+	remainingChildCount = SLIP_TRK_RECORD_CHILD_COUNT;
 	*result = (SlipTrackWorldRecordScan){recordOffset,
 	                                     (uint32_t)scanOffset,
 	                                     combinedMask,
@@ -645,13 +720,13 @@ bool SlipTrackWorld_RecordScan(uint8_t *trkBase, size_t trkSize, uint32_t record
 
 		childRecordOffset = SlipBytes_ReadLE16(trkBase + scanOffset);
 		childRecordPointer = (uint32_t)childRecordOffset;
-		if ((size_t)childRecordPointer + 8u > trkSize) {
+		if ((size_t)childRecordPointer + SLIP_TRK_RECORD_CACHE_END > trkSize) {
 			return false;
 		}
 		*visit = (SlipTrackWorldRecordScanVisit){scanOffset,
 		                                         childRecordOffset,
 		                                         childRecordPointer,
-		                                         trkBase[childRecordPointer + 0x06u],
+		                                         trkBase[childRecordPointer + SLIP_TRK_RECORD_CACHE_VALID_OFFSET],
 		                                         false,
 		                                         false,
 		                                         0,
@@ -673,7 +748,7 @@ bool SlipTrackWorld_RecordScan(uint8_t *trkBase, size_t trkSize, uint32_t record
 			}
 			visit->callTrackWorldStoreRecordCacheResult = true;
 		} else {
-			classificationByte = trkBase[childRecordPointer + 0x07u];
+			classificationByte = trkBase[childRecordPointer + SLIP_TRK_RECORD_CLASSIFICATION_OFFSET];
 			visit->cachedClassificationByte = classificationByte;
 		}
 		if (!SlipTrackWorld_ScanClassificationMask(combinedMask, classificationByte, scanOffset, remainingChildCount,
@@ -705,12 +780,12 @@ bool SlipTrackWorld_RecordScanClassified(uint8_t *trkBase, size_t trkSize, uint3
 	uint32_t remainingChildCount;
 	uint16_t visitIndex;
 
-	if (trkBase == 0 || result == 0 || (size_t)recordOffset + 0x18u > trkSize) {
+	if (trkBase == 0 || result == 0 || (size_t)recordOffset + SLIP_TRK_RECORD_CHILD_LIST_END > trkSize) {
 		return false;
 	}
-	scanOffset = (uintptr_t)recordOffset + 0x08u;
-	combinedMask = 0xffu;
-	remainingChildCount = 8u;
+	scanOffset = (uintptr_t)recordOffset + SLIP_TRK_RECORD_CHILD_LIST_OFFSET;
+	combinedMask = UINT8_MAX;
+	remainingChildCount = SLIP_TRK_RECORD_CHILD_COUNT;
 	*result = (SlipTrackWorldRecordScan){recordOffset,
 	                                     (uint32_t)scanOffset,
 	                                     combinedMask,
@@ -730,13 +805,13 @@ bool SlipTrackWorld_RecordScanClassified(uint8_t *trkBase, size_t trkSize, uint3
 
 		childRecordOffset = SlipBytes_ReadLE16(trkBase + scanOffset);
 		childRecordPointer = (uint32_t)childRecordOffset;
-		if ((size_t)childRecordPointer + 8u > trkSize) {
+		if ((size_t)childRecordPointer + SLIP_TRK_RECORD_CACHE_END > trkSize) {
 			return false;
 		}
 		*visit = (SlipTrackWorldRecordScanVisit){scanOffset,
 		                                         childRecordOffset,
 		                                         childRecordPointer,
-		                                         trkBase[childRecordPointer + 0x06u],
+		                                         trkBase[childRecordPointer + SLIP_TRK_RECORD_CACHE_VALID_OFFSET],
 		                                         false,
 		                                         false,
 		                                         0,
@@ -763,7 +838,7 @@ bool SlipTrackWorld_RecordScanClassified(uint8_t *trkBase, size_t trkSize, uint3
 			}
 			visit->callTrackWorldStoreRecordCacheResult = true;
 		} else {
-			classificationByte = trkBase[childRecordPointer + 0x07u];
+			classificationByte = trkBase[childRecordPointer + SLIP_TRK_RECORD_CLASSIFICATION_OFFSET];
 			visit->cachedClassificationByte = classificationByte;
 		}
 		if (!SlipTrackWorld_ScanClassificationMask(combinedMask, classificationByte, scanOffset, remainingChildCount,
@@ -796,7 +871,7 @@ bool SlipTrackWorld_NodeBranch(const uint8_t *record, size_t recordBytesRemainin
 	}
 	nodeOffset = SlipBytes_ReadLE16(record);
 	*result = (SlipTrackWorldNodeBranch){nodeOffset, {0, 0, false}, SLIP_TRACK_WORLD_NODE_POSITIVE};
-	if (nodeOffset == 0xffffu) {
+	if (nodeOffset == UINT16_MAX) {
 		result->branch = SLIP_TRACK_WORLD_NODE_SENTINEL;
 		return true;
 	}
@@ -815,18 +890,18 @@ bool SlipTrackWorld_DispatchPositiveNodeChild(const uint8_t *record, size_t reco
 	uint32_t childOffset;
 	uint32_t childPointer;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 6u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRK_NODE_CHILDREN_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldPositiveNodeChildDispatch){0, false, 0, 0, false, 0};
-	childOffset = (uint32_t)SlipBytes_ReadLE16(record + 0x02u);
+	childOffset = (uint32_t)SlipBytes_ReadLE16(record + SLIP_TRK_NODE_FIRST_CHILD_OFFSET);
 	result->firstOffset = (uint16_t)childOffset;
 	childPointer = childOffset + trkBase;
 	if (childPointer != 0) {
 		result->firstCall = true;
 		result->firstChildPointer = childPointer;
 	}
-	childOffset = (uint32_t)SlipBytes_ReadLE16(record + 0x04u);
+	childOffset = (uint32_t)SlipBytes_ReadLE16(record + SLIP_TRK_NODE_SECOND_CHILD_OFFSET);
 	result->secondOffset = (uint16_t)childOffset;
 	if (childOffset != 0) {
 		childPointer = childOffset + trkBase;
@@ -841,18 +916,18 @@ bool SlipTrackWorld_DispatchNegativeNodeChild(const uint8_t *record, size_t reco
 	uint32_t childOffset;
 	uint32_t childPointer;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 6u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRK_NODE_CHILDREN_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldNegativeNodeChildDispatch){0, false, 0, 0, false, 0};
-	childOffset = (uint32_t)SlipBytes_ReadLE16(record + 0x04u);
+	childOffset = (uint32_t)SlipBytes_ReadLE16(record + SLIP_TRK_NODE_SECOND_CHILD_OFFSET);
 	result->firstOffset = (uint16_t)childOffset;
 	if (childOffset != 0) {
 		childPointer = childOffset + trkBase;
 		result->firstCall = true;
 		result->firstChildPointer = childPointer;
 	}
-	childOffset = (uint32_t)SlipBytes_ReadLE16(record + 0x02u);
+	childOffset = (uint32_t)SlipBytes_ReadLE16(record + SLIP_TRK_NODE_FIRST_CHILD_OFFSET);
 	result->secondOffset = (uint16_t)childOffset;
 	if (childOffset != 0) {
 		childPointer = childOffset + trkBase;
@@ -877,13 +952,14 @@ bool SlipTrackWorld_RecordChunk(const uint8_t *record, size_t recordBytesRemaini
 	SlipTrackWorldChunkProcess chunkProcess;
 	SlipTrackWorldChunkProcessVertexCache chunkProcessVertexCache;
 
-	if (record == 0 || trkBase == 0 || chunkBase == 0 || result == 0 || recordBytesRemaining < 10u) {
+	if (record == 0 || trkBase == 0 || chunkBase == 0 || result == 0 ||
+	    recordBytesRemaining < SLIP_TRK_CHUNK_REFERENCES_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldRecordChunk){.chunkSetup = {false, chunkCounter, 0, {0, 0, 0}, 0}};
-	pointRecordOffset = (uint32_t)SlipBytes_ReadLE16(record + 0x08u);
+	pointRecordOffset = (uint32_t)SlipBytes_ReadLE16(record + SLIP_TRK_CHUNK_POINT_TRIPLE_OFFSET);
 	result->pointRecordOffset = (uint16_t)pointRecordOffset;
-	if ((size_t)pointRecordOffset + 6u > trkSize) {
+	if ((size_t)pointRecordOffset + SLIP_TRK_POINT_TRIPLE_BYTES > trkSize) {
 		return false;
 	}
 	result->pointRecord = trkBase + pointRecordOffset;
@@ -895,7 +971,7 @@ bool SlipTrackWorld_RecordChunk(const uint8_t *record, size_t recordBytesRemaini
 	if (chunkProcessExecution != 0 && chunkProcessExecution->offset != 0) {
 		*chunkProcessExecution->offset = summedPointOffset;
 	}
-	chunkOffset = (uint32_t)SlipBytes_ReadLE16(record + 0x06u);
+	chunkOffset = (uint32_t)SlipBytes_ReadLE16(record + SLIP_TRK_CHUNK_REFERENCE_OFFSET);
 	result->chunkOffset = (uint16_t)chunkOffset;
 	if ((size_t)chunkOffset > chunkBaseSize) {
 		return false;
@@ -947,7 +1023,7 @@ bool SlipTrackWorld_NodeDispatch(uint8_t *trkBase, size_t trkSize, uint32_t reco
 	size_t recordBytesRemaining;
 	SlipTrackWorldNodeBranch nodeBranch;
 
-	if (trkBase == 0 || result == 0 || (size_t)recordOffset + 2u > trkSize) {
+	if (trkBase == 0 || result == 0 || (size_t)recordOffset + sizeof(uint16_t) > trkSize) {
 		return false;
 	}
 	record = trkBase + recordOffset;
@@ -1284,25 +1360,25 @@ bool SlipTrackWorld_ChunkPointList(const uint8_t *chunk, size_t chunkBytesRemain
 	const uint8_t *pointListEntries;
 	uint32_t pointListCount;
 
-	if (chunk == 0 || result == 0 || chunkBytesRemaining < 4u) {
+	if (chunk == 0 || result == 0 || chunkBytesRemaining < SLIP_TRK_CHUNK_POINT_LIST_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldChunkPointList){.branch = SLIP_TRACK_WORLD_CHUNK_POINTS_ABSENT};
-	pointListOffset = (uint32_t)SlipBytes_ReadLE16(chunk + 0x02u);
+	pointListOffset = (uint32_t)SlipBytes_ReadLE16(chunk + SLIP_TRK_CHUNK_POINT_LIST_OFFSET);
 	result->pointListOffset = (uint16_t)pointListOffset;
 	if (pointListOffset == 0) {
 		return true;
 	}
-	if (chunkBase == 0 || (size_t)pointListOffset + 2u > chunkBaseSize) {
+	if (chunkBase == 0 || (size_t)pointListOffset + SLIP_TRK_TABLE_COUNT_BYTES > chunkBaseSize) {
 		return false;
 	}
 	pointListEntries = chunkBase + pointListOffset;
 	pointListCount = (uint32_t)SlipBytes_ReadLE16(pointListEntries);
-	pointListEntries += 2u;
+	pointListEntries += SLIP_TRK_TABLE_COUNT_BYTES;
 	result->callBuildVertexRecords = true;
 	result->pointListEntries = pointListEntries;
 	result->pointListCount = pointListCount;
-	result->pointRecordStride = 0x00000008u;
+	result->pointRecordStride = SLIP_TRK_CHUNK_POINT_RECORD_BYTES;
 	result->branch = SLIP_TRACK_WORLD_CHUNK_POINTS_PRESENT;
 	return true;
 }
@@ -1311,11 +1387,11 @@ bool SlipTrackWorld_ChunkBsp(const uint8_t *currentChunkAfterBsp, size_t chunkBy
                              size_t chunkBaseSize, SlipTrackWorldChunkBsp *result) {
 	uint32_t bspOffset;
 
-	if (currentChunkAfterBsp == 0 || result == 0 || chunkBytesRemaining < 8u) {
+	if (currentChunkAfterBsp == 0 || result == 0 || chunkBytesRemaining < SLIP_TRK_CHUNK_BSP_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldChunkBsp){0};
-	bspOffset = (uint32_t)SlipBytes_ReadLE16(currentChunkAfterBsp + 0x06u);
+	bspOffset = (uint32_t)SlipBytes_ReadLE16(currentChunkAfterBsp + SLIP_TRK_CHUNK_BSP_OFFSET);
 	result->bspOffset = (uint16_t)bspOffset;
 	if (bspOffset != 0) {
 		if (chunkBase == 0 || (size_t)bspOffset > chunkBaseSize) {
@@ -1481,43 +1557,44 @@ static bool SlipTrackWorld_TraverseRawBspNode(const uint8_t *bspBase, size_t bsp
 		result->hitDepthCapacity = true;
 		return false;
 	}
-	if ((size_t)relativeOffset > bspBytesRemaining || bspBytesRemaining - (size_t)relativeOffset < 0x18u) {
+	if ((size_t)relativeOffset > bspBytesRemaining ||
+	    bspBytesRemaining - (size_t)relativeOffset < SLIP_TRACK_BSP_NODE_BYTES) {
 		return false;
 	}
 	node = bspBase + relativeOffset;
 	result->nodeCount = (uint16_t)(result->nodeCount + 1u);
-	normalX = SlipBytes_ReadLE16(node + 0x10u);
-	if (normalX == 0xffffu) {
-		callbackValue = SlipBytes_ReadLE32(node + 0x08u);
-		recordKind = SlipBytes_ReadLE16(node + 0x0cu);
+	normalX = SlipBytes_ReadLE16(node + SLIP_TRACK_BSP_NORMAL_X_OFFSET);
+	if (normalX == UINT16_MAX) {
+		callbackValue = SlipBytes_ReadLE32(node + SLIP_TRACK_BSP_CALLBACK_VALUE_OFFSET);
+		recordKind = SlipBytes_ReadLE16(node + SLIP_TRACK_BSP_RECORD_KIND_OFFSET);
 		result->callbackCount = (uint16_t)(result->callbackCount + 1u);
 		return callback(node, callbackValue, recordKind, 0, userData);
 	}
-	normalY = SlipBytes_ReadLE16(node + 0x12u);
-	normalZ = SlipBytes_ReadLE16(node + 0x14u);
-	nodeFlags = SlipBytes_ReadLE16(node + 0x16u);
+	normalY = SlipBytes_ReadLE16(node + SLIP_TRACK_BSP_NORMAL_Y_OFFSET);
+	normalZ = SlipBytes_ReadLE16(node + SLIP_TRACK_BSP_NORMAL_Z_OFFSET);
+	nodeFlags = SlipBytes_ReadLE16(node + SLIP_TRACK_BSP_FLAGS_OFFSET);
 	result->classifyCount = (uint16_t)(result->classifyCount + 1u);
 	if (!classify(node, normalX, normalY, normalZ, nodeFlags, userData, &carry)) {
 		return false;
 	}
 	if (carry) {
 
-		negativeChild = SlipBytes_ReadLE32(node);
+		negativeChild = SlipBytes_ReadLE32(node + SLIP_TRACK_BSP_CHILD_0_OFFSET);
 		if (negativeChild != 0 &&
 		    !SlipTrackWorld_TraverseRawBspNode(bspBase, bspBytesRemaining, negativeChild, classify, callback, userData,
 		                                       (uint16_t)(depth + 1u), depthCapacity, result)) {
 			return false;
 		}
-		callbackValue = SlipBytes_ReadLE32(node + 0x08u);
+		callbackValue = SlipBytes_ReadLE32(node + SLIP_TRACK_BSP_CALLBACK_VALUE_OFFSET);
 		if (callbackValue != 0) {
-			recordKind = SlipBytes_ReadLE16(node + 0x0cu);
+			recordKind = SlipBytes_ReadLE16(node + SLIP_TRACK_BSP_RECORD_KIND_OFFSET);
 			result->callbackCount = (uint16_t)(result->callbackCount + 1u);
 			if (!callback(node, callbackValue, recordKind, -1, userData)) {
 				return false;
 			}
 		}
 
-		positiveChild = SlipBytes_ReadLE32(node + 0x04u);
+		positiveChild = SlipBytes_ReadLE32(node + SLIP_TRACK_BSP_CHILD_1_OFFSET);
 		if (positiveChild != 0 &&
 		    !SlipTrackWorld_TraverseRawBspNode(bspBase, bspBytesRemaining, positiveChild, classify, callback, userData,
 		                                       (uint16_t)(depth + 1u), depthCapacity, result)) {
@@ -1526,21 +1603,21 @@ static bool SlipTrackWorld_TraverseRawBspNode(const uint8_t *bspBase, size_t bsp
 		return true;
 	}
 
-	positiveChild = SlipBytes_ReadLE32(node + 0x04u);
+	positiveChild = SlipBytes_ReadLE32(node + SLIP_TRACK_BSP_CHILD_1_OFFSET);
 	if (positiveChild != 0 &&
 	    !SlipTrackWorld_TraverseRawBspNode(bspBase, bspBytesRemaining, positiveChild, classify, callback, userData,
 	                                       (uint16_t)(depth + 1u), depthCapacity, result)) {
 		return false;
 	}
-	callbackValue = SlipBytes_ReadLE32(node + 0x08u);
+	callbackValue = SlipBytes_ReadLE32(node + SLIP_TRACK_BSP_CALLBACK_VALUE_OFFSET);
 	if (callbackValue != 0) {
-		recordKind = SlipBytes_ReadLE16(node + 0x0cu);
+		recordKind = SlipBytes_ReadLE16(node + SLIP_TRACK_BSP_RECORD_KIND_OFFSET);
 		result->callbackCount = (uint16_t)(result->callbackCount + 1u);
 		if (!callback(node, callbackValue, recordKind, 1, userData)) {
 			return false;
 		}
 	}
-	negativeChild = SlipBytes_ReadLE32(node);
+	negativeChild = SlipBytes_ReadLE32(node + SLIP_TRACK_BSP_CHILD_0_OFFSET);
 	if (negativeChild != 0 &&
 	    !SlipTrackWorld_TraverseRawBspNode(bspBase, bspBytesRemaining, negativeChild, classify, callback, userData,
 	                                       (uint16_t)(depth + 1u), depthCapacity, result)) {
@@ -1559,10 +1636,10 @@ bool SlipTrackWorld_TraverseRawBsp(const uint8_t *bspBase, size_t bspBytesRemain
 	    .pushOldBase = true,
 	    .pushOldCallback = true,
 	    .base = bspBase,
-	    .rootRelativeOffset = 2u,
+	    .rootRelativeOffset = SLIP_TRACK_BSP_ROOT_OFFSET,
 	};
-	if (!SlipTrackWorld_TraverseRawBspNode(bspBase, bspBytesRemaining, 2u, classify, callback, userData, 0,
-	                                       depthCapacity, result)) {
+	if (!SlipTrackWorld_TraverseRawBspNode(bspBase, bspBytesRemaining, SLIP_TRACK_BSP_ROOT_OFFSET, classify, callback,
+	                                       userData, 0, depthCapacity, result)) {
 		return false;
 	}
 	result->restoreCallback = true;
@@ -1592,7 +1669,7 @@ bool SlipTrackWorld_ClassifyPlaneFromSource(uint32_t mode, uint16_t vertexIndex,
 		return false;
 	}
 	*result = (SlipTrackWorldPlaneClassify){mode,
-	                                        mode == 1u,
+	                                        mode == SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC,
 	                                        vertexIndex,
 	                                        0,
 	                                        0,
@@ -1606,7 +1683,7 @@ bool SlipTrackWorld_ClassifyPlaneFromSource(uint32_t mode, uint16_t vertexIndex,
 	                                        (int16_t)inputPlaneZ,
 	                                        0,
 	                                        false};
-	if (mode == 1u) {
+	if (mode == SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC) {
 		uint32_t sum;
 		int16_t facing;
 		if (matrix == NULL)
@@ -1615,15 +1692,16 @@ bool SlipTrackWorld_ClassifyPlaneFromSource(uint32_t mode, uint16_t vertexIndex,
 		sum = (uint32_t)((int32_t)(int16_t)inputPlaneX * matrix->m[2]);
 		sum += (uint32_t)((int32_t)(int16_t)inputPlaneY * matrix->m[5]);
 		sum += (uint32_t)((int32_t)(int16_t)inputPlaneZ * matrix->m[8]);
-		facing = (int16_t)((int32_t)sum >> 14);
+		facing = (int16_t)((int32_t)sum >> SLIP_Q14_FRACTION_BITS);
 		result->carry = facing > 0;
 		return true;
 	}
 	if (vertexCacheBase == 0 || sourcePoint == 0) {
 		return false;
 	}
-	vertexOffset = (uint32_t)vertexIndex << 6;
-	if ((size_t)vertexOffset > vertexCacheBytes || vertexCacheBytes - (size_t)vertexOffset < 0x2au) {
+	vertexOffset = (uint32_t)vertexIndex * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	if ((size_t)vertexOffset > vertexCacheBytes ||
+	    vertexCacheBytes - (size_t)vertexOffset < offsetof(SlipDraw3DVertexRecord, sourceZ) + sizeof(int16_t)) {
 		return false;
 	}
 
@@ -1677,15 +1755,15 @@ bool SlipTrackWorld_ClassifyAxisPlane(uint32_t mode, uint32_t pointX, uint32_t p
 		return false;
 	}
 	*result = (SlipTrackWorldAxisPlaneClassify){.projectionMode = mode,
-	                                            .perspectiveBranch = mode == 0,
+	                                            .perspectiveBranch = mode == SLIP_DRAW3D_PROJECTION_PERSPECTIVE,
 	                                            .pointX = pointX,
 	                                            .pointY = pointY,
 	                                            .pointZ = pointZ,
 	                                            .axisX = axisX,
 	                                            .axisY = axisY,
 	                                            .axisZ = axisZ};
-	if (mode != 0) {
-		result->clearsCarry = axisZ == 0 || ((axisZ & 0x8000u) != 0);
+	if (mode != SLIP_DRAW3D_PROJECTION_PERSPECTIVE) {
+		result->clearsCarry = axisZ == 0 || ((axisZ & SLIP_TRACK_WORD_SIGN_BIT) != 0);
 		result->setsCarry = !result->clearsCarry;
 		result->carry = result->setsCarry;
 		return true;
@@ -1704,7 +1782,7 @@ bool SlipTrackWorld_ClassifyAxisPlane(uint32_t mode, uint32_t pointX, uint32_t p
 	partialDotHigh = (uint16_t)((uint16_t)productZHigh + (uint16_t)productYHigh + carryFromFirstAdd);
 	carryFromSecondAdd = ((uint64_t)partialDotLow + (uint64_t)productXLow) >> 32;
 	dotProductHighWord = (uint16_t)(partialDotHigh + (uint16_t)productXHigh + carryFromSecondAdd);
-	signFlag = (dotProductHighWord & 0x8000u) != 0;
+	signFlag = (dotProductHighWord & SLIP_TRACK_WORD_SIGN_BIT) != 0;
 	result->dotProductX = dotProductX;
 	result->dotProductY = dotProductY;
 	result->dotProductZ = dotProductZ;
@@ -1722,32 +1800,34 @@ bool SlipTrackWorld_ChunkAlternatePaths(const uint8_t *chunk, size_t chunkBytesR
 	uint32_t firstPathOffset;
 	uint32_t secondPathOffset;
 
-	if (chunk == 0 || result == 0 || chunkBytesRemaining < 10u) {
+	if (chunk == 0 || result == 0 || chunkBytesRemaining < SLIP_TRK_CHUNK_CALLBACK_LINKS_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldChunkAlternatePaths){
 	    0, 0, 0, false, false, 0, 0, false, trackWorldDeferredMembershipCarry, false};
-	firstPathOffset = (uint32_t)SlipBytes_ReadLE16(chunk + 0x08u);
+	firstPathOffset = (uint32_t)SlipBytes_ReadLE16(chunk + SLIP_TRK_CHUNK_RECORD_CALLBACK_OFFSET);
 	result->recordCallbackOffset = (uint16_t)firstPathOffset;
 	if (firstPathOffset != 0) {
-		if (chunkBase == 0 || (size_t)firstPathOffset + 0x12u > chunkBaseSize) {
+		if (chunkBase == 0 ||
+		    (size_t)firstPathOffset + SLIP_TRK_CALLBACK_LIST_HEADER_BYTES + SLIP_TRK_CALLBACK_VERTEX_END >
+		        chunkBaseSize) {
 			return false;
 		}
-		result->recordCallbackRecord = chunkBase + firstPathOffset + 2u;
-		result->vertexIndex = SlipBytes_ReadLE16(result->recordCallbackRecord + 0x0eu);
+		result->recordCallbackRecord = chunkBase + firstPathOffset + SLIP_TRK_CALLBACK_LIST_HEADER_BYTES;
+		result->vertexIndex = SlipBytes_ReadLE16(result->recordCallbackRecord + SLIP_TRK_CALLBACK_VERTEX_OFFSET);
 		result->callGetVertexPosition = true;
 		result->callRecordCallback = true;
 		return true;
 	}
-	secondPathOffset = (uint32_t)SlipBytes_ReadLE16(chunk + 0x04u);
+	secondPathOffset = (uint32_t)SlipBytes_ReadLE16(chunk + SLIP_TRK_CHUNK_TRAVERSAL_CALLBACK_OFFSET);
 	result->traversalCallbackOffset = (uint16_t)secondPathOffset;
 	if (secondPathOffset == 0) {
 		return true;
 	}
-	if (chunkBase == 0 || (size_t)secondPathOffset + 2u > chunkBaseSize) {
+	if (chunkBase == 0 || (size_t)secondPathOffset + SLIP_TRK_CALLBACK_LIST_HEADER_BYTES > chunkBaseSize) {
 		return false;
 	}
-	result->traversalCallbackRecord = chunkBase + secondPathOffset + 2u;
+	result->traversalCallbackRecord = chunkBase + secondPathOffset + SLIP_TRK_CALLBACK_LIST_HEADER_BYTES;
 	result->callTrackWorldDeferredMembership = true;
 	if (!trackWorldDeferredMembershipCarry) {
 		result->callTraversalCallback = true;
@@ -1774,16 +1854,16 @@ bool SlipTrackWorld_ChunkDispatch(uint16_t recordKind, uint16_t recordOffset, co
 	if (trackWorldDeferredMembershipCarry) {
 		return true;
 	}
-	if (recordKind == 2u) {
+	if (recordKind == SLIP_TRACK_BSP_TRAVERSAL_CALLBACK_KIND) {
 		result->savedChunkBeforeTraversalCallback = true;
 		result->callTraversalCallback = true;
 		return true;
 	}
-	if ((size_t)chunkOffset + 0x10u > chunkBaseSize) {
+	if ((size_t)chunkOffset + SLIP_TRK_CALLBACK_VERTEX_END > chunkBaseSize) {
 		return false;
 	}
 	result->savedChunkBeforeRecordCallback = true;
-	result->vertexIndex = SlipBytes_ReadLE16(result->callbackRecord + 0x0eu);
+	result->vertexIndex = SlipBytes_ReadLE16(result->callbackRecord + SLIP_TRK_CALLBACK_VERTEX_OFFSET);
 	result->callGetVertexPosition = true;
 	result->callRecordCallback = true;
 	return true;
@@ -1797,11 +1877,11 @@ bool SlipTrackWorld_RecordVisibility(const uint8_t *record, size_t recordBytesRe
 	uint32_t radius;
 	int32_t detailValue;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x38u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRK_SHAPE_HEADER_BYTES) {
 		return false;
 	}
 	*result = (SlipTrackWorldRecordVisibility){0, 0, false, 0, 0, 0, 0, 0, false, 0, detailThreshold, false, false};
-	recordMaskWord = SlipBytes_ReadLE16(record + 0x36u);
+	recordMaskWord = SlipBytes_ReadLE16(record + SLIP_TRK_SHAPE_VISIBILITY_MASK_OFFSET);
 	result->recordMaskWord = recordMaskWord;
 	recordMaskWord = (uint16_t)(recordMaskWord & mask);
 	result->maskedRecordWord = recordMaskWord;
@@ -1809,7 +1889,7 @@ bool SlipTrackWorld_RecordVisibility(const uint8_t *record, size_t recordBytesRe
 		result->skippedByMask = true;
 		return true;
 	}
-	radius = SlipBytes_ReadLE32(record + 0x1cu);
+	radius = SlipBytes_ReadLE32(record + SLIP_TRK_SHAPE_RADIUS_OFFSET);
 	result->radius = radius;
 	result->cachedRadius = radius;
 	result->viewPositionX = viewPositionX;
@@ -1832,27 +1912,27 @@ bool SlipTrackWorld_RecordTransformSetup(const uint8_t *record, size_t recordByt
 	uint32_t positionYWithCenter;
 	uint16_t facingTransformFlag;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x3au) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRK_SHAPE_WITH_FACING_BYTES) {
 		return false;
 	}
 	*result = (SlipTrackWorldRecordTransformSetup){
 	    0, false, false, currentRecordIndex, false, 0, 0, 0, 0, 0, 0, 0, 0, SLIP_TRACK_WORLD_RECORD_TRANSLATION};
-	result->shapeHandle = SlipBytes_ReadLE16(record + 0x0cu);
+	result->shapeHandle = SlipBytes_ReadLE16(record + SLIP_TRK_SHAPE_HANDLE_OFFSET);
 	result->savedRecordPointer = true;
 	result->callGetDrawStateIndex = true;
 	result->drawStateIndexAfterAdvance = currentRecordIndex + 2u;
 	result->callLoadDrawState = true;
-	centerY = SlipBytes_ReadLE32(record + 0x20u);
+	centerY = SlipBytes_ReadLE32(record + SLIP_TRK_SHAPE_CENTER_Y_OFFSET);
 	result->centerY = centerY;
 	result->cachedCenterY = centerY;
-	positionYWithCenter = SlipBytes_ReadLE32(record + 0x14u);
+	positionYWithCenter = SlipBytes_ReadLE32(record + SLIP_TRK_SHAPE_POSITION_Y_OFFSET);
 	result->positionY = positionYWithCenter;
 	positionYWithCenter += centerY;
 	result->positionYWithCenter = positionYWithCenter;
-	result->savedPositionX = SlipBytes_ReadLE32(record + 0x10u);
+	result->savedPositionX = SlipBytes_ReadLE32(record + SLIP_TRK_SHAPE_POSITION_X_OFFSET);
 	result->savedPositionYWithCenter = positionYWithCenter;
-	result->savedPositionZ = SlipBytes_ReadLE32(record + 0x18u);
-	facingTransformFlag = SlipBytes_ReadLE16(record + 0x38u);
+	result->savedPositionZ = SlipBytes_ReadLE32(record + SLIP_TRK_SHAPE_POSITION_Z_OFFSET);
+	facingTransformFlag = SlipBytes_ReadLE16(record + SLIP_TRK_SHAPE_FACING_FLAG_OFFSET);
 	result->facingTransformFlag = facingTransformFlag;
 	if (facingTransformFlag != 0) {
 		result->branch = SLIP_TRACK_WORLD_RECORD_MATRIX;
@@ -1865,26 +1945,26 @@ bool SlipTrackWorld_RecordMatrixTransform(const uint8_t *record, size_t recordBy
                                           const SlipView3DMatrix *viewMatrix,
                                           SlipTrackWorldRecordMatrixTransform *result) {
 	if (record == 0 || worldMatrix == 0 || objectViewMatrix == 0 || viewMatrix == 0 || result == 0 ||
-	    recordBytesRemaining < 0x36u) {
+	    recordBytesRemaining < SLIP_TRK_SHAPE_VISIBILITY_MASK_OFFSET) {
 		return false;
 	}
 	*result = (SlipTrackWorldRecordMatrixTransform){0, false, 0, 0, false, 0, 0, 0, 0, false, 0};
 	result->facingModeFlag = 0;
 	result->savedShapeHandle = true;
-	result->recordMatrix = record + 0x24u;
-	result->worldMatrixAddress = 0x00037b20u;
+	result->recordMatrix = record + SLIP_TRK_SHAPE_MATRIX_OFFSET;
+	result->worldMatrixAddress = SLIP_TRACK_WORLD_WORLD_MATRIX_TOKEN;
 	result->callView3DCopyMatrixWords = true;
-	if (!SlipView3D_CopyMatrixWords((uint8_t *)worldMatrix, sizeof(*worldMatrix), record + 0x24u,
-	                                recordBytesRemaining - 0x24u)) {
+	if (!SlipView3D_CopyMatrixWords((uint8_t *)worldMatrix, sizeof(*worldMatrix), record + SLIP_TRK_SHAPE_MATRIX_OFFSET,
+	                                recordBytesRemaining - SLIP_TRK_SHAPE_MATRIX_OFFSET)) {
 		return false;
 	}
-	result->worldMatrixAddressAfterCopy = 0x00037b20u;
+	result->worldMatrixAddressAfterCopy = SLIP_TRACK_WORLD_WORLD_MATRIX_TOKEN;
 	result->worldMatrixSourceAddress = result->worldMatrixAddressAfterCopy;
-	result->viewMatrixDestinationAddress = 0x00037b34u;
-	result->cameraMatrixAddress = 0x00033d48u;
+	result->viewMatrixDestinationAddress = SLIP_TRACK_WORLD_VIEW_MATRIX_TOKEN;
+	result->cameraMatrixAddress = SLIP_TRACK_WORLD_CAMERA_MATRIX_TOKEN;
 	result->callMultiplyMatrix = true;
 	SlipView3D_MultiplyMatrix(worldMatrix, viewMatrix, objectViewMatrix);
-	result->continuationAddress = 0x00037a46u;
+	result->continuationAddress = SLIP_TRACK_WORLD_MATRIX_CONTINUATION_TOKEN;
 	return true;
 }
 
@@ -1897,15 +1977,15 @@ bool SlipTrackWorld_RecordFacingTransform(const uint8_t *record, size_t recordBy
 	uint32_t zeroMatrixEntry;
 
 	if (record == 0 || worldMatrix == 0 || objectViewMatrix == 0 || viewMatrix == 0 || result == 0 ||
-	    recordBytesRemaining < 0x1cu) {
+	    recordBytesRemaining < SLIP_TRK_SHAPE_POSITION_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldRecordFacingTransform){0, false, 0, 0, 0, 0, false, {0}, 0,     0, 0, 0, 0, 0, 0, 0,
 	                                                0, 0,     0, 0, 0, 0, 0,     0,   false, 0, 0, 0, 0, 0, 0};
-	result->facingModeFlag = 0xffffffffu;
+	result->facingModeFlag = UINT32_MAX;
 	result->savedShapeHandle = true;
-	facingAxisX = SlipBytes_ReadLE32(record + 0x10u);
-	facingAxisZ = SlipBytes_ReadLE32(record + 0x18u);
+	facingAxisX = SlipBytes_ReadLE32(record + SLIP_TRK_SHAPE_POSITION_X_OFFSET);
+	facingAxisZ = SlipBytes_ReadLE32(record + SLIP_TRK_SHAPE_POSITION_Z_OFFSET);
 	result->positionX = facingAxisX;
 	result->positionZ = facingAxisZ;
 	facingAxisX -= cameraWorldX;
@@ -1922,7 +2002,7 @@ bool SlipTrackWorld_RecordFacingTransform(const uint8_t *record, size_t recordBy
 	result->facingAxisZ = facingAxisZ;
 	zeroMatrixEntry = 0;
 	result->zeroMatrixEntry = zeroMatrixEntry;
-	result->worldMatrixAddress = 0x00037b20u;
+	result->worldMatrixAddress = SLIP_TRACK_WORLD_WORLD_MATRIX_TOKEN;
 	result->facingMatrixZX = (uint16_t)facingAxisX;
 	result->facingMatrixZY = (uint16_t)zeroMatrixEntry;
 	result->facingMatrixZZ = (uint16_t)facingAxisZ;
@@ -1932,7 +2012,7 @@ bool SlipTrackWorld_RecordFacingTransform(const uint8_t *record, size_t recordBy
 	result->facingMatrixXY = (uint16_t)zeroMatrixEntry;
 	result->facingMatrixXZ = (uint16_t)facingAxisX;
 	result->facingMatrixYX = (uint16_t)zeroMatrixEntry;
-	result->facingMatrixYY = 0x4000u;
+	result->facingMatrixYY = SLIP_Q14_ONE;
 	result->facingMatrixYZ = (uint16_t)zeroMatrixEntry;
 	worldMatrix->m[6] = (int16_t)result->facingMatrixZX;
 	worldMatrix->m[7] = (int16_t)result->facingMatrixZY;
@@ -1943,21 +2023,21 @@ bool SlipTrackWorld_RecordFacingTransform(const uint8_t *record, size_t recordBy
 	worldMatrix->m[3] = (int16_t)result->facingMatrixYX;
 	worldMatrix->m[4] = (int16_t)result->facingMatrixYY;
 	worldMatrix->m[5] = (int16_t)result->facingMatrixYZ;
-	result->viewMatrixDestinationAddress = 0x00037b34u;
-	result->cameraMatrixAddress = 0x00033d48u;
+	result->viewMatrixDestinationAddress = SLIP_TRACK_WORLD_VIEW_MATRIX_TOKEN;
+	result->cameraMatrixAddress = SLIP_TRACK_WORLD_CAMERA_MATRIX_TOKEN;
 	result->callMultiplyMatrix = true;
 	SlipView3D_MultiplyMatrix(worldMatrix, viewMatrix, objectViewMatrix);
-	result->viewMatrixAddressAfterMultiply = 0x00037b34u;
-	objectViewMatrix->m[2] = (int16_t)0;
-	objectViewMatrix->m[5] = (int16_t)0;
-	objectViewMatrix->m[6] = (int16_t)0;
-	objectViewMatrix->m[7] = (int16_t)0;
-	objectViewMatrix->m[8] = (int16_t)0x4000u;
+	result->viewMatrixAddressAfterMultiply = SLIP_TRACK_WORLD_VIEW_MATRIX_TOKEN;
+	objectViewMatrix->m[2] = 0;
+	objectViewMatrix->m[5] = 0;
+	objectViewMatrix->m[6] = 0;
+	objectViewMatrix->m[7] = 0;
+	objectViewMatrix->m[8] = SLIP_Q14_ONE;
 	result->planarViewMatrixXZ = 0;
 	result->planarViewMatrixYZ = 0;
 	result->planarViewMatrixZX = 0;
 	result->planarViewMatrixZY = 0;
-	result->planarViewMatrixZZ = 0x4000u;
+	result->planarViewMatrixZZ = SLIP_Q14_ONE;
 	return true;
 }
 
@@ -1977,25 +2057,25 @@ bool SlipTrackWorld_RecordScaledCenter(const SlipView3DMatrix *objectViewMatrix,
 	}
 	*result = (SlipTrackWorldRecordScaledCenter){0};
 	result->restoredShapeHandle = true;
-	result->viewMatrixAddress = 0x00037b34u;
+	result->viewMatrixAddress = SLIP_TRACK_WORLD_VIEW_MATRIX_TOKEN;
 	centerY = inputCenterY;
 	result->centerY = centerY;
 	matrixWord = objectViewMatrix->m[5];
 	result->matrixYZ = matrixWord;
 	product = (uint64_t)((int64_t)(int32_t)matrixWord * (int64_t)(int32_t)centerY);
-	centerOffsetZ = (uint32_t)(product >> 0x0eu);
+	centerOffsetZ = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS);
 	result->centerOffsetZ = centerOffsetZ;
 	result->centerOffsetZCopy = centerOffsetZ;
 	matrixWord = objectViewMatrix->m[4];
 	result->matrixYY = matrixWord;
 	product = (uint64_t)((int64_t)(int32_t)matrixWord * (int64_t)(int32_t)centerY);
-	centerOffsetY = (uint32_t)(product >> 0x0eu);
+	centerOffsetY = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS);
 	result->centerOffsetY = centerOffsetY;
 	result->centerOffsetYCopy = centerOffsetY;
 	matrixWord = objectViewMatrix->m[3];
 	result->matrixYX = matrixWord;
 	product = (uint64_t)((int64_t)(int32_t)matrixWord * (int64_t)(int32_t)centerY);
-	centerOffsetX = (uint32_t)(product >> 0x0eu);
+	centerOffsetX = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS);
 	result->centerOffsetX = centerOffsetX;
 	centerOffsetX += viewPositionX;
 	centerOffsetY += viewPositionY;
@@ -2040,8 +2120,8 @@ bool SlipTrackWorld_RecordSphereCull(SlipView3DVec32 center, uint32_t cullingRad
 		return true;
 	}
 	result->visibleRecordCount = visibleRecordCount + 1u;
-	result->facingMatrixToken = 0x00037b20u;
-	result->planarViewMatrixToken = 0x00037b34u;
+	result->facingMatrixToken = SLIP_TRACK_WORLD_WORLD_MATRIX_TOKEN;
+	result->planarViewMatrixToken = SLIP_TRACK_WORLD_VIEW_MATRIX_TOKEN;
 	result->viewDepth = viewDepth;
 	result->callTrackWorldUpdateDrawFlags = true;
 	result->branch = SLIP_TRACK_WORLD_RECORD_DRAW_READY;
@@ -2059,12 +2139,12 @@ bool SlipTrackWorld_RecordDrawDispatch(uint16_t mask, uint32_t renderFlagsBefore
 	*result = (SlipTrackWorldRecordDrawDispatch){
 	    mask,  false, false, renderFlagsBeforeMask, 0,    false, 0, facingModeFlag, false, false, renderFlagsForFacing,
 	    false, false, false, frameRenderFlags,      false};
-	if (mask != 0x10u) {
+	if (mask != SLIP_TRACK_SPECIAL_RENDER_MODE) {
 		result->skipMaskFlagUpdate = true;
 	} else {
 		result->callGetRenderFlagsForMask = true;
 		renderFlagsAfterMask = renderFlagsBeforeMask;
-		renderFlagsAfterMask &= 0xfffffffdu;
+		renderFlagsAfterMask &= ~SLIP_RENDER_FLAT_SHADING;
 		result->renderFlagsAfterMask = renderFlagsAfterMask;
 		result->callSetRenderFlagsAfterMask = true;
 		result->renderFlagsToStore = renderFlagsAfterMask;
@@ -2074,7 +2154,7 @@ bool SlipTrackWorld_RecordDrawDispatch(uint16_t mask, uint32_t renderFlagsBefore
 		result->callDrawShape = true;
 	} else {
 		result->callGetRenderFlagsForFacing = true;
-		result->facingSkipFlagSet = (renderFlagsForFacing & 0x08u) != 0;
+		result->facingSkipFlagSet = (renderFlagsForFacing & SLIP_RENDER_DISABLE_TEXTURES) != 0;
 		if (result->facingSkipFlagSet) {
 			result->skipShapeDraw = true;
 		} else {
@@ -2123,7 +2203,7 @@ bool SlipTrackWorld_ObjectAttachmentDraw(const uint8_t *drawRecord, size_t recor
                                          SlipTrackWorldObjectAttachmentDraw *result) {
 	uint32_t cmp;
 
-	if (drawRecord == 0 || result == 0 || recordBytesRemaining < 0x9cu) {
+	if (drawRecord == 0 || result == 0 || recordBytesRemaining < SLIP_TRACK_SLOT_DOOR_ADDRESS_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldObjectAttachmentDraw){drawRecord,
@@ -2149,8 +2229,8 @@ bool SlipTrackWorld_ObjectAttachmentDraw(const uint8_t *drawRecord, size_t recor
 	                                               false,
 	                                               false,
 	                                               SLIP_TRACK_WORLD_OBJECT_ATTACHMENT_SKIPPED};
-	result->objectOffset = SlipBytes_ReadLE32(drawRecord + 0x34u);
-	cmp = SlipBytes_ReadLE32(drawRecord + 0x98u);
+	result->objectOffset = SlipBytes_ReadLE32(drawRecord + offsetof(SlipTrackDrawRecord, objectOffset));
+	cmp = SlipBytes_ReadLE32(drawRecord + SLIP_TRACK_SLOT_DOOR_ADDRESS_OFFSET);
 	result->slotAttachmentReference = cmp;
 	if (cmp == 0) {
 		return true;
@@ -2159,7 +2239,7 @@ bool SlipTrackWorld_ObjectAttachmentDraw(const uint8_t *drawRecord, size_t recor
 	result->savedRecordForCallbackRead = true;
 	result->callObjectGetSlotDrawCallback = true;
 	result->savedDrawCallback = true;
-	result->schedulingCallbackAddress = 0x00037c93u;
+	result->schedulingCallbackAddress = SLIP_TRACK_WORLD_OBJECT_SCHEDULING_CALLBACK_TOKEN;
 	result->callInstallSchedulingCallback = true;
 	result->callDrawObject = true;
 	result->callDraw3DListTraverse = true;
@@ -2176,7 +2256,7 @@ bool SlipTrackWorld_ObjectAttachmentMatch(const uint8_t *record, size_t recordBy
                                           SlipTrackWorldObjectAttachmentMatch *result) {
 	uint32_t nextDrawRecordAddress;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 4u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < sizeof(uint32_t)) {
 		return false;
 	}
 	nextDrawRecordAddress = SlipBytes_ReadLE32(record);
@@ -2200,7 +2280,7 @@ bool SlipTrackWorld_ObjectCallbackDraw(const uint8_t *drawRecord, size_t recordB
                                        SlipTrackWorldObjectCallbackDraw *result) {
 	uint32_t cmp;
 
-	if (drawRecord == 0 || result == 0 || recordBytesRemaining < 0x9cu) {
+	if (drawRecord == 0 || result == 0 || recordBytesRemaining < SLIP_TRACK_SLOT_DOOR_ADDRESS_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldObjectCallbackDraw){drawRecord,
@@ -2222,8 +2302,8 @@ bool SlipTrackWorld_ObjectCallbackDraw(const uint8_t *drawRecord, size_t recordB
 	                                             false,
 	                                             counter,
 	                                             SLIP_TRACK_WORLD_OBJECT_CALLBACK_SKIPPED};
-	result->objectOffset = SlipBytes_ReadLE32(drawRecord + 0x34u);
-	cmp = SlipBytes_ReadLE32(drawRecord + 0x98u);
+	result->objectOffset = SlipBytes_ReadLE32(drawRecord + offsetof(SlipTrackDrawRecord, objectOffset));
+	cmp = SlipBytes_ReadLE32(drawRecord + SLIP_TRACK_SLOT_DOOR_ADDRESS_OFFSET);
 	result->slotAttachmentReference = cmp;
 	if (cmp != 0) {
 		return true;
@@ -2231,7 +2311,7 @@ bool SlipTrackWorld_ObjectCallbackDraw(const uint8_t *drawRecord, size_t recordB
 	result->savedRecordForCallbackRead = true;
 	result->callObjectGetSlotDrawCallback = true;
 	result->savedDrawCallback = true;
-	result->schedulingCallbackAddress = 0x00037c93u;
+	result->schedulingCallbackAddress = SLIP_TRACK_WORLD_OBJECT_SCHEDULING_CALLBACK_TOKEN;
 	result->callInstallSchedulingCallback = true;
 	result->callDrawObject = true;
 	result->restoredDrawCallback = true;
@@ -2246,7 +2326,7 @@ bool SlipTrackWorld_ObjectCallbackMatch(const uint8_t *record, size_t recordByte
                                         uint32_t attachmentListHeadAddress, SlipTrackWorldObjectCallbackMatch *result) {
 	uint32_t nextDrawRecordAddress;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 4u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < sizeof(uint32_t)) {
 		return false;
 	}
 	nextDrawRecordAddress = SlipBytes_ReadLE32(record);
@@ -2278,7 +2358,7 @@ bool SlipTrackWorld_ObjectListHead(uint32_t objectListCount, const uint8_t *reco
 	if (currentObjectListCount == 0) {
 		return true;
 	}
-	if (recordBase == 0 || recordBytesRemaining < 4u) {
+	if (recordBase == 0 || recordBytesRemaining < sizeof(uint32_t)) {
 		return false;
 	}
 	result->objectListRecord = recordBase;
@@ -2301,12 +2381,12 @@ bool SlipTrackWorld_ObjectRelativePosition(const uint8_t *objectRecord, size_t r
 	uint32_t worldY;
 	uint32_t worldZ;
 
-	if (objectRecord == 0 || result == 0 || recordBytesRemaining < 0x10u) {
+	if (objectRecord == 0 || result == 0 || recordBytesRemaining < SLIP_TRACK_OBJECT_LIST_POSITION_END) {
 		return false;
 	}
-	worldX = SlipBytes_ReadLE32(objectRecord + 0x04u);
-	worldY = SlipBytes_ReadLE32(objectRecord + 0x08u);
-	worldZ = SlipBytes_ReadLE32(objectRecord + 0x0cu);
+	worldX = SlipBytes_ReadLE32(objectRecord + SLIP_TRACK_OBJECT_LIST_WORLD_X_OFFSET);
+	worldY = SlipBytes_ReadLE32(objectRecord + SLIP_TRACK_OBJECT_LIST_WORLD_Y_OFFSET);
+	worldZ = SlipBytes_ReadLE32(objectRecord + SLIP_TRACK_OBJECT_LIST_WORLD_Z_OFFSET);
 	*result = (SlipTrackWorldObjectRelativePosition){worldX,
 	                                                 worldY,
 	                                                 worldZ,
@@ -2320,7 +2400,7 @@ bool SlipTrackWorld_ObjectRelativePosition(const uint8_t *objectRecord, size_t r
 	                                                 worldZ - cameraWorldZ,
 	                                                 true,
 	                                                 objectRecord,
-	                                                 0x0003db46u,
+	                                                 SLIP_TRACK_OBJECT_LIST_CONTINUATION_TOKEN,
 	                                                 true};
 	return true;
 }
@@ -2334,7 +2414,8 @@ bool SlipTrackWorld_ObjectListAdvance(uintptr_t currentRecordAddress, uint32_t r
 	}
 	remainingCountAfter = remainingCountBefore - 1u;
 	*result = (SlipTrackWorldObjectListAdvance){
-	    currentRecordAddress, remainingCountBefore, currentRecordAddress + 0x34u, remainingCountAfter,
+	    currentRecordAddress, remainingCountBefore, currentRecordAddress + SLIP_TRACK_OBJECT_LIST_RECORD_BYTES,
+	    remainingCountAfter,
 	    remainingCountAfter != 0 ? SLIP_TRACK_WORLD_OBJECT_LIST_CONTINUE : SLIP_TRACK_WORLD_OBJECT_LIST_FINISHED};
 	return true;
 }
@@ -2344,19 +2425,19 @@ bool SlipTrackWorld_ObjectListFinalize(uint32_t componentRecord, uint32_t curren
 	if (result == 0) {
 		return false;
 	}
-	*result = (SlipTrackWorldObjectListFinalize){componentRecord,
-	                                             currentComponentToken,
-	                                             componentRecord == currentComponentToken
-	                                                 ? SLIP_TRACK_WORLD_OBJECT_LIST_CURRENT_MATCHED
-	                                                 : SLIP_TRACK_WORLD_OBJECT_LIST_CURRENT_DIFFERENT,
-	                                             componentRecord == currentComponentToken ? 0x40u : 0,
-	                                             componentRecord == currentComponentToken ? 0x4fu : 0,
-	                                             componentRecord == currentComponentToken,
-	                                             true,
-	                                             true,
-	                                             true,
-	                                             true,
-	                                             true};
+	*result = (SlipTrackWorldObjectListFinalize){
+	    componentRecord,
+	    currentComponentToken,
+	    componentRecord == currentComponentToken ? SLIP_TRACK_WORLD_OBJECT_LIST_CURRENT_MATCHED
+	                                             : SLIP_TRACK_WORLD_OBJECT_LIST_CURRENT_DIFFERENT,
+	    componentRecord == currentComponentToken ? SLIP_TRACK_MATCHED_COMPONENT_LIMIT_START : 0,
+	    componentRecord == currentComponentToken ? SLIP_TRACK_MATCHED_COMPONENT_LIMIT_END : 0,
+	    componentRecord == currentComponentToken,
+	    true,
+	    true,
+	    true,
+	    true,
+	    true};
 	return true;
 }
 
@@ -2368,23 +2449,21 @@ static uint32_t g_objectLockDepth;
 static uint16_t objectResource;
 
 void SlipObject_ExhaustedMatrix(SlipView3DMatrix *matrix) {
-	enum { DOS_RESOURCE_HANDLE_STRIDE = 16 };
-
-	const SlipResourceBlock *const block = SlipResource_handles[objectResource / DOS_RESOURCE_HANDLE_STRIDE].block;
+	const SlipResourceBlock *const block = SlipResource_handles[objectResource / SLIP_RESOURCE_DOS_HANDLE_BYTES].block;
 	if (block->capacityBytes != (uint32_t)SlipObject_count * SLIP_OBJECT_DOS_STRIDE || block->physicalNext == NULL)
 		SlipRuntime_Fatal("Object pool end is not represented by the next resource header");
 	SlipResourceStorage_HeaderMatrix(block->physicalNext, matrix);
 }
 
 static uint32_t g_objectDeferredList;
-static uint16_t g_objectDeferredSlots[100];
+static uint16_t g_objectDeferredSlots[SLIP_OBJECT_COUNT];
 
 typedef struct SlipObjectServer {
 	uint16_t id;
 	SlipObjectEventCallback callback;
 } SlipObjectServer;
 
-static SlipObjectServer g_objectServers[10];
+static SlipObjectServer g_objectServers[SLIP_OBJECT_SERVER_COUNT];
 
 static uint16_t SlipTrackWorld_ObjectId(const SlipObject *object) {
 	return (uint16_t)((size_t)(object - SlipObject_table) * SLIP_OBJECT_DOS_STRIDE);
@@ -2411,7 +2490,7 @@ static const SlipObject *SlipTrackWorld_ConstObjectFromTable(const SlipObject *o
 
 void SlipObject_SetServer(uint16_t serverId, SlipObjectEventCallback callback) {
 	SlipObjectServer *server = g_objectServers;
-	uint32_t remaining = 10u;
+	uint32_t remaining = SLIP_OBJECT_SERVER_COUNT;
 
 	do {
 		if (server->id != 0 && server->callback == callback) {
@@ -2422,7 +2501,7 @@ void SlipObject_SetServer(uint16_t serverId, SlipObjectEventCallback callback) {
 		--remaining;
 	} while (remaining != 0);
 	server = g_objectServers;
-	remaining = 10u;
+	remaining = SLIP_OBJECT_SERVER_COUNT;
 	do {
 		if (server->id == 0) {
 			server->id = serverId;
@@ -2438,9 +2517,9 @@ void SlipObject_SetServer(uint16_t serverId, SlipObjectEventCallback callback) {
 uint32_t SlipObject_DispatchEvent(uint16_t objectOffset, uint32_t eventValue, uint32_t primaryPayload,
                                   uint32_t secondaryPayload, uint32_t auxiliaryPayload, uintptr_t contextToken,
                                   uint32_t contextValue) {
-	if (objectOffset == 0xffffu) {
+	if (objectOffset == UINT16_MAX) {
 		SlipObject *object = SlipObject_table;
-		uint32_t broadcastRemainingValue = (auxiliaryPayload & 0xffff0000u) | SlipObject_count;
+		uint32_t broadcastRemainingValue = (auxiliaryPayload & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | SlipObject_count;
 
 		do {
 			if (object->allocated != 0 && object->eventCallback != NULL) {
@@ -2448,8 +2527,8 @@ uint32_t SlipObject_DispatchEvent(uint16_t objectOffset, uint32_t eventValue, ui
 				                      SlipTrackWorld_ObjectId(object), contextToken, contextValue);
 			}
 			++object;
-			broadcastRemainingValue =
-			    (broadcastRemainingValue & 0xffff0000u) | (uint16_t)((uint16_t)broadcastRemainingValue - 1u);
+			broadcastRemainingValue = (broadcastRemainingValue & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) |
+			                          (uint16_t)((uint16_t)broadcastRemainingValue - 1u);
 		} while ((uint16_t)broadcastRemainingValue != 0);
 		return eventValue;
 	} else {
@@ -2472,7 +2551,8 @@ void SlipObject_DispatchUpdate(uintptr_t contextToken, uint32_t contextValue) {
 			SlipFrameTimerValues timer = SlipFrameTimer_Values();
 
 			SlipObject_DispatchEvent(
-			    SlipTrackWorld_ObjectId(object), (timer.deltaMilliseconds & 0xffff0000u) | SLIP_OBJECT_EVENT_UPDATE,
+			    SlipTrackWorld_ObjectId(object),
+			    (timer.deltaMilliseconds & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | SLIP_OBJECT_EVENT_UPDATE,
 			    (uint16_t)timer.stepQ14, (uint16_t)timer.deltaMilliseconds, 0, contextToken, contextValue);
 		}
 		++object;
@@ -2495,8 +2575,8 @@ void SlipObject_DispatchPostUpdate(uint32_t eventValue, uint32_t primaryPayload,
 			auxiliaryPayload = 0;
 			eventValue = SlipObject_DispatchEvent(
 			    SlipTrackWorld_ObjectId(object),
-			    (timer.deltaMilliseconds & 0xffff0000u) | SLIP_OBJECT_EVENT_HANDLE_ACTION, primaryPayload,
-			    secondaryPayload, auxiliaryPayload, contextToken, contextValue);
+			    (timer.deltaMilliseconds & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | SLIP_OBJECT_EVENT_HANDLE_ACTION,
+			    primaryPayload, secondaryPayload, auxiliaryPayload, contextToken, contextValue);
 		}
 		object = object->next;
 	}
@@ -2510,7 +2590,8 @@ uint32_t SlipObject_Stop(uint16_t objectOffset, uint32_t eventValue, uint32_t pr
 
 	if (object != NULL)
 		object->speed = 0;
-	return SlipObject_DispatchEvent(objectOffset, (eventValue & 0xffff0000u) | SLIP_OBJECT_EVENT_RESET_MOTION,
+	return SlipObject_DispatchEvent(objectOffset,
+	                                (eventValue & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | SLIP_OBJECT_EVENT_RESET_MOTION,
 	                                primaryPayload, secondaryPayload, auxiliaryPayload, contextToken, contextValue);
 }
 
@@ -2545,22 +2626,23 @@ void SlipObject_Free(uint16_t objectOffset, uint32_t eventValue, uint32_t primar
 	if (g_objectLockDepth != 0) {
 		g_objectDeferredSlots[g_objectDeferredList] = objectOffset;
 		++g_objectDeferredList;
-		if (g_objectDeferredList >= 100u) {
+		if (g_objectDeferredList >= SLIP_OBJECT_COUNT) {
 			SlipRuntime_Fatal("SlotFree: Deferred list full.");
 		}
 		return;
 	}
 
-	eventValue =
-	    SlipObject_DispatchEvent(objectOffset, (eventValue & 0xffff0000u) | SLIP_OBJECT_EVENT_FREE, primaryPayload,
-	                             secondaryPayload, auxiliaryPayload, contextToken, contextValue);
-	for (serverIndex = 0; serverIndex < 10u; ++serverIndex) {
+	eventValue = SlipObject_DispatchEvent(
+	    objectOffset, (eventValue & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | SLIP_OBJECT_EVENT_FREE, primaryPayload,
+	    secondaryPayload, auxiliaryPayload, contextToken, contextValue);
+	for (serverIndex = 0; serverIndex < SLIP_OBJECT_SERVER_COUNT; ++serverIndex) {
 		const SlipObjectServer *const server = &g_objectServers[serverIndex];
 
 		if (server->id != 0 && server->callback != NULL) {
-			eventValue =
-			    server->callback((eventValue & 0xffff0000u) | 1u, 0x0002670cu + serverIndex * 6u, 10u - serverIndex,
-			                     auxiliaryPayload, objectOffset, contextToken, contextValue);
+			eventValue = server->callback(
+			    (eventValue & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | SLIP_OBJECT_SERVER_EVENT_FREE,
+			    SLIP_OBJECT_SERVER_TABLE_TOKEN + serverIndex * SLIP_OBJECT_SERVER_DOS_STRIDE,
+			    SLIP_OBJECT_SERVER_COUNT - serverIndex, auxiliaryPayload, objectOffset, contextToken, contextValue);
 		}
 	}
 
@@ -2582,8 +2664,8 @@ void SlipObject_Free(uint16_t objectOffset, uint32_t eventValue, uint32_t primar
 		previous->next = next;
 	if (next != 0)
 		next->previous = previous;
-	SlipObject_DispatchEvent(0xffffu, (nextLink & 0xffff0000u) | SLIP_OBJECT_EVENT_FREED, previousLink, 0,
-	                         auxiliaryPayload, contextToken, contextValue);
+	SlipObject_DispatchEvent(UINT16_MAX, (nextLink & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | SLIP_OBJECT_EVENT_FREED,
+	                         previousLink, 0, auxiliaryPayload, contextToken, contextValue);
 }
 
 void SlipObject_EndDeferredSection(uint32_t eventValue, uint32_t primaryPayload, uint32_t secondaryPayload,
@@ -2592,13 +2674,13 @@ void SlipObject_EndDeferredSection(uint32_t eventValue, uint32_t primaryPayload,
 		--g_objectLockDepth;
 		if (g_objectLockDepth == 0) {
 			uint32_t deferredCount = g_objectDeferredList;
-			uint32_t deferredAddress = 0x00026644u;
+			uint32_t deferredAddress = SLIP_OBJECT_DEFERRED_SLOTS_TOKEN;
 			uint32_t deferredIndex = 0;
 
 			while (deferredCount != 0) {
 				SlipObject_Free(g_objectDeferredSlots[deferredIndex], eventValue, primaryPayload, deferredCount,
 				                auxiliaryPayload, deferredAddress, contextValue);
-				deferredAddress += 2u;
+				deferredAddress += SLIP_OBJECT_DEFERRED_SLOT_BYTES;
 				++deferredIndex;
 				--deferredCount;
 			}
@@ -2624,21 +2706,21 @@ uint16_t SlipObject_Next(uint16_t previousObjectOffset) {
 	size_t objectOffset;
 
 	if (SlipObject_table == NULL || SlipObject_count < 2u) {
-		return 0xffffu;
+		return UINT16_MAX;
 	}
 	if (signedOffset < 0) {
-		objectOffset = 0xaeu;
+		objectOffset = SLIP_OBJECT_DOS_STRIDE;
 	} else {
-		objectOffset = (size_t)(uint16_t)signedOffset + 0xaeu;
+		objectOffset = (size_t)(uint16_t)signedOffset + SLIP_OBJECT_DOS_STRIDE;
 	}
 	for (;;) {
 		uint32_t deferredIndex;
 		bool deferredObject = false;
 
 		if (objectOffset / SLIP_OBJECT_DOS_STRIDE >= SlipObject_count)
-			return 0xffffu;
+			return UINT16_MAX;
 		if (SlipTrackWorld_ObjectFromId((uint16_t)objectOffset)->allocated == 0) {
-			objectOffset += 0xaeu;
+			objectOffset += SLIP_OBJECT_DOS_STRIDE;
 			continue;
 		}
 		if (g_objectLockDepth == 0)
@@ -2648,7 +2730,7 @@ uint16_t SlipObject_Next(uint16_t previousObjectOffset) {
 			--deferredIndex;
 			if (g_objectDeferredSlots[deferredIndex] == (uint16_t)objectOffset) {
 				deferredObject = true;
-				objectOffset += 0xaeu;
+				objectOffset += SLIP_OBJECT_DOS_STRIDE;
 				break;
 			}
 		}
@@ -2658,8 +2740,6 @@ uint16_t SlipObject_Next(uint16_t previousObjectOffset) {
 }
 
 SlipView3DVec32 SlipObject_ExtrapolatedPosition(uint16_t objectHandle) {
-	enum { DIRECTION_FRACTION_BITS = 14 };
-
 	const SlipObject *const object = SlipTrackWorld_ObjectFromId(objectHandle);
 	SlipView3DVec32 result;
 	const int32_t speed = object->speed;
@@ -2667,14 +2747,14 @@ SlipView3DVec32 SlipObject_ExtrapolatedPosition(uint16_t objectHandle) {
 	if (speed != 0) {
 		const SlipFrameTimerValues timer = SlipFrameTimer_Values();
 		const uint16_t frameStep = (uint16_t)timer.stepQ14;
-		const int32_t distance = (int32_t)(((int64_t)speed * frameStep) >> DIRECTION_FRACTION_BITS);
+		const int32_t distance = (int32_t)(((int64_t)speed * frameStep) >> SLIP_Q14_FRACTION_BITS);
 
 		result.y = (int32_t)((uint32_t)object->position.y +
-		                     (uint32_t)(int32_t)(((int64_t)object->direction.y * distance) >> DIRECTION_FRACTION_BITS));
+		                     (uint32_t)(int32_t)(((int64_t)object->direction.y * distance) >> SLIP_Q14_FRACTION_BITS));
 		result.z = (int32_t)((uint32_t)object->position.z +
-		                     (uint32_t)(int32_t)(((int64_t)object->direction.z * distance) >> DIRECTION_FRACTION_BITS));
+		                     (uint32_t)(int32_t)(((int64_t)object->direction.z * distance) >> SLIP_Q14_FRACTION_BITS));
 		result.x = (int32_t)((uint32_t)object->position.x +
-		                     (uint32_t)(int32_t)(((int64_t)object->direction.x * distance) >> DIRECTION_FRACTION_BITS));
+		                     (uint32_t)(int32_t)(((int64_t)object->direction.x * distance) >> SLIP_Q14_FRACTION_BITS));
 	} else {
 		result = object->position;
 	}
@@ -2688,15 +2768,18 @@ bool SlipTrack_StartRecord(const uint8_t *trkBase, size_t trkSize, uint16_t star
 	if (trkBase == 0 || result == 0) {
 		return false;
 	}
-	recordOffset = (size_t)(uint16_t)(0x0cu * startRecordIndex);
-	if (recordOffset + 0x24u > trkSize) {
+	recordOffset = (size_t)(uint16_t)(SLIP_TRK_POSITION_BYTES * startRecordIndex);
+	if (recordOffset + SLIP_TRK_START_POSITIONS_OFFSET + SLIP_TRK_POSITION_BYTES > trkSize) {
 		return false;
 	}
-	*result = (SlipTrackStartRecord){.recordOffset = recordOffset,
-	                                 .startPositionX = SlipBytes_ReadLE32(trkBase + recordOffset + 0x18u),
-	                                 .startPositionY = SlipBytes_ReadLE32(trkBase + recordOffset + 0x1cu),
-	                                 .startPositionZ = SlipBytes_ReadLE32(trkBase + recordOffset + 0x20u),
-	                                 .returned = true};
+	*result = (SlipTrackStartRecord){
+	    .recordOffset = recordOffset,
+	    .startPositionX = SlipBytes_ReadLE32(trkBase + recordOffset + SLIP_TRK_START_POSITIONS_OFFSET),
+	    .startPositionY =
+	        SlipBytes_ReadLE32(trkBase + recordOffset + SLIP_TRK_START_POSITIONS_OFFSET + SLIP_TRK_POSITION_Y_OFFSET),
+	    .startPositionZ =
+	        SlipBytes_ReadLE32(trkBase + recordOffset + SLIP_TRK_START_POSITIONS_OFFSET + SLIP_TRK_POSITION_Z_OFFSET),
+	    .returned = true};
 	return true;
 }
 
@@ -2707,25 +2790,28 @@ bool SlipTrack_StartRecordAlternate(const uint8_t *trkBase, size_t trkSize, uint
 	if (trkBase == 0 || result == 0) {
 		return false;
 	}
-	recordOffset = (size_t)(uint16_t)(0x0cu * startRecordIndex);
-	if (recordOffset + 0x0bcu > trkSize) {
+	recordOffset = (size_t)(uint16_t)(SLIP_TRK_POSITION_BYTES * startRecordIndex);
+	if (recordOffset + SLIP_TRK_ALTERNATE_START_POSITIONS_OFFSET + SLIP_TRK_POSITION_BYTES > trkSize) {
 		return false;
 	}
-	*result = (SlipTrackStartRecord){.recordOffset = recordOffset,
-	                                 .startPositionX = SlipBytes_ReadLE32(trkBase + recordOffset + 0x0b0u),
-	                                 .startPositionY = SlipBytes_ReadLE32(trkBase + recordOffset + 0x0b4u),
-	                                 .startPositionZ = SlipBytes_ReadLE32(trkBase + recordOffset + 0x0b8u),
-	                                 .returned = true};
+	*result = (SlipTrackStartRecord){
+	    .recordOffset = recordOffset,
+	    .startPositionX = SlipBytes_ReadLE32(trkBase + recordOffset + SLIP_TRK_ALTERNATE_START_POSITIONS_OFFSET),
+	    .startPositionY = SlipBytes_ReadLE32(trkBase + recordOffset + SLIP_TRK_ALTERNATE_START_POSITIONS_OFFSET +
+	                                         SLIP_TRK_POSITION_Y_OFFSET),
+	    .startPositionZ = SlipBytes_ReadLE32(trkBase + recordOffset + SLIP_TRK_ALTERNATE_START_POSITIONS_OFFSET +
+	                                         SLIP_TRK_POSITION_Z_OFFSET),
+	    .returned = true};
 	return true;
 }
 
 bool SlipTrack_StartHeading(const uint8_t *record, size_t recordBytes, SlipTrackStartHeading *result) {
-	if (record == 0 || result == 0 || recordBytes < 0x18u) {
+	if (record == 0 || result == 0 || recordBytes < SLIP_TRK_START_HEADING_END) {
 		return false;
 	}
-	*result = (SlipTrackStartHeading){.headingXQ14 = SlipBytes_ReadLE16(record + 0x12u),
-	                                  .headingYQ14 = SlipBytes_ReadLE16(record + 0x14u),
-	                                  .headingZQ14 = SlipBytes_ReadLE16(record + 0x16u),
+	*result = (SlipTrackStartHeading){.headingXQ14 = SlipBytes_ReadLE16(record + SLIP_TRK_START_HEADING_X_OFFSET),
+	                                  .headingYQ14 = SlipBytes_ReadLE16(record + SLIP_TRK_START_HEADING_Y_OFFSET),
+	                                  .headingZQ14 = SlipBytes_ReadLE16(record + SLIP_TRK_START_HEADING_Z_OFFSET),
 	                                  .returned = true};
 	return true;
 }
@@ -2752,7 +2838,7 @@ bool SlipObject_SetDrawCallback(uint16_t objectOffset, SlipObjectDrawCallback dr
 
 bool SlipObject_SetTrackSlot(SlipObject *objectTableBase, size_t objectTableSize, uint16_t objectOffset,
                              uint16_t trackSlotOffset) {
-	if (objectTableBase == NULL || (size_t)objectOffset + 0x10u > objectTableSize ||
+	if (objectTableBase == NULL || (size_t)objectOffset + SLIP_OBJECT_DOS_TRACK_SLOT_END > objectTableSize ||
 	    objectOffset % SLIP_OBJECT_DOS_STRIDE != 0) {
 		return false;
 	}
@@ -2823,8 +2909,8 @@ bool SlipObject_SlotAllocate(SlipObjectSlotAllocate *result) {
 	if (i >= remaining) {
 
 		result->exhausted = true;
-		SlipRuntime_error = 7u;
-		result->errorCode = 7u;
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
+		result->errorCode = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
 		result->carryOut = true;
 		result->returned = true;
 		return true;
@@ -2902,8 +2988,9 @@ bool SlipObject_SlotFill(const SlipView3DMatrix *savedTemplate, uint32_t x, uint
 
 	result->initializeEventCode = SLIP_OBJECT_EVENT_INITIALIZE;
 	result->callObjectDispatchEvent = true;
-	(void)SlipObject_DispatchEvent((uint16_t)result->objectOffset, (x & 0xffff0000u) | SLIP_OBJECT_EVENT_INITIALIZE, y,
-	                               z, 0, 0, drawData);
+	(void)SlipObject_DispatchEvent((uint16_t)result->objectOffset,
+	                               (x & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | SLIP_OBJECT_EVENT_INITIALIZE, y, z, 0, 0,
+	                               drawData);
 	result->carryOut = false;
 	result->returned = true;
 	return true;
@@ -2917,10 +3004,11 @@ bool SlipObject_Block(uint32_t objectHandleBeforeMask, uint32_t objectTableToken
 	if (result == 0) {
 		return false;
 	}
-	objectOffset = objectHandleBeforeMask & 0xffffu;
+	objectOffset = objectHandleBeforeMask & UINT16_MAX;
 	objectAddress = objectOffset + objectTableToken;
 	*result = (SlipObjectMatrixBindingResult){
-	    objectHandleBeforeMask, objectOffset, objectAddress, objectAddress + 0x48u, 0x00027254u, true, true, true};
+	    objectHandleBeforeMask,        objectOffset, objectAddress, objectAddress + SLIP_OBJECT_DOS_MATRIX_OFFSET,
+	    SLIP_OBJECT_DRAW_MATRIX_TOKEN, true,         true,          true};
 	return true;
 }
 
@@ -2939,7 +3027,7 @@ bool SlipObject_MatrixCopy(const SlipObject *objectTableBase, size_t objectTable
 	if (objectTableBase == 0 || objectTransformMatrix == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandleBeforeMask & 0xffffu);
+	objectOffset = (size_t)(objectHandleBeforeMask & UINT16_MAX);
 	object = SlipTrackWorld_ConstObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
@@ -3005,9 +3093,9 @@ SlipView3DVec32 SlipObject_Velocity(const SlipObject *objectTableBase, uint16_t 
 	const int32_t magnitude = object->speed;
 	SlipView3DVec32 result;
 
-	result.x = (int32_t)(((uint64_t)((int64_t)object->direction.x * magnitude)) >> 14);
-	result.y = (int32_t)(((uint64_t)((int64_t)object->direction.y * magnitude)) >> 14);
-	result.z = (int32_t)(((uint64_t)((int64_t)object->direction.z * magnitude)) >> 14);
+	result.x = (int32_t)(((uint64_t)((int64_t)object->direction.x * magnitude)) >> SLIP_Q14_FRACTION_BITS);
+	result.y = (int32_t)(((uint64_t)((int64_t)object->direction.y * magnitude)) >> SLIP_Q14_FRACTION_BITS);
+	result.z = (int32_t)(((uint64_t)((int64_t)object->direction.z * magnitude)) >> SLIP_Q14_FRACTION_BITS);
 	return result;
 }
 
@@ -3017,7 +3105,7 @@ static uint16_t SlipTrackWorld_SlipObjectInvalidateViewPositions(SlipObject *obj
 	size_t objectIndex;
 
 	for (objectIndex = 1; objectIndex < objectCount; ++objectIndex) {
-		objectTableBase[objectIndex].flags &= 0xfffeu;
+		objectTableBase[objectIndex].flags &= ~SLIP_OBJECT_VIEW_POSITION_VALID;
 		++clearedFlagSlots;
 	}
 	return clearedFlagSlots;
@@ -3033,7 +3121,7 @@ bool SlipObject_Rotate(SlipObject *objectTableBase, size_t objectTableSize, uint
 	if (objectTableBase == NULL || maths == NULL || result == NULL) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandle & 0xffffu);
+	objectOffset = (size_t)(objectHandle & UINT16_MAX);
 	object = SlipTrackWorld_ObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
@@ -3081,7 +3169,7 @@ bool SlipObject_SetDirection(SlipObject *objectTableBase, size_t objectTableSize
 	if (objectTableBase == NULL || result == NULL) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandle & 0xffffu);
+	objectOffset = (size_t)(objectHandle & UINT16_MAX);
 	object = SlipTrackWorld_ObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
@@ -3123,12 +3211,12 @@ bool SlipObject_MatrixInstall(SlipObject *objectTableBase, size_t objectTableSiz
 	if (objectTableBase == 0 || savedSourceMatrix == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandleBeforeMask & 0xffffu);
+	objectOffset = (size_t)(objectHandleBeforeMask & UINT16_MAX);
 	object = SlipTrackWorld_ObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
-	if ((objectHandleBeforeMask & 0xffffu) == 0) {
+	if ((objectHandleBeforeMask & UINT16_MAX) == 0) {
 		clearedFlagSlots = SlipTrackWorld_SlipObjectInvalidateViewPositions(objectTableBase, objectTableSize);
 	}
 
@@ -3136,7 +3224,7 @@ bool SlipObject_MatrixInstall(SlipObject *objectTableBase, size_t objectTableSiz
 	*result = (SlipObjectMatrixInstall){.objectHandleBeforeMask = objectHandleBeforeMask,
 	                                    .savedSourceMatrix = savedSourceMatrix,
 	                                    .callTrackWorldSlipObjectInvalidateViewPositions =
-	                                        (objectHandleBeforeMask & 0xffffu) == 0,
+	                                        (objectHandleBeforeMask & UINT16_MAX) == 0,
 	                                    .clearedFlagSlots = clearedFlagSlots,
 	                                    .objectOffset = objectOffset,
 	                                    .sourceMatrix = savedSourceMatrix,
@@ -3156,12 +3244,12 @@ bool SlipObject_Position(const SlipObject *objectTableBase, size_t objectTableSi
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandle & 0xffffu);
+	objectOffset = (size_t)(objectHandle & UINT16_MAX);
 	object = SlipTrackWorld_ConstObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
-	*result = (SlipObjectPosition){.objectId = objectHandle & 0xffffu,
+	*result = (SlipObjectPosition){.objectId = objectHandle & UINT16_MAX,
 	                               .objectOffset = objectOffset,
 	                               .positionX = (uint32_t)object->position.x,
 	                               .positionY = (uint32_t)object->position.y,
@@ -3184,12 +3272,12 @@ bool SlipObject_ViewPosition(SlipObject *objectTableBase, size_t objectTableSize
 	if (object == NULL || camera == NULL) {
 		return false;
 	}
-	if ((object->flags & 0x0001u) == 0) {
+	if ((object->flags & SLIP_OBJECT_VIEW_POSITION_VALID) == 0) {
 		relative = (SlipView3DVec32){(int32_t)((uint32_t)object->position.x - (uint32_t)camera->position.x),
 		                             (int32_t)((uint32_t)object->position.y - (uint32_t)camera->position.y),
 		                             (int32_t)((uint32_t)object->position.z - (uint32_t)camera->position.z)};
 		object->viewPosition = SlipView3D_TransformPositionByRows(&camera->matrix, relative);
-		object->flags |= 0x0001u;
+		object->flags |= SLIP_OBJECT_VIEW_POSITION_VALID;
 	}
 	*viewPosition = object->viewPosition;
 	return true;
@@ -3205,20 +3293,20 @@ bool SlipObject_SetPosition(SlipObject *objectTableBase, size_t objectTableSize,
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandleBeforeMask & 0xffffu);
+	objectOffset = (size_t)(objectHandleBeforeMask & UINT16_MAX);
 	object = SlipTrackWorld_ObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
 	flagsBefore = object->flags;
-	flagsAfter = (uint16_t)(flagsBefore & 0xfffeu);
+	flagsAfter = (uint16_t)(flagsBefore & ~SLIP_OBJECT_VIEW_POSITION_VALID);
 	object->position = (SlipView3DVec32){(int32_t)x, (int32_t)y, (int32_t)z};
 	object->flags = flagsAfter;
 	if (objectOffset == 0) {
 		(void)SlipTrackWorld_SlipObjectInvalidateViewPositions(objectTableBase, objectTableSize);
 	}
 	*result = (SlipObjectSetPosition){.objectHandleBeforeMask = objectHandleBeforeMask,
-	                                  .maskedObjectHandle = objectHandleBeforeMask & 0xffffu,
+	                                  .maskedObjectHandle = objectHandleBeforeMask & UINT16_MAX,
 	                                  .objectOffset = objectOffset,
 	                                  .positionX = x,
 	                                  .positionY = y,
@@ -3252,7 +3340,7 @@ void SlipObject_ResetActiveList(uint32_t eventPayload, uint32_t eventFlags, uint
 	SlipObjectSlotAllocate allocated;
 	SlipObject_SlotAllocate(&allocated);
 	SlipObject *const identity = SlipTrackWorld_ObjectFromId((uint16_t)allocated.objectOffset);
-	identity->matrix = (SlipView3DMatrix){.m = {0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
+	identity->matrix = (SlipView3DMatrix){.m = {SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 	identity->position = (SlipView3DVec32){0, 0, 0};
 	identity->flags = 0;
 }
@@ -3351,14 +3439,14 @@ bool SlipObject_SetSlotDrawCallback(SlipObject *objectTableBase, size_t objectTa
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandleBeforeMask & 0xffffu);
+	objectOffset = (size_t)(objectHandleBeforeMask & UINT16_MAX);
 	object = SlipTrackWorld_ObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
 	object->slotDrawCallback = slotDrawCallback;
 	*result = (SlipObjectDrawCallbackWriteResult){
-	    objectHandleBeforeMask, objectHandleBeforeMask & 0xffffu, objectOffset, slotDrawCallback, true, true};
+	    objectHandleBeforeMask, objectHandleBeforeMask & UINT16_MAX, objectOffset, slotDrawCallback, true, true};
 	return true;
 }
 
@@ -3371,13 +3459,13 @@ bool SlipObject_GetSlotDrawCallback(const SlipObject *objectTableBase, size_t ob
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandle & 0xffffu);
+	objectOffset = (size_t)(objectHandle & UINT16_MAX);
 	object = SlipTrackWorld_ConstObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
 	slotDrawCallback = object->slotDrawCallback;
-	*result = (SlipObjectDrawCallbackReadResult){objectHandle & 0xffffu, objectOffset, slotDrawCallback, true};
+	*result = (SlipObjectDrawCallbackReadResult){objectHandle & UINT16_MAX, objectOffset, slotDrawCallback, true};
 	return true;
 }
 
@@ -3389,14 +3477,14 @@ bool SlipObject_SetDrawData(SlipObject *objectTableBase, size_t objectTableSize,
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandleBeforeMask & 0xffffu);
+	objectOffset = (size_t)(objectHandleBeforeMask & UINT16_MAX);
 	object = SlipTrackWorld_ObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
 	object->drawData = drawData;
 	*result = (SlipObjectSlotDataWriteResult){
-	    objectHandleBeforeMask, objectHandleBeforeMask & 0xffffu, objectOffset, drawData, true, true};
+	    objectHandleBeforeMask, objectHandleBeforeMask & UINT16_MAX, objectOffset, drawData, true, true};
 	return true;
 }
 
@@ -3408,14 +3496,14 @@ bool SlipObject_SetDrawExtent(SlipObject *objectTableBase, size_t objectTableSiz
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandleBeforeMask & 0xffffu);
+	objectOffset = (size_t)(objectHandleBeforeMask & UINT16_MAX);
 	object = SlipTrackWorld_ObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
 	object->drawExtent = drawExtent;
 	*result = (SlipObjectExtentWriteResult){
-	    objectHandleBeforeMask, objectHandleBeforeMask & 0xffffu, objectOffset, drawExtent, true, true};
+	    objectHandleBeforeMask, objectHandleBeforeMask & UINT16_MAX, objectOffset, drawExtent, true, true};
 	return true;
 }
 
@@ -3427,14 +3515,14 @@ bool SlipObject_SetEventCallback(SlipObject *objectTableBase, size_t objectTable
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandleBeforeMask & 0xffffu);
+	objectOffset = (size_t)(objectHandleBeforeMask & UINT16_MAX);
 	object = SlipTrackWorld_ObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
 	object->eventCallback = eventCallback;
 	*result = (SlipObjectEventCallbackWriteResult){
-	    objectHandleBeforeMask, objectHandleBeforeMask & 0xffffu, objectOffset, eventCallback, true, true};
+	    objectHandleBeforeMask, objectHandleBeforeMask & UINT16_MAX, objectOffset, eventCallback, true, true};
 	return true;
 }
 
@@ -3447,13 +3535,13 @@ bool SlipObject_GetDrawData(const SlipObject *objectTableBase, size_t objectTabl
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandle & 0xffffu);
+	objectOffset = (size_t)(objectHandle & UINT16_MAX);
 	object = SlipTrackWorld_ConstObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
 	drawData = (uint32_t)object->drawData;
-	*result = (SlipObjectSlotDataReadResult){objectHandle & 0xffffu, objectOffset, drawData, true};
+	*result = (SlipObjectSlotDataReadResult){objectHandle & UINT16_MAX, objectOffset, drawData, true};
 	return true;
 }
 
@@ -3466,13 +3554,13 @@ bool SlipObject_GetDrawExtent(const SlipObject *objectTableBase, size_t objectTa
 	if (objectTableBase == 0 || result == 0) {
 		return false;
 	}
-	objectOffset = (size_t)(objectHandle & 0xffffu);
+	objectOffset = (size_t)(objectHandle & UINT16_MAX);
 	object = SlipTrackWorld_ConstObjectFromTable(objectTableBase, objectTableSize, objectOffset);
 	if (object == NULL) {
 		return false;
 	}
 	drawExtent = object->drawExtent;
-	*result = (SlipObjectExtentReadResult){objectHandle & 0xffffu, objectOffset, drawExtent, true};
+	*result = (SlipObjectExtentReadResult){objectHandle & UINT16_MAX, objectOffset, drawExtent, true};
 	return true;
 }
 
@@ -3509,7 +3597,7 @@ bool SlipTrackWorld_DrawCallbackHeader(const uint8_t *objectBase, size_t objectB
 		return false;
 	}
 	record = objectBase + drawRecordOffset;
-	if (objectBaseBytes - (size_t)drawRecordOffset < 0x18u) {
+	if (objectBaseBytes - (size_t)drawRecordOffset < SLIP_TRACK_DRAW_CALLBACK_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldDrawCallbackHeader){.savedDispatchContext = true,
@@ -3519,7 +3607,7 @@ bool SlipTrackWorld_DrawCallbackHeader(const uint8_t *objectBase, size_t objectB
 	if (slotDrawCallback == NULL) {
 		return true;
 	}
-	if (objectBaseBytes - (size_t)drawRecordOffset < 0x28u) {
+	if (objectBaseBytes - (size_t)drawRecordOffset < SLIP_TRACK_DRAW_ATTACHMENT_READY_END) {
 		return false;
 	}
 	const SlipTrackDrawRecord *const draw = (const SlipTrackDrawRecord *)(const void *)record;
@@ -3551,7 +3639,9 @@ bool SlipTrackWorld_BuildAttachmentTransform(const uint8_t *record, size_t recor
 	uint32_t negZ;
 
 	if (record == 0 || inputChild == 0 || attachment == 0 || viewMatrix == 0 || result == 0 ||
-	    recordBytesRemaining < 0x1cu || childBytesRemaining < 0x34u || attachmentBytesRemaining < 0x10u) {
+	    recordBytesRemaining < SLIP_TRACK_DRAW_PAIRED_ADDRESS_END ||
+	    childBytesRemaining < SLIP_TRACK_DRAW_ATTACHMENT_NORMAL_END ||
+	    attachmentBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_DWORD_END) {
 		return false;
 	}
 
@@ -3559,10 +3649,10 @@ bool SlipTrackWorld_BuildAttachmentTransform(const uint8_t *record, size_t recor
 	SlipTrackDrawRecord *const child = (SlipTrackDrawRecord *)(void *)inputChild;
 	pairedDrawRecordAddress = draw->pairedDrawAddress;
 	child->attachmentTransformReady = UINT32_MAX;
-	source = (SlipView3DVec32){(int16_t)SlipBytes_ReadLE16(attachment + 0x02u),
-	                           (int16_t)SlipBytes_ReadLE16(attachment + 0x04u),
-	                           (int16_t)SlipBytes_ReadLE16(attachment + 0x06u)};
-	pushed = SlipBytes_ReadLE32(attachment + 0x0cu);
+	source = (SlipView3DVec32){(int16_t)SlipBytes_ReadLE16(attachment + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+	                           (int16_t)SlipBytes_ReadLE16(attachment + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+	                           (int16_t)SlipBytes_ReadLE16(attachment + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET)};
+	pushed = SlipBytes_ReadLE32(attachment + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET);
 	transformed = SlipView3D_TransformPosition16(viewMatrix, source);
 	child->attachmentOrigin.x = after.x;
 	child->attachmentOrigin.y = after.y;
@@ -3575,7 +3665,7 @@ bool SlipTrackWorld_BuildAttachmentTransform(const uint8_t *record, size_t recor
 	child->attachmentNormal.z = (int32_t)negZ;
 
 	*result = (SlipTrackWorldBuildAttachment){pairedDrawRecordAddress,
-	                                          0xffffffffu,
+	                                          UINT32_MAX,
 	                                          true,
 	                                          true,
 	                                          source,
@@ -3602,7 +3692,7 @@ bool SlipTrackWorld_UseAttachmentTransform(uint8_t *record, size_t recordBytesRe
 	uint32_t normalY;
 	uint32_t normalZ;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x34u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRACK_DRAW_ATTACHMENT_NORMAL_END) {
 		return false;
 	}
 
@@ -3627,7 +3717,7 @@ bool SlipTrackWorld_InvokeDrawCallback(const uint8_t *record, size_t recordBytes
 	uint32_t test;
 	uint32_t recordIndexDuringCallback;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x38u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < sizeof(SlipTrackDrawRecord)) {
 		return false;
 	}
 	const SlipTrackDrawRecord *const draw = (const SlipTrackDrawRecord *)(const void *)record;
@@ -3635,16 +3725,17 @@ bool SlipTrackWorld_InvokeDrawCallback(const uint8_t *record, size_t recordBytes
 	actorMode = 1u;
 	test = 0;
 
-	if ((int32_t)renderMode >= 3) {
+	if ((int32_t)renderMode >= SLIP_TRACK_ACTOR_MODE_DISABLED_DETAIL_MINIMUM) {
 		actorMode = 0;
 	} else if (renderMode != 0) {
-		if (recordBytesRemaining < 0xa4u) {
+		if (recordBytesRemaining < SLIP_TRACK_DRAW_NO_SLOT_TEST_END) {
 			return false;
 		}
 		/* The no-slot path retains the draw-record pointer: +a0 is
 		 * the second following 38-byte record's
 		 * normal Z at +30. */
-		test = (uint32_t)draw[2].attachmentNormal.z & 0x08u;
+		test = (uint32_t)draw[SLIP_TRACK_DRAW_NO_SLOT_TEST_RECORD_INDEX].attachmentNormal.z &
+		       SLIP_TRACK_SLOT_DISABLE_ACTOR_MODE;
 		if (test != 0) {
 			actorMode = 0;
 		}
@@ -3692,7 +3783,7 @@ bool SlipTrackWorld_InvokeDrawCallbackExecute(const uint8_t *record, size_t reco
 	uint32_t testAddress;
 	uint32_t testOffset;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x38u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < sizeof(SlipTrackDrawRecord)) {
 		return false;
 	}
 	const SlipTrackDrawRecord *const draw = (const SlipTrackDrawRecord *)(const void *)record;
@@ -3717,20 +3808,21 @@ bool SlipTrackWorld_InvokeDrawCallbackExecute(const uint8_t *record, size_t reco
 	actorMode = 1u;
 	test = 0;
 
-	if ((int32_t)renderMode >= 3) {
+	if ((int32_t)renderMode >= SLIP_TRACK_ACTOR_MODE_DISABLED_DETAIL_MINIMUM) {
 		actorMode = 0;
 	} else if (renderMode != 0) {
 		if (result->testUsesSlotListEntry) {
-			if (testOffset + 0xa4u > slotListBytes) {
+			if (testOffset + SLIP_TRACK_SLOT_FLAGS_END > slotListBytes) {
 				return false;
 			}
-			test = selectedSlot->flags & 0x08u;
+			test = selectedSlot->flags & SLIP_TRACK_SLOT_DISABLE_ACTOR_MODE;
 		} else {
-			if (recordBytesRemaining < 0xa4u) {
+			if (recordBytesRemaining < SLIP_TRACK_DRAW_NO_SLOT_TEST_END) {
 				return false;
 			}
 
-			test = (uint32_t)draw[2].attachmentNormal.z & 0x08u;
+			test = (uint32_t)draw[SLIP_TRACK_DRAW_NO_SLOT_TEST_RECORD_INDEX].attachmentNormal.z &
+			       SLIP_TRACK_SLOT_DISABLE_ACTOR_MODE;
 		}
 		if (test != 0) {
 			actorMode = 0;
@@ -3781,18 +3873,19 @@ bool SlipTrackWorld_ComponentGate(const uint8_t *record, size_t recordBytesRemai
 	uint16_t componentBit8;
 	uint16_t sourcePointIndex;
 
-	if (record == 0 || componentBase == 0 || result == 0 || recordBytesRemaining < 4u) {
+	if (record == 0 || componentBase == 0 || result == 0 || recordBytesRemaining < SLIP_TRD_SECTION_COMPONENT_END) {
 		return false;
 	}
-	componentOffset = SlipBytes_ReadLE16(record + 0x02u);
-	if ((size_t)componentOffset > componentBaseBytes || componentBaseBytes - (size_t)componentOffset < 0x18u) {
+	componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if ((size_t)componentOffset > componentBaseBytes ||
+	    componentBaseBytes - (size_t)componentOffset < SLIP_TRC_COMPONENT_FLAGS_END) {
 		return false;
 	}
 	componentRecord = componentBase + componentOffset;
-	flags = SlipBytes_ReadLE16(componentRecord + 0x16u);
-	flagsMergedWithInput = (valueBeforeGate & 0xffff0000u) | flags;
+	flags = SlipBytes_ReadLE16(componentRecord + SLIP_TRC_COMPONENT_FLAGS_OFFSET);
+	flagsMergedWithInput = (valueBeforeGate & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | flags;
 	maskedFlags = (uint16_t)(flags & mask);
-	maskedFlagsMergedWithInput = (flagsMergedWithInput & 0xffff0000u) | maskedFlags;
+	maskedFlagsMergedWithInput = (flagsMergedWithInput & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | maskedFlags;
 	*result = (SlipTrackWorldComponentGate){componentOffset,
 	                                        componentRecord,
 	                                        flagsMergedWithInput,
@@ -3806,12 +3899,12 @@ bool SlipTrackWorld_ComponentGate(const uint8_t *record, size_t recordBytesRemai
 	if (maskedFlags == 0) {
 		return true;
 	}
-	maskBit8 = (uint16_t)(mask & 0x08u);
+	maskBit8 = (uint16_t)(mask & SLIP_TRC_COMPONENT_EXCLUSIVE_PASS);
 	result->maskBit8 = maskBit8;
 	if (maskBit8 == 0) {
 		maskedFlagsWithComponentBase = maskedFlagsMergedWithInput + componentBaseToken;
 		result->maskedFlagsWithComponentBase = maskedFlagsWithComponentBase;
-		componentBit8 = (uint16_t)(flags & 0x08u);
+		componentBit8 = (uint16_t)(flags & SLIP_TRC_COMPONENT_EXCLUSIVE_PASS);
 		result->componentBit8 = componentBit8;
 		if (componentBit8 != 0) {
 			return true;
@@ -3846,10 +3939,10 @@ uint32_t SlipTrackWorld_ClassifyPoint(SlipView3DVec32 point, uint32_t projection
 
 	classificationMask = projectionMask;
 	if (point.z <= minZ) {
-		classificationMask |= 0x10u;
+		classificationMask |= SLIP_BOX_CLIP_NEAR;
 	}
 	if (point.z >= maxZ) {
-		classificationMask |= 0x20u;
+		classificationMask |= SLIP_BOX_CLIP_FAR;
 	}
 	return classificationMask;
 }
@@ -3867,20 +3960,27 @@ bool SlipTrackWorld_CullBounds(const uint8_t *component, size_t componentBytesRe
                                const SlipView3DMatrix *viewMatrix, SlipView3DVec32 center, int32_t minZ, int32_t maxZ,
                                SlipTrackWorldSphereCull sphereCull, SlipTrackWorldProjectMask projectMask,
                                void *userData, SlipTrackWorldCullBounds *result) {
-	static const uint8_t cornerOffsets[8][3] = {{0x08u, 0x0cu, 0x10u}, {0x08u, 0x0cu, 0x12u}, {0x0au, 0x0cu, 0x12u},
-	                                            {0x0au, 0x0cu, 0x10u}, {0x08u, 0x0eu, 0x10u}, {0x08u, 0x0eu, 0x12u},
-	                                            {0x0au, 0x0eu, 0x12u}, {0x0au, 0x0eu, 0x10u}};
+	static const uint8_t cornerOffsets[SLIP_TRACK_BOUNDING_CORNER_COUNT][3] = {
+	    {SLIP_TRC_COMPONENT_MINIMUM_X_OFFSET, SLIP_TRC_COMPONENT_MINIMUM_Y_OFFSET, SLIP_TRC_COMPONENT_MINIMUM_Z_OFFSET},
+	    {SLIP_TRC_COMPONENT_MINIMUM_X_OFFSET, SLIP_TRC_COMPONENT_MINIMUM_Y_OFFSET, SLIP_TRC_COMPONENT_MAXIMUM_Z_OFFSET},
+	    {SLIP_TRC_COMPONENT_MAXIMUM_X_OFFSET, SLIP_TRC_COMPONENT_MINIMUM_Y_OFFSET, SLIP_TRC_COMPONENT_MAXIMUM_Z_OFFSET},
+	    {SLIP_TRC_COMPONENT_MAXIMUM_X_OFFSET, SLIP_TRC_COMPONENT_MINIMUM_Y_OFFSET, SLIP_TRC_COMPONENT_MINIMUM_Z_OFFSET},
+	    {SLIP_TRC_COMPONENT_MINIMUM_X_OFFSET, SLIP_TRC_COMPONENT_MAXIMUM_Y_OFFSET, SLIP_TRC_COMPONENT_MINIMUM_Z_OFFSET},
+	    {SLIP_TRC_COMPONENT_MINIMUM_X_OFFSET, SLIP_TRC_COMPONENT_MAXIMUM_Y_OFFSET, SLIP_TRC_COMPONENT_MAXIMUM_Z_OFFSET},
+	    {SLIP_TRC_COMPONENT_MAXIMUM_X_OFFSET, SLIP_TRC_COMPONENT_MAXIMUM_Y_OFFSET, SLIP_TRC_COMPONENT_MAXIMUM_Z_OFFSET},
+	    {SLIP_TRC_COMPONENT_MAXIMUM_X_OFFSET, SLIP_TRC_COMPONENT_MAXIMUM_Y_OFFSET,
+	     SLIP_TRC_COMPONENT_MINIMUM_Z_OFFSET}};
 	int32_t radius;
 	uint32_t mask;
 	int i;
 
 	if (component == 0 || viewMatrix == 0 || sphereCull == 0 || projectMask == 0 || result == 0 ||
-	    componentBytesRemaining < 0x16u) {
+	    componentBytesRemaining < SLIP_TRC_COMPONENT_RADIUS_END) {
 		return false;
 	}
-	radius = (int32_t)((int16_t)SlipBytes_ReadLE16(component + 0x14u));
+	radius = (int32_t)((int16_t)SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_RADIUS_OFFSET));
 
-	radius = (int32_t)((uint32_t)radius << 6);
+	radius = (int32_t)((uint32_t)radius << SLIP_TRC_COMPONENT_RADIUS_SHIFT);
 	*result = (SlipTrackWorldCullBounds){radius,      center, true, false,
 	                                     {{0, 0, 0}}, {0},    0,    SLIP_TRACK_WORLD_CULL_BRANCH_VISIBLE};
 	if (sphereCull(center, radius, userData)) {
@@ -3889,7 +3989,7 @@ bool SlipTrackWorld_CullBounds(const uint8_t *component, size_t componentBytesRe
 		return true;
 	}
 	mask = 0;
-	for (i = 0; i < 8; ++i) {
+	for (i = 0; i < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++i) {
 		SlipView3DVec32 source;
 		SlipView3DVec32 point;
 		uint32_t cornerClassificationMask;
@@ -3928,7 +4028,7 @@ uint16_t SlipTrackWorld_RandomStep(uint16_t state) {
 	carry = (nextState & 1u) != 0;
 	nextState >>= 1;
 	if (carry) {
-		nextState ^= 0xb400u;
+		nextState ^= SLIP_RANDOM_LFSR_FEEDBACK_MASK;
 	}
 	return nextState;
 }
@@ -3944,21 +4044,25 @@ bool SlipTrackWorld_ProjectMask(SlipView3DVec32 point, const SlipTrackWorldProje
 	}
 	clipMask = 0;
 	pointX = (uint32_t)point.x;
-	planeBoundary = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)frustum->maxXStep, (uint32_t)point.z, 16u);
+	planeBoundary = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)frustum->maxXStep, (uint32_t)point.z,
+	                                                             SLIP_PROJECTION_SLOPE_FRACTION_BITS);
 	if ((int32_t)pointX >= (int32_t)planeBoundary) {
-		clipMask |= 0x02u;
+		clipMask |= SLIP_BOUNDS_CLIP_RIGHT;
 	}
-	planeBoundary = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)frustum->minXStep, (uint32_t)point.z, 16u);
+	planeBoundary = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)frustum->minXStep, (uint32_t)point.z,
+	                                                             SLIP_PROJECTION_SLOPE_FRACTION_BITS);
 	if ((int32_t)pointX < (int32_t)planeBoundary) {
-		clipMask |= 0x01u;
+		clipMask |= SLIP_BOUNDS_CLIP_LEFT;
 	}
-	planeBoundary = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)frustum->minYStep, (uint32_t)point.z, 16u);
+	planeBoundary = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)frustum->minYStep, (uint32_t)point.z,
+	                                                             SLIP_PROJECTION_SLOPE_FRACTION_BITS);
 	if (point.y >= (int32_t)planeBoundary) {
-		clipMask |= 0x08u;
+		clipMask |= SLIP_BOUNDS_CLIP_TOP;
 	}
-	planeBoundary = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)frustum->maxYStep, (uint32_t)point.z, 16u);
+	planeBoundary = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)frustum->maxYStep, (uint32_t)point.z,
+	                                                             SLIP_PROJECTION_SLOPE_FRACTION_BITS);
 	if (point.y < (int32_t)planeBoundary) {
-		clipMask |= 0x04u;
+		clipMask |= SLIP_BOUNDS_CLIP_BOTTOM;
 	}
 	*clipMaskOut = clipMask;
 	return true;
@@ -3993,36 +4097,36 @@ bool SlipTrackWorld_SphereCull(SlipView3DVec32 center, int32_t radius, const Sli
 	planeRadius = sphereRadius;
 	depthLimitOrCenterX = planeDistance;
 	planeDistance = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->minXPlaneDepthQ14,
-	                                                             depthLimitOrCenterX, 14u);
-	planeDistance +=
-	    (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->minXPlaneNegXQ14, centerZ, 14u);
+	                                                             depthLimitOrCenterX, SLIP_Q14_FRACTION_BITS);
+	planeDistance += (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->minXPlaneNegXQ14, centerZ,
+	                                                              SLIP_Q14_FRACTION_BITS);
 	planeDistance += planeRadius;
 	if ((int32_t)planeDistance < 0) {
 		*carry = true;
 		return true;
 	}
 	planeDistance = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->maxXPlaneNegDepthQ14,
-	                                                             depthLimitOrCenterX, 14u);
-	planeDistance +=
-	    (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->maxXPlaneXQ14, centerZ, 14u);
+	                                                             depthLimitOrCenterX, SLIP_Q14_FRACTION_BITS);
+	planeDistance += (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->maxXPlaneXQ14, centerZ,
+	                                                              SLIP_Q14_FRACTION_BITS);
 	planeDistance += planeRadius;
 	if ((int32_t)planeDistance < 0) {
 		*carry = true;
 		return true;
 	}
-	planeDistance =
-	    (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->maxYPlaneDepthQ14, centerY, 14u);
-	planeDistance +=
-	    (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->maxYPlaneYQ14, centerZ, 14u);
+	planeDistance = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->maxYPlaneDepthQ14, centerY,
+	                                                             SLIP_Q14_FRACTION_BITS);
+	planeDistance += (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->maxYPlaneYQ14, centerZ,
+	                                                              SLIP_Q14_FRACTION_BITS);
 	planeDistance += planeRadius;
 	if ((int32_t)planeDistance < 0) {
 		*carry = true;
 		return true;
 	}
-	planeDistance =
-	    (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->minYPlaneNegDepthQ14, centerY, 14u);
-	planeDistance +=
-	    (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->minYPlaneNegYQ14, centerZ, 14u);
+	planeDistance = (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->minYPlaneNegDepthQ14,
+	                                                             centerY, SLIP_Q14_FRACTION_BITS);
+	planeDistance += (uint32_t)SlipTrackWorld_MultiplySignedShift((uint32_t)(int32_t)frustum->minYPlaneNegYQ14, centerZ,
+	                                                              SLIP_Q14_FRACTION_BITS);
 	planeDistance += planeRadius;
 	if ((int32_t)planeDistance < 0) {
 		*carry = true;
@@ -4041,14 +4145,14 @@ bool SlipTrackWorld_UpdateDrawFlags(uint32_t renderFlagsValue, int32_t component
 		return false;
 	}
 	flagsWithTextureBit = renderFlagsValue;
-	flagsWithTextureBit |= 0x10u;
+	flagsWithTextureBit |= SLIP_RENDER_MASKED_TEXTURE;
 	*result = (SlipTrackWorldDrawFlags){true,
 	                                    renderFlagsValue,
 	                                    flagsWithTextureBit,
 	                                    textureMode,
 	                                    0,
 	                                    0,
-	                                    0x0003a7e7u,
+	                                    SLIP_TRACK_WORLD_DRAW_FLAGS_CONTINUATION_TOKEN,
 	                                    shading,
 	                                    (uint32_t)componentDistance,
 	                                    0,
@@ -4058,21 +4162,21 @@ bool SlipTrackWorld_UpdateDrawFlags(uint32_t renderFlagsValue, int32_t component
 	                                    0,
 	                                    true,
 	                                    0};
-	if (textureMode != 0) {
-		flagsWithTextureBit &= 0xffffffefu;
+	if (textureMode != SLIP_RENDER_TEXTURE_MASKING_ENABLED) {
+		flagsWithTextureBit &= ~SLIP_RENDER_MASKED_TEXTURE;
 	}
-	flagsWithTextureBit &= 0xfffffff7u;
+	flagsWithTextureBit &= ~SLIP_RENDER_DISABLE_TEXTURES;
 	result->flagsAfterTextureModeAndClearBit8 = flagsWithTextureBit;
-	flagsWithTextureBit |= 0x02u;
+	flagsWithTextureBit |= SLIP_RENDER_FLAT_SHADING;
 	result->flagsWithBit2 = flagsWithTextureBit;
 	if (shading != 0 && componentDepth <= componentDistance) {
-		flagsWithTextureBit &= 0xfffffffdu;
+		flagsWithTextureBit &= ~SLIP_RENDER_FLAT_SHADING;
 	}
 	result->flagsAfterShadingGate = flagsWithTextureBit;
-	flagsWithTextureBit |= 0x04u;
+	flagsWithTextureBit |= SLIP_RENDER_DISABLE_SPECULAR;
 	result->flagsWithBit4 = flagsWithTextureBit;
 	if (shadingSecondary != 0 && componentDepth <= componentRadius) {
-		flagsWithTextureBit &= 0xfffffffbu;
+		flagsWithTextureBit &= ~SLIP_RENDER_DISABLE_SPECULAR;
 	}
 	result->flagsAfterSecondaryShadingGate = flagsWithTextureBit;
 	result->rendererFlags = flagsWithTextureBit;
@@ -4087,7 +4191,7 @@ bool SlipTrackWorld_FrameDrawState(uint32_t drawFlagsFrom, uint32_t shading, uin
 		return false;
 	}
 	flags = drawFlagsFrom;
-	flags &= 0xfffffff7u;
+	flags &= ~SLIP_RENDER_DISABLE_TEXTURES;
 	*result = (SlipTrackWorldFrameDrawState){.loadedRenderFlags = true,
 	                                         .drawFlagsFrom = drawFlagsFrom,
 	                                         .drawFlagsAfterClearBit8 = flags,
@@ -4095,16 +4199,16 @@ bool SlipTrackWorld_FrameDrawState(uint32_t drawFlagsFrom, uint32_t shading, uin
 	                                         .bit4Gate = shadingSecondary,
 	                                         .callRendererSetFlags = true,
 	                                         .returned = true};
-	flags &= 0xfffffffdu;
+	flags &= ~SLIP_RENDER_FLAT_SHADING;
 	result->drawFlagsAfterClearBit2 = flags;
 	if (shading == 0) {
-		flags |= 0x02u;
+		flags |= SLIP_RENDER_FLAT_SHADING;
 	}
 	result->drawFlagsAfterOptionalBit2 = flags;
-	flags &= 0xfffffffbu;
+	flags &= ~SLIP_RENDER_DISABLE_SPECULAR;
 	result->drawFlagsAfterClearBit4 = flags;
 	if (shadingSecondary == 0) {
-		flags |= 0x04u;
+		flags |= SLIP_RENDER_DISABLE_SPECULAR;
 	}
 	result->drawFlagsAfterOptionalBit4 = flags;
 	result->storedFrameFlags = flags;
@@ -4115,7 +4219,7 @@ bool SlipTrackWorld_FrameDrawState(uint32_t drawFlagsFrom, uint32_t shading, uin
 SlipTrackBeamState SlipTrackWorld_beams;
 
 SlipTrackBeamRecord *SlipTrackWorld_AllocateBeam(SlipTrackBeamState *beams) {
-	if (beams->recordCount == 0x180)
+	if (beams->recordCount == SLIP_TRACK_BEAM_RECORD_CAPACITY)
 		return NULL;
 	SlipTrackBeamRecord *const record =
 	    &(beams->resourceRecords ? beams->resourceRecords : beams->records)[beams->recordCount++];
@@ -4152,10 +4256,10 @@ bool SlipTrackWorld_PreFrameScale(SlipView3DVec32 input, SlipView3DVec32 nodeOri
 	shiftedLow = 0;
 	for (shiftStep = 0; shiftStep < 2u; ++shiftStep) {
 		const uint32_t carryFrom = shiftedHigh & 1u;
-		shiftedHigh = (shiftedHigh >> 1) | (shiftedHigh & 0x80000000u);
+		shiftedHigh = (shiftedHigh >> 1) | (shiftedHigh & SLIP_TRACK_DWORD_SIGN_BIT);
 		shiftedLow = (shiftedLow >> 1) | (carryFrom << 31);
 	}
-	divisor = (uint32_t)radius << 16;
+	divisor = (uint32_t)radius << SLIP_TRACK_COLLISION_DIVISOR_SHIFT;
 	*result = (SlipTrackWorldPreFrameScale){
 	    input,      input,      nodeDelta,   rangeDelta, dotRounded,
 	    dotRounded, shiftedLow, shiftedHigh, divisor,    shiftedHigh > divisor,
@@ -4168,8 +4272,8 @@ bool SlipTrackWorld_PreFrameScale(SlipView3DVec32 input, SlipView3DVec32 nodeOri
 			return false;
 		}
 		quotient = (uint32_t)((((uint64_t)shiftedHigh << 32) | shiftedLow) / divisor);
-		result->negativeQuotient = (quotient & 0x80000000u) != 0;
-		if ((quotient & 0x80000000u) == 0) {
+		result->negativeQuotient = (quotient & SLIP_TRACK_DWORD_SIGN_BIT) != 0;
+		if ((quotient & SLIP_TRACK_DWORD_SIGN_BIT) == 0) {
 			scale = quotient;
 			result->branch = SLIP_TRACK_WORLD_PRE_FRAME_SCALE_BRANCH_QUOTIENT;
 		} else {
@@ -4202,14 +4306,15 @@ void SlipTrackWorld_TrackSlotPlaneDistance(const uint8_t *trackRecord, const uin
 	uint64_t dotBits;
 
 	memset(result, 0, sizeof(*result));
-	result->trackRecordOrigin = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(trackRecord + 0x12u),
-	                                              (int32_t)SlipBytes_ReadLE32(trackRecord + 0x16u),
-	                                              (int32_t)SlipBytes_ReadLE32(trackRecord + 0x1au)};
-	result->componentListOffset = SlipBytes_ReadLE16(trackRecord + 0x02u);
+	result->trackRecordOrigin =
+	    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET),
+	                      (int32_t)SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET),
+	                      (int32_t)SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)};
+	result->componentListOffset = SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 	componentList = componentBase + result->componentListOffset;
-	normalX = SlipBytes_ReadLE16(plane + 0x02u);
-	normalY = SlipBytes_ReadLE16(plane + 0x04u);
-	normalZ = SlipBytes_ReadLE16(plane + 0x06u);
+	normalX = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+	normalY = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+	normalZ = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 	facingDotLowWord = SlipView3D_DotProductQ14((uint16_t)direction.x, (uint16_t)direction.y, (uint16_t)direction.z,
 	                                            normalX, normalY, normalZ, &result->facingDot);
 	result->facingDotLowWord = (int16_t)(uint16_t)facingDotLowWord;
@@ -4219,7 +4324,8 @@ void SlipTrackWorld_TrackSlotPlaneDistance(const uint8_t *trackRecord, const uin
 		return;
 	}
 
-	SlipTrackWorld_PointLookup(componentList, componentBase, componentBaseBytes, SlipBytes_ReadLE16(plane + 0x0cu),
+	SlipTrackWorld_PointLookup(componentList, componentBase, componentBaseBytes,
+	                           SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
 	                           result->facingDot.dotProductQ14, result->facingDot.xySumHigh, result->facingDot.inputZ,
 	                           &result->point);
 	pointX = result->point.pointXOrInput + (uint32_t)result->trackRecordOrigin.x;
@@ -4233,8 +4339,8 @@ void SlipTrackWorld_TrackSlotPlaneDistance(const uint8_t *trackRecord, const uin
 	          (uint64_t)((int64_t)result->queryDelta.y * (int64_t)result->rangePlane.normal.y) +
 	          (uint64_t)((int64_t)result->queryDelta.z * (int64_t)result->rangePlane.normal.z);
 	result->dotBits = dotBits;
-	result->planeDistance = (uint32_t)(dotBits >> 14);
-	result->planeDistance += (uint32_t)((dotBits >> 13) & 1u);
+	result->planeDistance = (uint32_t)(dotBits >> SLIP_Q14_FRACTION_BITS);
+	result->planeDistance += (uint32_t)((dotBits >> (SLIP_Q14_FRACTION_BITS - 1)) & 1u);
 	result->rejected = false;
 	result->returned = true;
 }
@@ -4247,44 +4353,47 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 	const uint8_t *primitive;
 	uint32_t primitiveCount;
 
-	relativeStart = (SlipView3DVec32){(int32_t)((uint32_t)queryPoint.x - SlipBytes_ReadLE32(trackRecord + 0x12u)),
-	                                  (int32_t)((uint32_t)queryPoint.y - SlipBytes_ReadLE32(trackRecord + 0x16u)),
-	                                  (int32_t)((uint32_t)queryPoint.z - SlipBytes_ReadLE32(trackRecord + 0x1au))};
-	componentList = componentBase + SlipBytes_ReadLE16(trackRecord + 0x02u);
-	if (SlipBytes_ReadLE16(componentList + 0x04u) == 0) {
+	relativeStart = (SlipView3DVec32){
+	    (int32_t)((uint32_t)queryPoint.x - SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+	    (int32_t)((uint32_t)queryPoint.y - SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+	    (int32_t)((uint32_t)queryPoint.z - SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET))};
+	componentList = componentBase + SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if (SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET) == 0) {
 		return;
 	}
-	primitive = componentBase + SlipBytes_ReadLE16(componentList + 0x04u);
+	primitive = componentBase + SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 	primitiveCount = SlipBytes_ReadLE16(primitive);
-	primitive += 0x02u;
+	primitive += SLIP_TRC_TABLE_COUNT_BYTES;
 	do {
 		uint16_t descriptor;
 
 		do {
-			if ((primitive[0x08u] & 0x41u) == 0) {
-				const uint16_t normalX = SlipBytes_ReadLE16(primitive + 0x02u);
-				const uint16_t normalY = SlipBytes_ReadLE16(primitive + 0x04u);
-				const uint16_t normalZ = SlipBytes_ReadLE16(primitive + 0x06u);
+			if ((primitive[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] &
+			     (SLIP_TRC_PRIMITIVE_TRENCH | SLIP_TRC_PRIMITIVE_RANGE_PLANE)) == 0) {
+				const uint16_t normalX = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+				const uint16_t normalY = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+				const uint16_t normalZ = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 				const uint32_t facingBits = (uint32_t)((int32_t)(int16_t)normalX * (int32_t)query->directionX) +
 				                            (uint32_t)((int32_t)(int16_t)normalY * (int32_t)query->directionY) +
 				                            (uint32_t)((int32_t)(int16_t)normalZ * (int32_t)query->directionZ);
 
 				if ((int32_t)facingBits < 0) {
-					const int16_t radius = (int16_t)(uint16_t)(0u - (uint16_t)(facingBits >> 14));
+					const int16_t radius = (int16_t)(uint16_t)(0u - (uint16_t)(facingBits >> SLIP_Q14_FRACTION_BITS));
 
-					if (radius >= 0x10) {
+					if (radius >= SLIP_TRACK_RAY_MINIMUM_FACING_Q14) {
 						SlipTrackWorldPointLookup point;
 						SlipView3DVec32 planeDelta;
 						int32_t planeDistance;
 						int32_t adjustedDistance;
-						const uint32_t divisor = (uint32_t)(uint16_t)radius << 16;
+						const uint32_t divisor = (uint32_t)(uint16_t)radius << SLIP_TRACK_COLLISION_DIVISOR_SHIFT;
 						uint32_t planeTime;
 						SlipView3DVec32 candidate;
 						SlipTrackWorldSideTest sideTest;
 
 						memset(&point, 0, sizeof(point));
-						SlipTrackWorld_PointLookup(componentList, componentBase, componentBaseBytes,
-						                           SlipBytes_ReadLE16(primitive + 0x0cu), 0, 0, 0, &point);
+						SlipTrackWorld_PointLookup(
+						    componentList, componentBase, componentBaseBytes,
+						    SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET), 0, 0, 0, &point);
 						planeDelta = (SlipView3DVec32){
 						    (int32_t)((uint32_t)relativeStart.x - point.pointXOrInput),
 						    (int32_t)((uint32_t)relativeStart.y - point.pointYOrInput),
@@ -4295,7 +4404,8 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 						if (planeDistance < 0) {
 							break;
 						}
-						adjustedDistance = (int32_t)((uint32_t)planeDistance - 0x1e8u - (uint32_t)query->surfaceOffset);
+						adjustedDistance = (int32_t)((uint32_t)planeDistance - SLIP_TRACK_COLLISION_SURFACE_CLEARANCE -
+						                             (uint32_t)query->surfaceOffset);
 						if (adjustedDistance >= 0) {
 							uint64_t adjustedDividend;
 							uint32_t adjustedTime;
@@ -4304,7 +4414,8 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 							if (adjustedDistance >= query->bestDistance) {
 								break;
 							}
-							adjustedDividend = (uint64_t)(uint32_t)adjustedDistance << 30;
+							adjustedDividend = (uint64_t)(uint32_t)adjustedDistance
+							                   << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT;
 							if ((uint32_t)(adjustedDividend >> 32) > divisor) {
 								break;
 							}
@@ -4312,7 +4423,8 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 							if ((int32_t)adjustedTime < 0 || (int32_t)adjustedTime >= query->bestDistance) {
 								break;
 							}
-							candidatePlaneDividend = (uint64_t)(uint32_t)planeDistance << 30;
+							candidatePlaneDividend = (uint64_t)(uint32_t)planeDistance
+							                         << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT;
 							if ((uint32_t)(candidatePlaneDividend >> 32) > divisor) {
 								break;
 							}
@@ -4324,15 +4436,15 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 							    (SlipView3DVec32){(int32_t)((uint32_t)relativeStart.x +
 							                                (uint32_t)((uint64_t)((int64_t)query->directionX *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14)),
+							                                           SLIP_Q14_FRACTION_BITS)),
 							                      (int32_t)((uint32_t)relativeStart.y +
 							                                (uint32_t)((uint64_t)((int64_t)query->directionY *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14)),
+							                                           SLIP_Q14_FRACTION_BITS)),
 							                      (int32_t)((uint32_t)relativeStart.z +
 							                                (uint32_t)((uint64_t)((int64_t)query->directionZ *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14))};
+							                                           SLIP_Q14_FRACTION_BITS))};
 							memset(&sideTest, 0, sizeof(sideTest));
 							SlipTrackWorld_SideTest(componentList, componentBase, componentBaseBytes, primitive,
 							                        componentBaseBytes - (size_t)(primitive - componentBase), candidate,
@@ -4342,7 +4454,8 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 							}
 							query->bestDistance = (int32_t)adjustedTime;
 						} else {
-							const uint64_t fallbackPlaneDividend = (uint64_t)(uint32_t)planeDistance << 30;
+							const uint64_t fallbackPlaneDividend = (uint64_t)(uint32_t)planeDistance
+							                                       << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT;
 							uint32_t inwardDistance;
 							uint64_t inwardDividend;
 
@@ -4357,15 +4470,15 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 							    (SlipView3DVec32){(int32_t)((uint32_t)relativeStart.x +
 							                                (uint32_t)((uint64_t)((int64_t)query->directionX *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14)),
+							                                           SLIP_Q14_FRACTION_BITS)),
 							                      (int32_t)((uint32_t)relativeStart.y +
 							                                (uint32_t)((uint64_t)((int64_t)query->directionY *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14)),
+							                                           SLIP_Q14_FRACTION_BITS)),
 							                      (int32_t)((uint32_t)relativeStart.z +
 							                                (uint32_t)((uint64_t)((int64_t)query->directionZ *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14))};
+							                                           SLIP_Q14_FRACTION_BITS))};
 							memset(&sideTest, 0, sizeof(sideTest));
 							SlipTrackWorld_SideTest(componentList, componentBase, componentBaseBytes, primitive,
 							                        componentBaseBytes - (size_t)(primitive - componentBase), candidate,
@@ -4374,7 +4487,7 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 								break;
 							}
 							inwardDistance = 0u - (uint32_t)adjustedDistance;
-							inwardDividend = (uint64_t)inwardDistance << 30;
+							inwardDividend = (uint64_t)inwardDistance << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT;
 							if ((uint32_t)(inwardDividend >> 32) > divisor) {
 								break;
 							}
@@ -4384,17 +4497,23 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 							}
 						}
 
-						query->hitFraction =
-						    (int32_t)((((uint64_t)(uint32_t)query->bestDistance << 30) / query->hitFractionDivisor) >>
-						              16);
+						query->hitFraction = (int32_t)((((uint64_t)(uint32_t)query->bestDistance
+						                                 << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT) /
+						                                query->hitFractionDivisor) >>
+						                               SLIP_TRACK_COLLISION_DIVISOR_SHIFT);
 						query->hitNormalX = (int16_t)normalX;
 						query->hitNormalY = (int16_t)normalY;
 						query->hitNormalZ = (int16_t)normalZ;
-						query->hitPrimitiveValue = (uint16_t)(SlipBytes_ReadLE16(primitive + 0x0au) & 0x7fffu);
+						query->hitPrimitiveValue =
+						    (uint16_t)(SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET) &
+						               SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
 						query->hitPoint = (SlipView3DVec32){
-						    (int32_t)((uint32_t)candidate.x + SlipBytes_ReadLE32(trackRecord + 0x12u)),
-						    (int32_t)((uint32_t)candidate.y + SlipBytes_ReadLE32(trackRecord + 0x16u)),
-						    (int32_t)((uint32_t)candidate.z + SlipBytes_ReadLE32(trackRecord + 0x1au))};
+						    (int32_t)((uint32_t)candidate.x +
+						              SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+						    (int32_t)((uint32_t)candidate.y +
+						              SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+						    (int32_t)((uint32_t)candidate.z +
+						              SlipBytes_ReadLE32(trackRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET))};
 						return;
 					}
 				}
@@ -4402,10 +4521,11 @@ void SlipTrackWorld_CheckTrackRecordPrimitives(const uint8_t *trackRecord, const
 
 		} while (false);
 		descriptor = SlipBytes_ReadLE16(primitive);
-		if ((descriptor & 0x8000u) == 0) {
-			primitive += 0x0cu + (size_t)descriptor * 2u;
+		if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) == 0) {
+			primitive += SLIP_TRC_PRIMITIVE_HEADER_BYTES + (size_t)descriptor * 2u;
 		} else {
-			primitive += 0x0cu + (size_t)(descriptor & 0x7fffu) * 6u;
+			primitive += SLIP_TRC_PRIMITIVE_HEADER_BYTES +
+			             (size_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES;
 		}
 		--primitiveCount;
 	} while (primitiveCount != 0);
@@ -4427,11 +4547,14 @@ void SlipTrackWorld_CheckSlotSamples(uint8_t *inputSlot, const SlipObject *objec
 	SlipView3D_DotProductQ14((uint16_t)slot->cachedObjectMatrix.m[6], (uint16_t)slot->cachedObjectMatrix.m[7],
 	                         (uint16_t)slot->cachedObjectMatrix.m[8], (uint16_t)query->directionX,
 	                         (uint16_t)query->directionY, (uint16_t)query->directionZ, &dot);
-	sampleCount = (int16_t)(uint16_t)dot.dotProductQ14 > (int16_t)0x3ff0 ? 4u : 8u;
+	sampleCount = (int16_t)(uint16_t)dot.dotProductQ14 > (int16_t)SLIP_TRACK_COLLISION_ALIGNED_FACING_Q14
+	                  ? SLIP_TRACK_COLLISION_ALIGNED_SAMPLE_COUNT
+	                  : SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	for (sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
 		uint32_t trackRecordAddress;
 		const uint8_t *trackRecord;
-		const int32_t *const sample = &slot->boundsAndCorners[6u + sampleIndex * 3u];
+		const int32_t *const sample = &slot->boundsAndCorners[SLIP_TRACK_BOUND_COORDINATE_COUNT +
+		                                                      sampleIndex * SLIP_TRACK_CORNER_COORDINATE_COUNT];
 		SlipView3DVec32 queryPoint;
 
 		if (query->bestDistance == 0) {
@@ -4449,8 +4572,9 @@ void SlipTrackWorld_CheckSlotSamples(uint8_t *inputSlot, const SlipObject *objec
 		}
 
 		{
-			const uint16_t firstExitPlaneOffset = SlipBytes_ReadLE16(trackRecord + 0x06u);
-			const uint16_t firstExitRecordOffset = SlipBytes_ReadLE16(trackRecord + 0x04u);
+			const uint16_t firstExitPlaneOffset =
+			    SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_FIRST_EXIT_PLANE_OFFSET);
+			const uint16_t firstExitRecordOffset = SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
 
 			if (firstExitPlaneOffset != 0) {
 				SlipTrackWorldTrackSlotPlaneDistance distance;
@@ -4469,8 +4593,10 @@ void SlipTrackWorld_CheckSlotSamples(uint8_t *inputSlot, const SlipObject *objec
 		}
 
 		{
-			const uint16_t secondExitPlaneOffset = SlipBytes_ReadLE16(trackRecord + 0x0au);
-			const uint16_t secondExitRecordOffset = SlipBytes_ReadLE16(trackRecord + 0x08u);
+			const uint16_t secondExitPlaneOffset =
+			    SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_SECOND_EXIT_PLANE_OFFSET);
+			const uint16_t secondExitRecordOffset =
+			    SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET);
 
 			if (secondExitPlaneOffset != 0) {
 				SlipTrackWorldTrackSlotPlaneDistance distance;
@@ -4489,8 +4615,9 @@ void SlipTrackWorld_CheckSlotSamples(uint8_t *inputSlot, const SlipObject *objec
 		}
 
 		{
-			const uint16_t thirdExitPlaneOffset = SlipBytes_ReadLE16(trackRecord + 0x0eu);
-			const uint16_t thirdExitRecordOffset = SlipBytes_ReadLE16(trackRecord + 0x0cu);
+			const uint16_t thirdExitPlaneOffset =
+			    SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_THIRD_EXIT_PLANE_OFFSET);
+			const uint16_t thirdExitRecordOffset = SlipBytes_ReadLE16(trackRecord + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET);
 
 			if (thirdExitPlaneOffset != 0) {
 				SlipTrackWorldTrackSlotPlaneDistance distance;
@@ -4529,7 +4656,7 @@ void SlipTrackWorld_PreCollisionStep(uint16_t frameStep, uint8_t *slotListBase, 
 		}
 		currentSlot = slotListBase + (slotAddress - slotListBaseAddress);
 		slot = (SlipTrackSlotRecord *)(void *)currentSlot;
-		if ((slot->flags & 1u) == 0) {
+		if ((slot->flags & SLIP_TRACK_SLOT_BOX_COLLISION) == 0) {
 			continue;
 		}
 		objectOffset = (uint16_t)slot->ownerObjectOffset;
@@ -4539,8 +4666,8 @@ void SlipTrackWorld_PreCollisionStep(uint16_t frameStep, uint8_t *slotListBase, 
 		}
 		memset(&query, 0, sizeof(query));
 		query.hitFractionDivisor = (uint32_t)objectSpeed;
-		query.bestDistance =
-		    (int32_t)(uint32_t)(((uint64_t)(uint32_t)frameStep * (uint64_t)(uint32_t)objectSpeed) >> 14);
+		query.bestDistance = (int32_t)(uint32_t)(((uint64_t)(uint32_t)frameStep * (uint64_t)(uint32_t)objectSpeed) >>
+		                                         SLIP_Q14_FRACTION_BITS);
 		query.hitFraction = -1;
 		SlipObject_Position(objectTable, objectTableBytes, objectOffset, &objectPosition);
 		slot->projectedPosition.x = (int32_t)objectPosition.positionX;
@@ -4550,7 +4677,7 @@ void SlipTrackWorld_PreCollisionStep(uint16_t frameStep, uint8_t *slotListBase, 
 		query.directionX = direction.directionXQ14;
 		query.directionY = direction.directionYQ14;
 		query.directionZ = direction.directionZQ14;
-		if ((SlipRaceCollision_BodyFlags(objectOffset) & 1u) == 0) {
+		if ((SlipRaceCollision_BodyFlags(objectOffset) & SLIP_COLLISION_BODY_TRACK_ENABLED) == 0) {
 			continue;
 		}
 		SlipTrackWorld_CheckSlotSamples(currentSlot, objectTable, objectTableBytes, trdBase, trackDataSize,
@@ -4573,14 +4700,17 @@ void SlipTrackWorld_PreCollisionStep(uint16_t frameStep, uint8_t *slotListBase, 
 			if (carry) {
 				SlipView3DVec32 positionStep;
 				int32_t fractionStep;
-				uint32_t remaining = 0x0fu;
+				uint32_t remaining = SLIP_TRACK_COLLISION_BACKOFF_STEPS;
 
 				SlipObject_Position(objectTable, objectTableBytes, objectOffset, &objectPosition);
 				positionStep =
-				    (SlipView3DVec32){((int32_t)(objectPosition.positionX - (uint32_t)slot->projectedPosition.x)) >> 4,
-				                      ((int32_t)(objectPosition.positionY - (uint32_t)slot->projectedPosition.y)) >> 4,
-				                      ((int32_t)(objectPosition.positionZ - (uint32_t)slot->projectedPosition.z)) >> 4};
-				fractionStep = query.hitFraction >> 4;
+				    (SlipView3DVec32){((int32_t)(objectPosition.positionX - (uint32_t)slot->projectedPosition.x)) >>
+				                          SLIP_TRACK_COLLISION_BACKOFF_SHIFT,
+				                      ((int32_t)(objectPosition.positionY - (uint32_t)slot->projectedPosition.y)) >>
+				                          SLIP_TRACK_COLLISION_BACKOFF_SHIFT,
+				                      ((int32_t)(objectPosition.positionZ - (uint32_t)slot->projectedPosition.z)) >>
+				                          SLIP_TRACK_COLLISION_BACKOFF_SHIFT};
+				fractionStep = query.hitFraction >> SLIP_TRACK_COLLISION_BACKOFF_SHIFT;
 				do {
 					query.hitFraction = (int32_t)((uint32_t)query.hitFraction - (uint32_t)fractionStep);
 					SlipObject_Position(objectTable, objectTableBytes, objectOffset, &objectPosition);
@@ -4628,7 +4758,7 @@ SlipView3DVec32 SlipTrackWorld_BisectRecordBoundary(const uint8_t *trdBase, size
 	if (firstRecordAddress == 0) {
 		return second;
 	}
-	remaining = 0x0cu;
+	remaining = SLIP_TRACK_RECORD_BOUNDARY_BISECTION_STEPS;
 	do {
 		SlipView3DVec32 midpoint = {(int32_t)(((uint32_t)first.x + (uint32_t)second.x) >> 1),
 		                            (int32_t)(((uint32_t)first.y + (uint32_t)second.y) >> 1),
@@ -4650,8 +4780,6 @@ bool SlipTrackWorld_ClipRefuelBeam(const uint8_t *trackData, size_t trackDataSiz
                                    const uint8_t *components, size_t componentBytes, const uint8_t *searchTable,
                                    size_t searchTableBytes, SlipView3DVec32 start, SlipView3DVec32 end,
                                    SlipView3DVec32 *clippedEnd) {
-
-	enum { SLIP_REFUEL_FACE_SKIP_INTERSECTION = 0x40u };
 
 	SlipTrackWorldRecordSearch search;
 	SlipView3DNormalizeVector3D direction;
@@ -4675,18 +4803,18 @@ bool SlipTrackWorld_ClipRefuelBeam(const uint8_t *trackData, size_t trackDataSiz
 	SlipView3D_NormalizeVector3D((uint32_t)end.x - (uint32_t)start.x, (uint32_t)end.y - (uint32_t)start.y,
 	                             (uint32_t)end.z - (uint32_t)start.z, &direction);
 	section = trackData + (startSection - trackDataAddress);
-	origin =
-	    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(section + 0x12u), (int32_t)SlipBytes_ReadLE32(section + 0x16u),
-	                      (int32_t)SlipBytes_ReadLE32(section + 0x1au)};
+	origin = (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(section + SLIP_TRD_SECTION_ORIGIN_X_OFFSET),
+	                           (int32_t)SlipBytes_ReadLE32(section + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET),
+	                           (int32_t)SlipBytes_ReadLE32(section + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)};
 	relativeStart = (SlipView3DVec32){(int32_t)((uint32_t)start.x - (uint32_t)origin.x),
 	                                  (int32_t)((uint32_t)start.y - (uint32_t)origin.y),
 	                                  (int32_t)((uint32_t)start.z - (uint32_t)origin.z)};
-	componentList = components + SlipBytes_ReadLE16(section + 2u);
-	if (SlipBytes_ReadLE16(componentList + 4u) == 0)
+	componentList = components + SlipBytes_ReadLE16(section + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if (SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET) == 0)
 		return false;
-	primitive = components + SlipBytes_ReadLE16(componentList + 4u);
+	primitive = components + SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 	remaining = SlipBytes_ReadLE16(primitive);
-	primitive += 2;
+	primitive += SLIP_TRC_TABLE_COUNT_BYTES;
 	do {
 		uint16_t descriptor;
 		do {
@@ -4709,35 +4837,39 @@ bool SlipTrackWorld_ClipRefuelBeam(const uint8_t *trackData, size_t trackDataSiz
 			if ((int16_t)facing.dotProductQ14 >= 0)
 				break;
 			incidence = (int16_t)(uint16_t)(0u - (uint16_t)facing.dotProductQ14);
-			if (incidence < 0x10)
+			if (incidence < SLIP_TRACK_RAY_MINIMUM_FACING_Q14)
 				break;
 			SlipTrackWorld_PointLookup(
 			    componentList, components, componentBytes, SlipBytes_ReadLE16(primitive + SLIP_PRIMITIVE_HEADER_BYTES),
-			    (facing.dotProductQ14 & 0xffff0000u) | (uint16_t)incidence, facing.xySumHigh, facing.inputZ, &point);
+			    (facing.dotProductQ14 & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | (uint16_t)incidence, facing.xySumHigh,
+			    facing.inputZ, &point);
 			distance = SlipTrackWorld_DotProduct32x16Shift14(
 			    (uint32_t)relativeStart.x - point.pointXOrInput, (uint32_t)relativeStart.y - point.pointYOrInput,
 			    (uint32_t)relativeStart.z - point.pointZOrCountMergedWithInput, normalX, normalY, normalZ);
 			if (distance < 0)
 				break;
-			dividend = (uint64_t)(uint32_t)distance << 30;
-			divisor = (uint32_t)(uint16_t)incidence << 16;
+			dividend = (uint64_t)(uint32_t)distance << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT;
+			divisor = (uint32_t)(uint16_t)incidence << SLIP_TRACK_COLLISION_DIVISOR_SHIFT;
 			if ((uint32_t)(dividend >> 32) > divisor)
 				break;
 			planeTime = (uint32_t)(dividend / divisor);
 			if ((int32_t)planeTime < 0)
 				break;
-			candidate = (SlipView3DVec32){
-			    (int32_t)((uint32_t)relativeStart.x +
-			              (uint32_t)(((int64_t)(int16_t)direction.unitXQ14 * (int32_t)planeTime) >> 14)),
-			    (int32_t)((uint32_t)relativeStart.y +
-			              (uint32_t)(((int64_t)(int16_t)direction.unitYQ14 * (int32_t)planeTime) >> 14)),
-			    (int32_t)((uint32_t)relativeStart.z +
-			              (uint32_t)(((int64_t)(int16_t)direction.unitZQ14 * (int32_t)planeTime) >> 14))};
+			candidate =
+			    (SlipView3DVec32){(int32_t)((uint32_t)relativeStart.x +
+			                                (uint32_t)(((int64_t)(int16_t)direction.unitXQ14 * (int32_t)planeTime) >>
+			                                           SLIP_Q14_FRACTION_BITS)),
+			                      (int32_t)((uint32_t)relativeStart.y +
+			                                (uint32_t)(((int64_t)(int16_t)direction.unitYQ14 * (int32_t)planeTime) >>
+			                                           SLIP_Q14_FRACTION_BITS)),
+			                      (int32_t)((uint32_t)relativeStart.z +
+			                                (uint32_t)(((int64_t)(int16_t)direction.unitZQ14 * (int32_t)planeTime) >>
+			                                           SLIP_Q14_FRACTION_BITS))};
 			SlipTrackWorld_SideTest(componentList, components, componentBytes, primitive,
 			                        componentBytes - (size_t)(primitive - components), candidate, 0, 0, &side);
 			if (side.outside)
 				break;
-			normalOffset = SlipView3D_ScaleVector(normalX, normalY, normalZ, 0x3d0);
+			normalOffset = SlipView3D_ScaleVector(normalX, normalY, normalZ, SLIP_TRACK_REFUEL_PLANE_OFFSET);
 			*clippedEnd =
 			    (SlipView3DVec32){(int32_t)((uint32_t)candidate.x + (uint32_t)normalOffset.x + (uint32_t)origin.x),
 			                      (int32_t)((uint32_t)candidate.y + (uint32_t)normalOffset.y + (uint32_t)origin.y),
@@ -4771,7 +4903,7 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 	const SlipView3DVec32 second = segmentEnd;
 
 	memset(result, 0, sizeof(*result));
-	result->hitPrimitive = 0xffffu;
+	result->hitPrimitive = UINT16_MAX;
 	result->returned = true;
 	SlipTrackWorld_RecordSearch(trdBase, trackDataSize, componentBase, componentBaseBytes, table, tableBytes,
 	                            trdBaseAddress, 0, first.x, first.y, first.z, &recordSearch);
@@ -4792,29 +4924,31 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 
 	for (;;) {
 		const uint8_t *const currentRecord = trdBase + (currentRecordAddress - trdBaseAddress);
-		SlipView3DVec32 relativeStart = {(int32_t)((uint32_t)first.x - SlipBytes_ReadLE32(currentRecord + 0x12u)),
-		                                 (int32_t)((uint32_t)first.y - SlipBytes_ReadLE32(currentRecord + 0x16u)),
-		                                 (int32_t)((uint32_t)first.z - SlipBytes_ReadLE32(currentRecord + 0x1au))};
-		const uint8_t *const componentList = componentBase + SlipBytes_ReadLE16(currentRecord + 0x02u);
+		SlipView3DVec32 relativeStart = {
+		    (int32_t)((uint32_t)first.x - SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+		    (int32_t)((uint32_t)first.y - SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+		    (int32_t)((uint32_t)first.z - SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET))};
+		const uint8_t *const componentList =
+		    componentBase + SlipBytes_ReadLE16(currentRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 		const uint8_t *primitive;
 		uint32_t primitiveCount;
 		bool restartRecord = false;
 
-		if (SlipBytes_ReadLE16(componentList + 0x04u) == 0) {
+		if (SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET) == 0) {
 			result->outputPosition = second;
 			return;
 		}
-		primitive = componentBase + SlipBytes_ReadLE16(componentList + 0x04u);
+		primitive = componentBase + SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 		primitiveCount = SlipBytes_ReadLE16(primitive);
-		primitive += 0x02u;
+		primitive += SLIP_TRC_TABLE_COUNT_BYTES;
 		do {
 			uint16_t descriptor;
 
 			do {
-				if ((primitive[0x08u] & 0x40u) == 0) {
-					const uint16_t normalX = SlipBytes_ReadLE16(primitive + 0x02u);
-					const uint16_t normalY = SlipBytes_ReadLE16(primitive + 0x04u);
-					const uint16_t normalZ = SlipBytes_ReadLE16(primitive + 0x06u);
+				if ((primitive[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_TRENCH) == 0) {
+					const uint16_t normalX = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+					const uint16_t normalY = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+					const uint16_t normalZ = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 					SlipView3DDotProductQ14 facing;
 					int16_t currentFacing;
 
@@ -4824,20 +4958,21 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 					if (currentFacing < 0) {
 						const int16_t radius = (int16_t)(uint16_t)(0u - (uint16_t)currentFacing);
 
-						if (radius >= 0x10) {
+						if (radius >= SLIP_TRACK_RAY_MINIMUM_FACING_Q14) {
 							SlipTrackWorldPointLookup point;
 							SlipView3DVec32 planeDelta;
 							int32_t planeDistance;
 							uint64_t dividend;
-							const uint32_t divisor = (uint32_t)(uint16_t)radius << 16;
+							const uint32_t divisor = (uint32_t)(uint16_t)radius << SLIP_TRACK_COLLISION_DIVISOR_SHIFT;
 							uint32_t planeTime;
 							SlipView3DVec32 candidate;
 							SlipTrackWorldSideTest sideTest;
 
 							memset(&point, 0, sizeof(point));
-							SlipTrackWorld_PointLookup(componentList, componentBase, componentBaseBytes,
-							                           SlipBytes_ReadLE16(primitive + 0x0cu), facing.dotProductQ14,
-							                           facing.xySumHigh, facing.inputZ, &point);
+							SlipTrackWorld_PointLookup(
+							    componentList, componentBase, componentBaseBytes,
+							    SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
+							    facing.dotProductQ14, facing.xySumHigh, facing.inputZ, &point);
 							planeDelta = (SlipView3DVec32){
 							    (int32_t)((uint32_t)relativeStart.x - point.pointXOrInput),
 							    (int32_t)((uint32_t)relativeStart.y - point.pointYOrInput),
@@ -4848,7 +4983,7 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 							if (planeDistance < 0) {
 								break;
 							}
-							dividend = (uint64_t)(uint32_t)planeDistance << 30;
+							dividend = (uint64_t)(uint32_t)planeDistance << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT;
 							if ((uint32_t)(dividend >> 32) > divisor) {
 								break;
 							}
@@ -4860,15 +4995,15 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 							    (SlipView3DVec32){(int32_t)((uint32_t)relativeStart.x +
 							                                (uint32_t)((uint64_t)((int64_t)(int16_t)direction.unitXQ14 *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14)),
+							                                           SLIP_Q14_FRACTION_BITS)),
 							                      (int32_t)((uint32_t)relativeStart.y +
 							                                (uint32_t)((uint64_t)((int64_t)(int16_t)direction.unitYQ14 *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14)),
+							                                           SLIP_Q14_FRACTION_BITS)),
 							                      (int32_t)((uint32_t)relativeStart.z +
 							                                (uint32_t)((uint64_t)((int64_t)(int16_t)direction.unitZQ14 *
 							                                                      (int64_t)(int32_t)planeTime) >>
-							                                           14))};
+							                                           SLIP_Q14_FRACTION_BITS))};
 							memset(&sideTest, 0, sizeof(sideTest));
 							SlipTrackWorld_SideTest(componentList, componentBase, componentBaseBytes, primitive,
 							                        componentBaseBytes - (size_t)(primitive - componentBase), candidate,
@@ -4876,12 +5011,13 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 							if (sideTest.outside) {
 								break;
 							}
-							if ((primitive[0x08u] & 1u) == 0) {
+							if ((primitive[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_RANGE_PLANE) == 0) {
 								SlipView3DVec32 normalScale = SlipView3D_ScaleVector(
 								    (uint32_t)(int32_t)(int16_t)normalX, (uint32_t)(int32_t)(int16_t)normalY,
-								    (uint32_t)(int32_t)(int16_t)normalZ, 0x3d0);
+								    (uint32_t)(int32_t)(int16_t)normalZ, SLIP_TRACK_REFUEL_PLANE_OFFSET);
 
-								result->hitPrimitive = SlipBytes_ReadLE16(primitive + 0x0au);
+								result->hitPrimitive =
+								    SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET);
 								result->hitNormalX = (int16_t)normalX;
 								result->hitNormalY = (int16_t)normalY;
 								result->hitNormalZ = (int16_t)normalZ;
@@ -4889,22 +5025,40 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 								candidate.y = (int32_t)((uint32_t)candidate.y + (uint32_t)normalScale.y);
 								candidate.z = (int32_t)((uint32_t)candidate.z + (uint32_t)normalScale.z);
 								result->outputPosition = (SlipView3DVec32){
-								    (int32_t)((uint32_t)candidate.x + SlipBytes_ReadLE32(currentRecord + 0x12u)),
-								    (int32_t)((uint32_t)candidate.y + SlipBytes_ReadLE32(currentRecord + 0x16u)),
-								    (int32_t)((uint32_t)candidate.z + SlipBytes_ReadLE32(currentRecord + 0x1au))};
+								    (int32_t)((uint32_t)candidate.x +
+								              SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+								    (int32_t)((uint32_t)candidate.y +
+								              SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+								    (int32_t)((uint32_t)candidate.z +
+								              SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET))};
 								result->transitionBlocked = true;
 								return;
 							}
 							first = (SlipView3DVec32){
-							    (int32_t)((uint32_t)candidate.x + SlipBytes_ReadLE32(currentRecord + 0x12u)),
-							    (int32_t)((uint32_t)candidate.y + SlipBytes_ReadLE32(currentRecord + 0x16u)),
-							    (int32_t)((uint32_t)candidate.z + SlipBytes_ReadLE32(currentRecord + 0x1au))};
-							if (componentBase + SlipBytes_ReadLE16(currentRecord + 0x06u) == primitive) {
-								currentRecordAddress = trdBaseAddress + SlipBytes_ReadLE16(currentRecord + 0x04u);
-							} else if (componentBase + SlipBytes_ReadLE16(currentRecord + 0x0au) == primitive) {
-								currentRecordAddress = trdBaseAddress + SlipBytes_ReadLE16(currentRecord + 0x08u);
-							} else if (componentBase + SlipBytes_ReadLE16(currentRecord + 0x0eu) == primitive) {
-								currentRecordAddress = trdBaseAddress + SlipBytes_ReadLE16(currentRecord + 0x0cu);
+							    (int32_t)((uint32_t)candidate.x +
+							              SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+							    (int32_t)((uint32_t)candidate.y +
+							              SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+							    (int32_t)((uint32_t)candidate.z +
+							              SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET))};
+							if (componentBase +
+							        SlipBytes_ReadLE16(currentRecord + SLIP_TRD_SECTION_FIRST_EXIT_PLANE_OFFSET) ==
+							    primitive) {
+								currentRecordAddress =
+								    trdBaseAddress +
+								    SlipBytes_ReadLE16(currentRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
+							} else if (componentBase + SlipBytes_ReadLE16(currentRecord +
+							                                              SLIP_TRD_SECTION_SECOND_EXIT_PLANE_OFFSET) ==
+							           primitive) {
+								currentRecordAddress =
+								    trdBaseAddress +
+								    SlipBytes_ReadLE16(currentRecord + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET);
+							} else if (componentBase + SlipBytes_ReadLE16(currentRecord +
+							                                              SLIP_TRD_SECTION_THIRD_EXIT_PLANE_OFFSET) ==
+							           primitive) {
+								currentRecordAddress =
+								    trdBaseAddress +
+								    SlipBytes_ReadLE16(currentRecord + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET);
 							} else {
 								result->outputPosition = SlipTrackWorld_BisectRecordBoundary(
 								    trdBase, trackDataSize, trdBaseAddress, componentBase, componentBaseBytes, table,
@@ -4930,17 +5084,18 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 								if ((int16_t)(uint16_t)directionDot.dotProductQ14 < 0) {
 									result->outputPosition = (SlipView3DVec32){
 
-									    (int32_t)((direction.unitXQ14 & 0xffff0000u) +
-									              (nextDirection.unitYQ14 & 0xffff0000u) +
-									              (direction.unitXQ14 & 0xffff0000u) + directionDot.productXHigh +
-									              directionDot.productYHigh +
+									    (int32_t)((direction.unitXQ14 & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) +
+									              (nextDirection.unitYQ14 & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) +
+									              (direction.unitXQ14 & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) +
+									              directionDot.productXHigh + directionDot.productYHigh +
 									              ((uint32_t)directionDot.productXLow + directionDot.productYLow >
-									               0xffffu) +
+									               UINT16_MAX) +
 									              (directionDot.productZ >> 16) +
 									              ((uint32_t)(uint16_t)directionDot.sumXY +
 									                   (uint16_t)directionDot.productZ >
-									               0xffffu)),
-									    (int32_t)((direction.unitYQ14 & 0xffff0000u) | (uint16_t)directionDot.sumXY),
+									               UINT16_MAX)),
+									    (int32_t)((direction.unitYQ14 & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) |
+									              (uint16_t)directionDot.sumXY),
 									    (int32_t)direction.unitZQ14};
 									result->transitionBlocked = true;
 									return;
@@ -4957,10 +5112,12 @@ void SlipTrackWorld_CheckSegmentTransition(const uint8_t *trdBase, size_t trackD
 				break;
 			}
 			descriptor = SlipBytes_ReadLE16(primitive);
-			if ((descriptor & 0x8000u) == 0) {
-				primitive += 0x0cu + (size_t)descriptor * 2u;
+			if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) == 0) {
+				primitive += SLIP_TRC_PRIMITIVE_HEADER_BYTES + (size_t)descriptor * 2u;
 			} else {
-				primitive += 0x0cu + (size_t)(descriptor & 0x7fffu) * 6u;
+				primitive +=
+				    SLIP_TRC_PRIMITIVE_HEADER_BYTES +
+				    (size_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES;
 			}
 			--primitiveCount;
 		} while (primitiveCount != 0);
@@ -4998,7 +5155,7 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 		SlipTrackWorld_UpdateSlotRecord(startSlot, objectTable, objectTableBytes, trdBase, trackDataSize,
 		                                trdBaseAddress, componentBase, componentBaseBytes, componentBaseAddress, table,
 		                                tableBytes);
-		firstRecordAddress = SlipBytes_ReadLE32(startSlot + 0xd0u);
+		firstRecordAddress = SlipBytes_ReadLE32(startSlot + offsetof(SlipTrackSlotRecord, currentTrackRecordAddress));
 	}
 	if (firstRecordAddress == 0) {
 		return true;
@@ -5015,7 +5172,7 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 
 		SlipTrackWorld_UpdateSlotRecord(endSlot, objectTable, objectTableBytes, trdBase, trackDataSize, trdBaseAddress,
 		                                componentBase, componentBaseBytes, componentBaseAddress, table, tableBytes);
-		secondRecordAddress = SlipBytes_ReadLE32(endSlot + 0xd0u);
+		secondRecordAddress = SlipBytes_ReadLE32(endSlot + offsetof(SlipTrackSlotRecord, currentTrackRecordAddress));
 	}
 	if (secondRecordAddress == 0) {
 		return true;
@@ -5030,25 +5187,27 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 
 	for (;;) {
 		const uint8_t *const record = trdBase + (firstRecordAddress - trdBaseAddress);
-		SlipView3DVec32 relative = {(int32_t)(firstPosition.positionX - SlipBytes_ReadLE32(record + 0x12u)),
-		                            (int32_t)(firstPosition.positionY - SlipBytes_ReadLE32(record + 0x16u)),
-		                            (int32_t)(firstPosition.positionZ - SlipBytes_ReadLE32(record + 0x1au))};
-		const uint8_t *const componentList = componentBase + SlipBytes_ReadLE16(record + 0x02u);
+		SlipView3DVec32 relative = {
+		    (int32_t)(firstPosition.positionX - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+		    (int32_t)(firstPosition.positionY - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+		    (int32_t)(firstPosition.positionZ - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET))};
+		const uint8_t *const componentList =
+		    componentBase + SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 		const uint8_t *primitive;
 		uint32_t remaining;
 		bool restartRecord = false;
 
-		if (SlipBytes_ReadLE16(componentList + 0x04u) == 0) {
+		if (SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET) == 0) {
 			return false;
 		}
-		primitive = componentBase + SlipBytes_ReadLE16(componentList + 0x04u);
+		primitive = componentBase + SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 		remaining = SlipBytes_ReadLE16(primitive);
-		primitive += 0x02u;
+		primitive += SLIP_TRC_TABLE_COUNT_BYTES;
 		do {
-			if ((primitive[0x08u] & 1u) != 0) {
-				const uint16_t normalX = SlipBytes_ReadLE16(primitive + 0x02u);
-				const uint16_t normalY = SlipBytes_ReadLE16(primitive + 0x04u);
-				const uint16_t normalZ = SlipBytes_ReadLE16(primitive + 0x06u);
+			if ((primitive[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_RANGE_PLANE) != 0) {
+				const uint16_t normalX = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+				const uint16_t normalY = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+				const uint16_t normalZ = SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 				SlipView3DDotProductQ14 facing;
 				int16_t currentFacing;
 
@@ -5058,7 +5217,7 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 				if (currentFacing < 0) {
 					const uint16_t facingMagnitude = (uint16_t)(0u - (uint16_t)currentFacing);
 
-					if ((int16_t)facingMagnitude >= 0x10) {
+					if ((int16_t)facingMagnitude >= SLIP_TRACK_RAY_MINIMUM_FACING_Q14) {
 						SlipTrackWorldPointLookup point;
 						uint64_t productX;
 						uint64_t productY;
@@ -5074,9 +5233,10 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 						SlipView3DVec32 candidate;
 						SlipTrackWorldSideTest sideTest;
 
-						SlipTrackWorld_PointLookup(componentList, componentBase, componentBaseBytes,
-						                           SlipBytes_ReadLE16(primitive + 0x0cu), relative.x, relative.y,
-						                           relative.z, &point);
+						SlipTrackWorld_PointLookup(
+						    componentList, componentBase, componentBaseBytes,
+						    SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET), relative.x,
+						    relative.y, relative.z, &point);
 						productX = (uint64_t)((int64_t)(int32_t)((uint32_t)relative.x - point.pointXOrInput) *
 						                      (int64_t)(int32_t)(int16_t)normalX);
 						productY = (uint64_t)((int64_t)(int32_t)((uint32_t)relative.y - point.pointYOrInput) *
@@ -5089,16 +5249,17 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 						addend = (uint32_t)productY;
 						carry = low + addend < low;
 						low += addend;
-						high = (high & 0xffff0000u) | (uint16_t)((uint16_t)high + (uint16_t)(productY >> 32) + carry);
+						high = (high & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) |
+						       (uint16_t)((uint16_t)high + (uint16_t)(productY >> 32) + carry);
 						addend = (uint32_t)productZ;
 						carry = addend + low < addend;
 						low += addend;
-						high = ((uint32_t)(productZ >> 32) & 0xffff0000u) |
+						high = ((uint32_t)(productZ >> 32) & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) |
 						       (uint16_t)((uint16_t)(productZ >> 32) + (uint16_t)high + carry);
-						planeDistance = (low >> 14) | (high << 18);
+						planeDistance = (low >> SLIP_Q14_FRACTION_BITS) | (high << SLIP_Q14_DWORD_HIGH_SHIFT);
 						if ((int32_t)planeDistance >= 0) {
-							dividend = (uint64_t)planeDistance << 30;
-							divisor = (uint32_t)facingMagnitude << 16;
+							dividend = (uint64_t)planeDistance << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT;
+							divisor = (uint32_t)facingMagnitude << SLIP_TRACK_COLLISION_DIVISOR_SHIFT;
 							if ((uint32_t)(dividend >> 32) <= divisor) {
 								fraction = (uint32_t)(dividend / divisor);
 								if ((int32_t)fraction >= 0) {
@@ -5106,15 +5267,15 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 									    (int32_t)((uint32_t)relative.x +
 									              (uint32_t)SlipTrackWorld_MultiplySignedShift(
 									                  (uint32_t)(int32_t)(int16_t)(uint16_t)direction.unitXQ14,
-									                  fraction, 14)),
+									                  fraction, SLIP_Q14_FRACTION_BITS)),
 									    (int32_t)((uint32_t)relative.y +
 									              (uint32_t)SlipTrackWorld_MultiplySignedShift(
 									                  (uint32_t)(int32_t)(int16_t)(uint16_t)direction.unitYQ14,
-									                  fraction, 14)),
+									                  fraction, SLIP_Q14_FRACTION_BITS)),
 									    (int32_t)((uint32_t)relative.z +
 									              (uint32_t)SlipTrackWorld_MultiplySignedShift(
 									                  (uint32_t)(int32_t)(int16_t)(uint16_t)direction.unitZQ14,
-									                  fraction, 14))};
+									                  fraction, SLIP_Q14_FRACTION_BITS))};
 									SlipTrackWorld_SideTest(componentList, componentBase, componentBaseBytes, primitive,
 									                        componentBaseBytes - (size_t)(primitive - componentBase),
 									                        candidate, 0, 0, &sideTest);
@@ -5124,17 +5285,34 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 										uint32_t linkedRecordAddress;
 
 										firstPosition.positionX =
-										    SlipBytes_ReadLE32(record + 0x12u) + (uint32_t)candidate.x;
+										    SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_X_OFFSET) +
+										    (uint32_t)candidate.x;
 										firstPosition.positionY =
-										    SlipBytes_ReadLE32(record + 0x16u) + (uint32_t)candidate.y;
+										    SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET) +
+										    (uint32_t)candidate.y;
 										firstPosition.positionZ =
-										    SlipBytes_ReadLE32(record + 0x1au) + (uint32_t)candidate.z;
-										if (componentBase + SlipBytes_ReadLE16(record + 0x06u) == primitive) {
-											linkedRecordAddress = trdBaseAddress + SlipBytes_ReadLE16(record + 0x04u);
-										} else if (componentBase + SlipBytes_ReadLE16(record + 0x0au) == primitive) {
-											linkedRecordAddress = trdBaseAddress + SlipBytes_ReadLE16(record + 0x08u);
-										} else if (componentBase + SlipBytes_ReadLE16(record + 0x0eu) == primitive) {
-											linkedRecordAddress = trdBaseAddress + SlipBytes_ReadLE16(record + 0x0cu);
+										    SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET) +
+										    (uint32_t)candidate.z;
+										if (componentBase +
+										        SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_FIRST_EXIT_PLANE_OFFSET) ==
+										    primitive) {
+											linkedRecordAddress =
+											    trdBaseAddress +
+											    SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
+										} else if (componentBase +
+										               SlipBytes_ReadLE16(record +
+										                                  SLIP_TRD_SECTION_SECOND_EXIT_PLANE_OFFSET) ==
+										           primitive) {
+											linkedRecordAddress =
+											    trdBaseAddress +
+											    SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET);
+										} else if (componentBase +
+										               SlipBytes_ReadLE16(record +
+										                                  SLIP_TRD_SECTION_THIRD_EXIT_PLANE_OFFSET) ==
+										           primitive) {
+											linkedRecordAddress =
+											    trdBaseAddress +
+											    SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET);
 										} else {
 											return true;
 										}
@@ -5166,10 +5344,12 @@ bool SlipTrackWorld_CheckLineOfSight(uint16_t firstObject, uint16_t secondObject
 			{
 				const uint32_t descriptor = SlipBytes_ReadLE16(primitive);
 
-				if ((descriptor & 0x8000u) == 0) {
-					primitive += 0x0cu + (size_t)descriptor * 2u;
+				if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) == 0) {
+					primitive += SLIP_TRC_PRIMITIVE_HEADER_BYTES + (size_t)descriptor * 2u;
 				} else {
-					primitive += 0x0cu + (size_t)(descriptor & 0x7fffu) * 6u;
+					primitive +=
+					    SLIP_TRC_PRIMITIVE_HEADER_BYTES +
+					    (size_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES;
 				}
 			}
 			--remaining;
@@ -5207,7 +5387,7 @@ void SlipTrackWorld_PostCollisionStep(uint8_t *slotListBase, uint32_t slotListBa
 		}
 		currentSlot = slotListBase + (slotAddress - slotListBaseAddress);
 		slot = (SlipTrackSlotRecord *)(void *)currentSlot;
-		if ((slot->flags & 1u) == 0) {
+		if ((slot->flags & SLIP_TRACK_SLOT_BOX_COLLISION) == 0) {
 			continue;
 		}
 		objectOffset = (uint16_t)slot->ownerObjectOffset;
@@ -5224,10 +5404,11 @@ void SlipTrackWorld_PostCollisionStep(uint8_t *slotListBase, uint32_t slotListBa
 		upper = (SlipView3DVec32){(int32_t)objectPosition.positionX, (int32_t)objectPosition.positionY,
 		                          (int32_t)objectPosition.positionZ};
 		lower = slot->projectedPosition;
-		for (cornerIndex = 0; cornerIndex < 8u; ++cornerIndex) {
+		for (cornerIndex = 0; cornerIndex < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++cornerIndex) {
 			if (slot->cornerTrackRecords[cornerIndex] == 0) {
 				SlipTrackWorldSegmentCollision segment;
-				const int32_t *const corner = &slot->boundsAndCorners[6u + cornerIndex * 3u];
+				const int32_t *const corner = &slot->boundsAndCorners[SLIP_TRACK_BOUND_COORDINATE_COUNT +
+				                                                      cornerIndex * SLIP_TRACK_CORNER_COORDINATE_COUNT];
 
 				SlipTrackWorld_CheckSegmentTransition(trdBase, trackDataSize, trdBaseAddress, componentBase,
 				                                      componentBaseBytes, table, tableBytes, lower,
@@ -5239,12 +5420,12 @@ void SlipTrackWorld_PostCollisionStep(uint8_t *slotListBase, uint32_t slotListBa
 				break;
 			}
 		}
-		if (cornerIndex == 8u) {
+		if (cornerIndex == SLIP_TRACK_BOUNDING_CORNER_COUNT) {
 			lower = slot->projectedPosition;
 			SlipObject_SetPosition(objectTable, objectTableBytes, objectOffset, (uint32_t)lower.x, (uint32_t)lower.y,
 			                       (uint32_t)lower.z, &setPosition);
 		} else {
-			uint32_t remaining = 0x10u;
+			uint32_t remaining = SLIP_TRACK_COLLISION_BISECTION_STEPS;
 
 			do {
 				midpoint = (SlipView3DVec32){((int32_t)((uint32_t)lower.x + (uint32_t)upper.x)) >> 1,
@@ -5274,7 +5455,7 @@ void SlipTrackWorld_PostCollisionStep(uint8_t *slotListBase, uint32_t slotListBa
 				                       (uint32_t)lower.y, (uint32_t)lower.z, &setPosition);
 			}
 		}
-		if (SlipTrackWorld_hitPrimitive != 0xffffu) {
+		if (SlipTrackWorld_hitPrimitive != UINT16_MAX) {
 			SlipRaceCollision_RecordTrackContact(objectOffset, 1, (uint16_t)SlipTrackWorld_hitNormalX,
 			                                     (uint16_t)SlipTrackWorld_hitNormalY,
 			                                     (uint16_t)SlipTrackWorld_hitNormalZ, SlipTrackWorld_hitPrimitive,
@@ -5296,14 +5477,15 @@ bool SlipTrackWorld_SideTest(const uint8_t *componentList, const uint8_t *compon
 	uint16_t remaining;
 	uint16_t visitIndex = 0;
 
-	if (componentList == 0 || plane == 0 || result == 0 || planeBytesRemaining < 0x0eu) {
+	if (componentList == 0 || plane == 0 || result == 0 || planeBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 		return false;
 	}
-	normalX = SlipBytes_ReadLE16(plane + 0x02u);
-	normalY = SlipBytes_ReadLE16(plane + 0x04u);
-	normalZ = SlipBytes_ReadLE16(plane + 0x06u);
-	vertexCount = (uint16_t)(SlipBytes_ReadLE16(plane) & 0x7fffu);
-	if (vertexCount == 0 || planeBytesRemaining < 0x0cu + (size_t)vertexCount * 2u) {
+	normalX = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+	normalY = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+	normalZ = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
+	vertexCount = (uint16_t)(SlipBytes_ReadLE16(plane) & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
+	if (vertexCount == 0 ||
+	    planeBytesRemaining < SLIP_TRC_PRIMITIVE_HEADER_BYTES + (size_t)vertexCount * SLIP_TRC_VERTEX_INDEX_BYTES) {
 		return false;
 	}
 	*result = (SlipTrackWorldSideTest){
@@ -5312,7 +5494,7 @@ bool SlipTrackWorld_SideTest(const uint8_t *componentList, const uint8_t *compon
 	    .vertexCount = vertexCount,
 	    .outside = false,
 	    .returned = true};
-	firstIndexCursor = plane + 0x0cu;
+	firstIndexCursor = plane + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET;
 	indexCursor = firstIndexCursor;
 	remaining = vertexCount;
 	while (remaining != 0) {
@@ -5337,7 +5519,7 @@ bool SlipTrackWorld_SideTest(const uint8_t *componentList, const uint8_t *compon
 		}
 		firstPoint = (SlipView3DVec32){(int32_t)visit.firstPoint.pointXOrInput, (int32_t)visit.firstPoint.pointYOrInput,
 		                               (int32_t)visit.firstPoint.pointZOrCountMergedWithInput};
-		secondIndexCursor = remaining == 1u ? firstIndexCursor : indexCursor + 0x02u;
+		secondIndexCursor = remaining == 1u ? firstIndexCursor : indexCursor + SLIP_TRC_VERTEX_INDEX_BYTES;
 		secondIndex = SlipBytes_ReadLE16(secondIndexCursor);
 		visit.secondIndex = secondIndex;
 		if (!SlipTrackWorld_PointLookup(componentList, componentBase, componentBaseBytes, secondIndex,
@@ -5380,7 +5562,7 @@ bool SlipTrackWorld_SideTest(const uint8_t *componentList, const uint8_t *compon
 			result->outside = true;
 			return true;
 		}
-		indexCursor += 0x02u;
+		indexCursor += SLIP_TRC_VERTEX_INDEX_BYTES;
 		--remaining;
 	}
 	return true;
@@ -5434,36 +5616,38 @@ bool SlipTrackWorld_PreFrameBuild(SlipTrackBeamState *beams, const uint8_t *trac
 			}
 			uint32_t sectionOffset;
 			if (!SlipTrackWorld_DosAddressToOffset(section, trackBase, trackBytes, &sectionOffset) ||
-			    (size_t)sectionOffset + 0x1e > trackBytes)
+			    (size_t)sectionOffset + SLIP_TRD_SECTION_ORIGIN_END > trackBytes)
 				return false;
 			const uint8_t *const sectionData = trackData + sectionOffset;
-			SlipView3DVec32 origin = {(int32_t)SlipBytes_ReadLE32(sectionData + 0x12),
-			                          (int32_t)SlipBytes_ReadLE32(sectionData + 0x16),
-			                          (int32_t)SlipBytes_ReadLE32(sectionData + 0x1a)};
-			const uint16_t componentOffset = SlipBytes_ReadLE16(sectionData + 2);
-			if ((size_t)componentOffset + 6 > componentBytes)
+			SlipView3DVec32 origin = {(int32_t)SlipBytes_ReadLE32(sectionData + SLIP_TRD_SECTION_ORIGIN_X_OFFSET),
+			                          (int32_t)SlipBytes_ReadLE32(sectionData + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET),
+			                          (int32_t)SlipBytes_ReadLE32(sectionData + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)};
+			const uint16_t componentOffset = SlipBytes_ReadLE16(sectionData + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+			if ((size_t)componentOffset + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_END > componentBytes)
 				return false;
 			const uint8_t *const component = components + componentOffset;
-			uint32_t planeOffset = SlipBytes_ReadLE16(component + 4);
-			if ((size_t)planeOffset + 2 > componentBytes)
+			uint32_t planeOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
+			if ((size_t)planeOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBytes)
 				return false;
 			const uint16_t planeCount = SlipBytes_ReadLE16(components + planeOffset);
-			planeOffset += 2;
+			planeOffset += SLIP_TRC_TABLE_COUNT_BYTES;
 			bool nextSection = false;
 			for (uint16_t planeIndex = 0; planeIndex < planeCount; ++planeIndex) {
-				if ((size_t)planeOffset + 0x0e > componentBytes)
+				if ((size_t)planeOffset + SLIP_TRC_PRIMITIVE_FIRST_INDEX_END > componentBytes)
 					return false;
 				const uint8_t *const plane = components + planeOffset;
 				const uint16_t descriptor = SlipBytes_ReadLE16(plane);
-				const uint32_t nextPlane =
-				    planeOffset + 0x0c +
-				    ((descriptor & 0x8000) != 0 ? (uint32_t)(descriptor & 0x7fff) * 6 : (uint32_t)descriptor * 2);
+				const uint32_t nextPlane = planeOffset + SLIP_TRC_PRIMITIVE_HEADER_BYTES +
+				                           ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0
+				                                ? (uint32_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) *
+				                                      SLIP_TRC_TEXTURED_VERTEX_BYTES
+				                                : (uint32_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES);
 				planeOffset = nextPlane;
-				if ((plane[8] & 0x40) != 0)
+				if ((plane[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_TRENCH) != 0)
 					continue;
-				const uint16_t normalX = SlipBytes_ReadLE16(plane + 2);
-				const uint16_t normalY = SlipBytes_ReadLE16(plane + 4);
-				const uint16_t normalZ = SlipBytes_ReadLE16(plane + 6);
+				const uint16_t normalX = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+				const uint16_t normalY = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+				const uint16_t normalZ = SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 				SlipView3DDotProductQ14 facing;
 				uint32_t dot = SlipView3D_DotProductQ14(normalX, normalY, normalZ, (uint16_t)basis.m[6],
 				                                        (uint16_t)basis.m[7], (uint16_t)basis.m[8], &facing);
@@ -5471,11 +5655,12 @@ bool SlipTrackWorld_PreFrameBuild(SlipTrackBeamState *beams, const uint8_t *trac
 					continue;
 				const uint16_t denominator = (uint16_t)(0u - dot);
 
-				if ((int16_t)denominator < 0x10)
+				if ((int16_t)denominator < SLIP_TRACK_RAY_MINIMUM_FACING_Q14)
 					continue;
 				SlipTrackWorldPointLookup point;
 				SlipTrackWorldRangePlane rangePlane;
-				if (!SlipTrackWorld_PointLookup(component, components, componentBytes, SlipBytes_ReadLE16(plane + 0x0c),
+				if (!SlipTrackWorld_PointLookup(component, components, componentBytes,
+				                                SlipBytes_ReadLE16(plane + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
 				                                0u - dot, facing.xySumHigh, facing.inputZ, &point) ||
 				    !SlipTrackWorld_StoreRangePlane(point.pointXOrInput, point.pointYOrInput,
 				                                    point.pointZOrCountMergedWithInput, normalX, normalY, normalZ,
@@ -5489,15 +5674,15 @@ bool SlipTrackWorld_PreFrameBuild(SlipTrackBeamState *beams, const uint8_t *trac
 				    (uint32_t)delta.x, (uint32_t)delta.y, (uint32_t)delta.z, (uint32_t)rangePlane.normal.x,
 				    (uint32_t)rangePlane.normal.y, (uint32_t)rangePlane.normal.z);
 
-				const uint32_t high = (uint32_t)((int32_t)distance >> 2);
-				const uint32_t low = distance << 30;
-				const uint32_t divisor = (uint32_t)denominator << 16;
+				const uint32_t high = (uint32_t)((int32_t)distance >> (32 - SLIP_TRACK_COLLISION_DIVIDEND_SHIFT));
+				const uint32_t low = distance << SLIP_TRACK_COLLISION_DIVIDEND_SHIFT;
+				const uint32_t divisor = (uint32_t)denominator << SLIP_TRACK_COLLISION_DIVISOR_SHIFT;
 				if (high > divisor)
 					continue;
 				const uint64_t quotient = (((uint64_t)high << 32) | low) / divisor;
 				if (quotient > UINT32_MAX)
 					return false;
-				if (((uint32_t)quotient & 0x80000000u) != 0)
+				if (((uint32_t)quotient & SLIP_TRACK_DWORD_SIGN_BIT) != 0)
 					continue;
 				SlipView3DVec32 candidate = SlipView3D_ScaleAxesQ14((uint16_t)basis.m[6], (uint16_t)basis.m[7],
 				                                                    (uint16_t)basis.m[8], (int32_t)quotient);
@@ -5514,7 +5699,7 @@ bool SlipTrackWorld_PreFrameBuild(SlipTrackBeamState *beams, const uint8_t *trac
 					return false;
 				if (side.outside)
 					continue;
-				if ((plane[8] & 1) == 0) {
+				if ((plane[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_RANGE_PLANE) == 0) {
 					end = candidate;
 					complete = true;
 					break;
@@ -5525,9 +5710,11 @@ bool SlipTrackWorld_PreFrameBuild(SlipTrackBeamState *beams, const uint8_t *trac
 					return false;
 				record->end = intersection.output;
 				bool linked = false;
-				for (unsigned link = 0; link < 3; ++link) {
-					if (SlipBytes_ReadLE16(sectionData + 6 + link * 4) == (size_t)(plane - components)) {
-						section = trackBase + SlipBytes_ReadLE16(sectionData + 4 + link * 4);
+				for (unsigned link = 0; link < SLIP_TRD_SECTION_EXIT_COUNT; ++link) {
+					if (SlipBytes_ReadLE16(sectionData + SLIP_TRD_SECTION_FIRST_EXIT_PLANE_OFFSET +
+					                       link * SLIP_TRD_SECTION_EXIT_BYTES) == (size_t)(plane - components)) {
+						section = trackBase + SlipBytes_ReadLE16(sectionData + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET +
+						                                         link * SLIP_TRD_SECTION_EXIT_BYTES);
 						linked = true;
 						break;
 					}
@@ -5646,7 +5833,7 @@ bool SlipTrackWorld_PreFrameCameraPrefix(uint32_t globalGate, uint32_t savedFram
 	result->savedViewportBottom = savedViewportBottom;
 	result->savedViewportCenterX = savedViewportCenterX;
 	result->savedViewportCenterY = savedViewportCenterY;
-	result->materialNameAddress = 0x00034436u;
+	result->materialNameAddress = SLIP_TRACK_REFLECTION_MATERIAL_NAME_TOKEN;
 	result->callLookupMaterial = true;
 	result->callMaterialGetFrame = true;
 	result->materialFrameOffset = materialFrameOffset;
@@ -5664,10 +5851,10 @@ bool SlipTrackWorld_PreFrameCameraPrefix(uint32_t globalGate, uint32_t savedFram
 	result->viewportCenterY = (int32_t)viewportMaxY >> 1;
 	result->callSetMaterialViewport = true;
 	result->materialViewportWidth = materialViewportWidth;
-	result->viewportReadMode = 0x0010u;
+	result->viewportReadMode = SLIP_TRACK_REFLECTION_VIEWPORT_READ_MODE;
 	result->callReadMaximumDepth = true;
 	result->savedDepth = savedDepth;
-	result->reflectionMaximumDepth = 0x004a7680u;
+	result->reflectionMaximumDepth = SLIP_TRACK_REFLECTION_MAXIMUM_DEPTH;
 	result->callDraw3DSetMaximumDepth = true;
 	result->rangePlaneObjectOffset = 0;
 	result->callReadRangePlaneObjectPosition = true;
@@ -5675,7 +5862,7 @@ bool SlipTrackWorld_PreFrameCameraPrefix(uint32_t globalGate, uint32_t savedFram
 	result->rangeOriginYTo = rangeOriginY;
 	result->rangeOriginZTo = 0;
 	result->rangeNormalXTo = 0;
-	result->rangeNormalYTo = 0x4000u;
+	result->rangeNormalYTo = SLIP_Q14_ONE;
 	result->rangeNormalZTo = 0;
 	result->callTrackWorldStoreRangePlane = true;
 	if (!SlipTrackWorld_StoreRangePlane(result->rangeOriginXTo, result->rangeOriginYTo, result->rangeOriginZTo,
@@ -5695,7 +5882,7 @@ bool SlipTrackWorld_PreFrameCameraPrefix(uint32_t globalGate, uint32_t savedFram
 	                                                     (uint32_t)rangePlane.normal.y, (uint32_t)rangePlane.normal.z);
 	dotNegated = (uint32_t)(0u - dotRounded);
 	scaledDistance = dotNegated << 1;
-	scaledForward = SlipView3D_ScaleAxesQ14(0, 0x4000, 0, (int32_t)scaledDistance);
+	scaledForward = SlipView3D_ScaleAxesQ14(0, SLIP_Q14_ONE, 0, (int32_t)scaledDistance);
 	result->rangeDotRounded = dotRounded;
 	result->rangeDotNegated = dotNegated;
 	result->forwardScale = (int32_t)scaledDistance;
@@ -5709,7 +5896,7 @@ bool SlipTrackWorld_PreFrameCameraPrefix(uint32_t globalGate, uint32_t savedFram
 	result->callObjectSetPosition = true;
 	result->callReadObjectWorldMatrix = true;
 	result->matrixSaveSource = savedViewportCenterY;
-	result->matrixSaveDestination = 0x00034424u;
+	result->matrixSaveDestination = SLIP_TRACK_REFLECTION_SAVED_MATRIX_TOKEN;
 	result->callView3DCopyMatrixWords = true;
 	result->branch = SLIP_TRACK_WORLD_PRE_FRAME_CAMERA_BRANCH_ACTIVE_PREFIX;
 	return true;
@@ -5726,7 +5913,7 @@ bool SlipTrackWorld_PreFrameCameraSuffix(uint32_t frameCallbackTo, SlipView3DVec
 	*result = (SlipTrackWorldPreFrameCameraSuffix){.reflectionMatrixObjectOffset = 0,
 	                                               .callReadReflectionObjectMatrix = true,
 	                                               .reflectionNormalX = 0,
-	                                               .reflectionNormalY = 0x4000u,
+	                                               .reflectionNormalY = SLIP_Q14_ONE,
 	                                               .reflectionNormalZ = 0,
 	                                               .callView3DReflectMatrixRows = true,
 	                                               .callEnablePostPlaneMode = true,
@@ -5743,7 +5930,7 @@ bool SlipTrackWorld_PreFrameCameraSuffix(uint32_t frameCallbackTo, SlipView3DVec
 	                                               .callRestoreObjectPosition = true,
 	                                               .restoreDepthTo = savedDepth,
 	                                               .callRestoreMaximumDepth = true,
-	                                               .matrixRestoreAddress = 0x00034424u,
+	                                               .matrixRestoreAddress = SLIP_TRACK_REFLECTION_SAVED_MATRIX_TOKEN,
 	                                               .matrixRestoreObjectOffset = 0,
 	                                               .callRestoreObjectMatrix = true,
 	                                               .restoredCameraObjectOffset = 0,
@@ -5801,7 +5988,7 @@ bool SlipTrackWorld_CameraFrame(uint16_t cameraObjectOffset, uint32_t viewportLe
 	viewportRight = viewportRightBeforeInset - 1u;
 	viewportBottom = viewportBottomBeforeInset - 1u;
 	result->callObjectHide = true;
-	result->cameraViewportSelector = 0x00008000u;
+	result->cameraViewportSelector = SLIP_TRACK_CAMERA_VIEWPORT_SELECTOR;
 	result->callGetCameraViewport = true;
 	result->viewportLeft = viewportLeft;
 	result->viewportTop = viewportTop;
@@ -5813,7 +6000,7 @@ bool SlipTrackWorld_CameraFrame(uint16_t cameraObjectOffset, uint32_t viewportLe
 	result->callRendererBegin = true;
 	result->callReadProjectionScale = true;
 	result->pushedProjection = pushedProjection;
-	result->projectionScaleTo = 0x00004000u;
+	result->projectionScaleTo = SLIP_Q14_ONE;
 	result->callSetProjectionScale = true;
 	result->callReadCameraObjectPosition = true;
 	result->callReadCameraObjectMatrix = true;
@@ -5835,12 +6022,12 @@ bool SlipTrackWorld_CameraFrame(uint16_t cameraObjectOffset, uint32_t viewportLe
 	result->callReadWeaponLabelDimensions = true;
 	result->labelHeight = labelHeight;
 	result->labelWidth = labelWidth;
-	result->textStyle = 2;
-	result->textBackgroundColour = 0xffffffffu;
+	result->textStyle = SLIP_TEXT_CENTERED;
+	result->textBackgroundColour = UINT32_MAX;
 	result->callTextSetStyle = true;
-	result->textColour = 0xffu;
+	result->textColour = SLIP_TRACK_WEAPON_LABEL_COLOUR;
 	result->callTextSetColor = true;
-	result->labelTop = labelTopBeforeInset + 2u;
+	result->labelTop = labelTopBeforeInset + SLIP_TRACK_WEAPON_LABEL_TOP_INSET;
 	result->callRacePlayerProjectileWeaponIndex = true;
 	result->callRacePlayerBuildWeaponLabel = true;
 	result->callDrawWeaponLabel = true;
@@ -5966,54 +6153,57 @@ bool SlipTrackWorld_FrameEntry(
 	if (!SlipTrackWorld_DeferredListDirectExecute(
 	        frameRenderFlags, savedClipLeft, savedClipTop, savedClipRight, savedClipBottom, deferredList,
 	        deferredListBytes, deferredEntryMap, deferredEntryMapCount, deferredRecordMap, deferredRecordMapCount,
-	        componentBaseAddress, componentBase, componentBaseBytes, listSetup.componentMask, mode, 0x000003d0u,
-	        detailThreshold, recordIndex, &worldMatrix, &objectViewMatrix, viewMatrix, cameraSetup.cameraPositionX,
-	        cameraSetup.cameraPositionZ, sphereCull, sphereCullUserData, shapeDraw, shapeDrawUserData, 0,
-	        frameDrawState.drawFlagsTo, textureMode, shading, componentDistance, shadingSecondary, componentRadius,
-	        frameDrawState.storedFrameFlags, depthFrom, savedFadeStart, savedFadeEnd, savedFadeColour, specialRecord,
-	        globalAfter, randomState, shadows, processedComponentCount, actorReplayMode, ambientLightScaleQ14,
-	        scaledLightX, scaledLightY, scaledLightZ, directLightScaleQ14, listSetup.renderContextCount,
-	        primitiveCallback, storeClipBoundsFunction, storeClipBoundsUserData, callbackFunction, callbackUserData,
-	        componentActorDraw, componentActorDrawUserData, vertexRecords, vertexRecordCapacity, drawStateLoad,
-	        drawStateLoadUserData, buildVertexRecords, buildVertexRecordsUserData, restoreVertexBuffer,
-	        restoreVertexBufferUserData, deferredDirectVisits, deferredDirectVisitCapacity, scaledLight, restoreLight,
-	        lightUserData, traversalContext ? traversalContext->refuelCalls : NULL, &deferredDirect)) {
-		*result = (SlipTrackWorldFrameEntry){.frameCallback = frameCallback,
-		                                     .storedFrameCallback = frameCallback,
-		                                     .callTrackWorldFrameDrawState = true,
-		                                     .frameDrawState = frameDrawState,
-		                                     .callDraw3DLoadClipAndCenter = true,
-		                                     .savedClipLeft = savedClipLeft,
-		                                     .savedClipTop = savedClipTop,
-		                                     .savedClipRight = savedClipRight,
-		                                     .savedClipBottom = savedClipBottom,
-		                                     .callReadMaximumDepth = true,
-		                                     .savedDepth = depthFrom,
-		                                     .callReadDepthFade = true,
-		                                     .savedFadeStart = savedFadeStart,
-		                                     .savedFadeEnd = savedFadeEnd,
-		                                     .savedFadeColour = savedFadeColour,
-		                                     .callTrackWorldCameraSetup = true,
-		                                     .callTrackWorldStateReset = true,
-		                                     .stateReset = stateReset,
-		                                     .callReadShapeFlags = true,
-		                                     .maskedShapeFlags = (uint16_t)(timerValue & 0xfff2u),
-		                                     .callRendererSetShapeFlags = true,
-		                                     .callReadStateToken = true,
-		                                     .pushedStateToken = stateTokenFrom,
-		                                     .temporaryStateToken = 0x000003d0u,
-		                                     .callInstallTemporaryStateToken = true,
-		                                     .callTrackWorldBuildAxisRamps = true,
-		                                     .callTrackWorldBuildAxisTests = true,
-		                                     .callSetupObjectList = true,
-		                                     .listSetup = listSetup,
-		                                     .callTrackWorldClearSlotDrawLinks = true,
-		                                     .callTrackWorldClearGlobals = true,
-		                                     .clear = clearGlobals,
-		                                     .callTrackWorldFrameDispatch = true,
-		                                     .frameDispatch = frameDispatch,
-		                                     .callExecuteDeferredList = true,
-		                                     .deferredDirect = deferredDirect};
+	        componentBaseAddress, componentBase, componentBaseBytes, listSetup.componentMask, mode,
+	        SLIP_TRACK_FRAME_STATE_TOKEN, detailThreshold, recordIndex, &worldMatrix, &objectViewMatrix, viewMatrix,
+	        cameraSetup.cameraPositionX, cameraSetup.cameraPositionZ, sphereCull, sphereCullUserData, shapeDraw,
+	        shapeDrawUserData, 0, frameDrawState.drawFlagsTo, textureMode, shading, componentDistance, shadingSecondary,
+	        componentRadius, frameDrawState.storedFrameFlags, depthFrom, savedFadeStart, savedFadeEnd, savedFadeColour,
+	        specialRecord, globalAfter, randomState, shadows, processedComponentCount, actorReplayMode,
+	        ambientLightScaleQ14, scaledLightX, scaledLightY, scaledLightZ, directLightScaleQ14,
+	        listSetup.renderContextCount, primitiveCallback, storeClipBoundsFunction, storeClipBoundsUserData,
+	        callbackFunction, callbackUserData, componentActorDraw, componentActorDrawUserData, vertexRecords,
+	        vertexRecordCapacity, drawStateLoad, drawStateLoadUserData, buildVertexRecords, buildVertexRecordsUserData,
+	        restoreVertexBuffer, restoreVertexBufferUserData, deferredDirectVisits, deferredDirectVisitCapacity,
+	        scaledLight, restoreLight, lightUserData, traversalContext ? traversalContext->refuelCalls : NULL,
+	        &deferredDirect)) {
+		*result = (SlipTrackWorldFrameEntry){
+		    .frameCallback = frameCallback,
+		    .storedFrameCallback = frameCallback,
+		    .callTrackWorldFrameDrawState = true,
+		    .frameDrawState = frameDrawState,
+		    .callDraw3DLoadClipAndCenter = true,
+		    .savedClipLeft = savedClipLeft,
+		    .savedClipTop = savedClipTop,
+		    .savedClipRight = savedClipRight,
+		    .savedClipBottom = savedClipBottom,
+		    .callReadMaximumDepth = true,
+		    .savedDepth = depthFrom,
+		    .callReadDepthFade = true,
+		    .savedFadeStart = savedFadeStart,
+		    .savedFadeEnd = savedFadeEnd,
+		    .savedFadeColour = savedFadeColour,
+		    .callTrackWorldCameraSetup = true,
+		    .callTrackWorldStateReset = true,
+		    .stateReset = stateReset,
+		    .callReadShapeFlags = true,
+		    .maskedShapeFlags = (uint16_t)(timerValue & ~(SLIP_SHAPE_SHORT_COORDINATES | SLIP_SHAPE_CLIP_AUXILIARY |
+		                                                  SLIP_SHAPE_FORCE_SECONDARY_PROJECTION)),
+		    .callRendererSetShapeFlags = true,
+		    .callReadStateToken = true,
+		    .pushedStateToken = stateTokenFrom,
+		    .temporaryStateToken = SLIP_TRACK_FRAME_STATE_TOKEN,
+		    .callInstallTemporaryStateToken = true,
+		    .callTrackWorldBuildAxisRamps = true,
+		    .callTrackWorldBuildAxisTests = true,
+		    .callSetupObjectList = true,
+		    .listSetup = listSetup,
+		    .callTrackWorldClearSlotDrawLinks = true,
+		    .callTrackWorldClearGlobals = true,
+		    .clear = clearGlobals,
+		    .callTrackWorldFrameDispatch = true,
+		    .frameDispatch = frameDispatch,
+		    .callExecuteDeferredList = true,
+		    .deferredDirect = deferredDirect};
 		return false;
 	}
 
@@ -6027,53 +6217,75 @@ bool SlipTrackWorld_FrameEntry(
 	                                     &postFrameOverlay)) {
 		return false;
 	}
-	*result = (SlipTrackWorldFrameEntry){.frameCallback = frameCallback,
-	                                     .storedFrameCallback = frameCallback,
-	                                     .callTrackWorldFrameDrawState = true,
-	                                     .frameDrawState = frameDrawState,
-	                                     .callDraw3DLoadClipAndCenter = true,
-	                                     .savedClipLeft = savedClipLeft,
-	                                     .savedClipTop = savedClipTop,
-	                                     .savedClipRight = savedClipRight,
-	                                     .savedClipBottom = savedClipBottom,
-	                                     .callReadMaximumDepth = true,
-	                                     .savedDepth = depthFrom,
-	                                     .callReadDepthFade = true,
-	                                     .savedFadeStart = savedFadeStart,
-	                                     .savedFadeEnd = savedFadeEnd,
-	                                     .savedFadeColour = savedFadeColour,
-	                                     .callTrackWorldCameraSetup = true,
-	                                     .callTrackWorldStateReset = true,
-	                                     .stateReset = stateReset,
-	                                     .callReadShapeFlags = true,
-	                                     .maskedShapeFlags = (uint16_t)(timerValue & 0xfff2u),
-	                                     .callRendererSetShapeFlags = true,
-	                                     .callReadStateToken = true,
-	                                     .pushedStateToken = stateTokenFrom,
-	                                     .temporaryStateToken = 0x000003d0u,
-	                                     .callInstallTemporaryStateToken = true,
-	                                     .callTrackWorldBuildAxisRamps = true,
-	                                     .callTrackWorldBuildAxisTests = true,
-	                                     .callSetupObjectList = true,
-	                                     .listSetup = listSetup,
-	                                     .callTrackWorldClearSlotDrawLinks = true,
-	                                     .callTrackWorldClearGlobals = true,
-	                                     .clear = clearGlobals,
-	                                     .callTrackWorldFrameDispatch = true,
-	                                     .frameDispatch = frameDispatch,
-	                                     .callExecuteDeferredList = true,
-	                                     .deferredDirect = deferredDirect,
-	                                     .restoredClipLeft = savedClipLeft,
-	                                     .restoredClipTop = savedClipTop,
-	                                     .restoredClipRight = savedClipRight,
-	                                     .restoredClipBottom = savedClipBottom,
-	                                     .callRestoreClipBounds = true,
-	                                     .restoredStateToken = stateTokenFrom,
-	                                     .callRestoreStateToken = true,
-	                                     .callTrackWorldPostFrameOverlay = true,
-	                                     .ret = true};
+	*result = (SlipTrackWorldFrameEntry){
+	    .frameCallback = frameCallback,
+	    .storedFrameCallback = frameCallback,
+	    .callTrackWorldFrameDrawState = true,
+	    .frameDrawState = frameDrawState,
+	    .callDraw3DLoadClipAndCenter = true,
+	    .savedClipLeft = savedClipLeft,
+	    .savedClipTop = savedClipTop,
+	    .savedClipRight = savedClipRight,
+	    .savedClipBottom = savedClipBottom,
+	    .callReadMaximumDepth = true,
+	    .savedDepth = depthFrom,
+	    .callReadDepthFade = true,
+	    .savedFadeStart = savedFadeStart,
+	    .savedFadeEnd = savedFadeEnd,
+	    .savedFadeColour = savedFadeColour,
+	    .callTrackWorldCameraSetup = true,
+	    .callTrackWorldStateReset = true,
+	    .stateReset = stateReset,
+	    .callReadShapeFlags = true,
+	    .maskedShapeFlags = (uint16_t)(timerValue & ~(SLIP_SHAPE_SHORT_COORDINATES | SLIP_SHAPE_CLIP_AUXILIARY |
+	                                                  SLIP_SHAPE_FORCE_SECONDARY_PROJECTION)),
+	    .callRendererSetShapeFlags = true,
+	    .callReadStateToken = true,
+	    .pushedStateToken = stateTokenFrom,
+	    .temporaryStateToken = SLIP_TRACK_FRAME_STATE_TOKEN,
+	    .callInstallTemporaryStateToken = true,
+	    .callTrackWorldBuildAxisRamps = true,
+	    .callTrackWorldBuildAxisTests = true,
+	    .callSetupObjectList = true,
+	    .listSetup = listSetup,
+	    .callTrackWorldClearSlotDrawLinks = true,
+	    .callTrackWorldClearGlobals = true,
+	    .clear = clearGlobals,
+	    .callTrackWorldFrameDispatch = true,
+	    .frameDispatch = frameDispatch,
+	    .callExecuteDeferredList = true,
+	    .deferredDirect = deferredDirect,
+	    .restoredClipLeft = savedClipLeft,
+	    .restoredClipTop = savedClipTop,
+	    .restoredClipRight = savedClipRight,
+	    .restoredClipBottom = savedClipBottom,
+	    .callRestoreClipBounds = true,
+	    .restoredStateToken = stateTokenFrom,
+	    .callRestoreStateToken = true,
+	    .callTrackWorldPostFrameOverlay = true,
+	    .ret = true};
 	return true;
 }
+
+enum {
+	SLIP_TRACK_BACKGROUND_FIXED_STRIP_COUNT = 16,
+	SLIP_TRACK_BACKGROUND_MATERIAL_STRIP_COUNT = 1,
+	SLIP_TRACK_BACKGROUND_DESERT_HEIGHT_OFFSET = 1952000,
+	SLIP_TRACK_BACKGROUND_DEFAULT_HEIGHT_OFFSET = 1048576,
+	SLIP_TRACK_BACKGROUND_LONDON_HEIGHT_OFFSET = 976000,
+	SLIP_TRACK_BACKGROUND_DEFAULT_COLOUR = 0x03120388,
+	SLIP_TRACK_BACKGROUND_CHICAGO_COLOUR = 0x40000000,
+	SLIP_TRACK_BACKGROUND_HAWAII_FRANCE_COLOUR = 0x28000000,
+	SLIP_TRACK_BACKGROUND_NEW_YORK_COLOUR = 0x01000000,
+	SLIP_TRACK_BACKGROUND_AMAZON_COLOUR = 1,
+	SLIP_TRACK_BACKGROUND_DEFAULT_CURVATURE = 1536,
+	SLIP_TRACK_BACKGROUND_CHICAGO_CURVATURE = 6144,
+	SLIP_TRACK_BACKGROUND_COASTAL_CURVATURE = 4608,
+	SLIP_TRACK_BACKGROUND_LONDON_CURVATURE = 3072,
+	SLIP_TRACK_BACKGROUND_LONDON_CLOUD_DETAIL = 3,
+	SLIP_TRACK_SKY_NAME_DOS_TOKEN = 0x42c9e,
+	SLIP_TRACK_GROUND_NAME_DOS_TOKEN = 0x42ca2
+};
 
 #define SLIP_RACE_TRACK_BACKGROUND_BODY(EBX_AFTER_OFFSET, BACKGROUND_EAX, SCALE_EBP)                                   \
 	SlipRaceTrackFrameCallbackExecute out;                                                                             \
@@ -6090,8 +6302,8 @@ bool SlipTrackWorld_FrameEntry(
 	                                           .backgroundColour = (BACKGROUND_EAX),                                   \
 	                                           .stripCurvature = (SCALE_EBP),                                          \
 	                                           .skyMaterial = args->skyMaterial,                                       \
-	                                           .fixedStripCount = 0x10u,                                               \
-	                                           .materialStripCount = 0x01u,                                            \
+	                                           .fixedStripCount = SLIP_TRACK_BACKGROUND_FIXED_STRIP_COUNT,             \
+	                                           .materialStripCount = SLIP_TRACK_BACKGROUND_MATERIAL_STRIP_COUNT,       \
 	                                           .groundMaterial = args->groundMaterial,                                 \
 	                                           .callDraw3DBackgroundDispatch = true};                                  \
 	out.callDraw3DBackgroundDispatch = true;                                                                           \
@@ -6114,7 +6326,8 @@ bool SlipTrackWorld_FrameEntry(
 
 bool SlipRaceTrack_DrawEgyptBackground(const SlipRaceTrackFrameCallbackExecuteArgs *args,
                                        SlipRaceTrackFrameCallbackExecute *result) {
-	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - 0x001dc900u, 0x03120388u, 0x00000600u);
+	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - SLIP_TRACK_BACKGROUND_DESERT_HEIGHT_OFFSET,
+	                                SLIP_TRACK_BACKGROUND_DEFAULT_COLOUR, SLIP_TRACK_BACKGROUND_DEFAULT_CURVATURE);
 	out.frame.savedBackgroundColour = out.frame.backgroundColour;
 	out.savedBackgroundColour = out.frame.savedBackgroundColour;
 	out.frame.callConfigCloudsEnabled = true;
@@ -6133,7 +6346,8 @@ bool SlipRaceTrack_DrawEgyptBackground(const SlipRaceTrackFrameCallbackExecuteAr
 
 bool SlipRaceTrack_DrawArizonaNorwayBackground(const SlipRaceTrackFrameCallbackExecuteArgs *args,
                                                SlipRaceTrackFrameCallbackExecute *result) {
-	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - 0x001dc900u, 0x03120388u, 0x00000600u);
+	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - SLIP_TRACK_BACKGROUND_DESERT_HEIGHT_OFFSET,
+	                                SLIP_TRACK_BACKGROUND_DEFAULT_COLOUR, SLIP_TRACK_BACKGROUND_DEFAULT_CURVATURE);
 	out.frame.ret = true;
 	out.ret = true;
 	*result = out;
@@ -6142,7 +6356,8 @@ bool SlipRaceTrack_DrawArizonaNorwayBackground(const SlipRaceTrackFrameCallbackE
 
 bool SlipRaceTrack_DrawChicagoBackground(const SlipRaceTrackFrameCallbackExecuteArgs *args,
                                          SlipRaceTrackFrameCallbackExecute *result) {
-	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - 0x00100000u, 0x40000000u, 0x00001800u);
+	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - SLIP_TRACK_BACKGROUND_DEFAULT_HEIGHT_OFFSET,
+	                                SLIP_TRACK_BACKGROUND_CHICAGO_COLOUR, SLIP_TRACK_BACKGROUND_CHICAGO_CURVATURE);
 	out.frame.savedBackgroundColour = out.frame.backgroundColour;
 	out.savedBackgroundColour = out.frame.savedBackgroundColour;
 	out.frame.callConfigCloudsEnabled = true;
@@ -6161,7 +6376,9 @@ bool SlipRaceTrack_DrawChicagoBackground(const SlipRaceTrackFrameCallbackExecute
 
 bool SlipRaceTrack_DrawHawaiiBackground(const SlipRaceTrackFrameCallbackExecuteArgs *args,
                                         SlipRaceTrackFrameCallbackExecute *result) {
-	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - 0x00100000u, 0x28000000u, 0x00001200u);
+	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - SLIP_TRACK_BACKGROUND_DEFAULT_HEIGHT_OFFSET,
+	                                SLIP_TRACK_BACKGROUND_HAWAII_FRANCE_COLOUR,
+	                                SLIP_TRACK_BACKGROUND_COASTAL_CURVATURE);
 	out.frame.savedBackgroundColour = out.frame.backgroundColour;
 	out.savedBackgroundColour = out.frame.savedBackgroundColour;
 	out.frame.callConfigCloudsEnabled = true;
@@ -6180,7 +6397,8 @@ bool SlipRaceTrack_DrawHawaiiBackground(const SlipRaceTrackFrameCallbackExecuteA
 
 bool SlipRaceTrack_DrawTokyoBackground(const SlipRaceTrackFrameCallbackExecuteArgs *args,
                                        SlipRaceTrackFrameCallbackExecute *result) {
-	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - 0x00100000u, 0x03120388u, 0x00000600u);
+	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - SLIP_TRACK_BACKGROUND_DEFAULT_HEIGHT_OFFSET,
+	                                SLIP_TRACK_BACKGROUND_DEFAULT_COLOUR, SLIP_TRACK_BACKGROUND_DEFAULT_CURVATURE);
 	out.frame.savedBackgroundColour = out.frame.backgroundColour;
 	out.savedBackgroundColour = out.frame.savedBackgroundColour;
 	out.frame.callConfigCloudsEnabled = true;
@@ -6199,10 +6417,11 @@ bool SlipRaceTrack_DrawTokyoBackground(const SlipRaceTrackFrameCallbackExecuteAr
 
 bool SlipRaceTrack_DrawLondonBackground(const SlipRaceTrackFrameCallbackExecuteArgs *args,
                                         SlipRaceTrackFrameCallbackExecute *result) {
-	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight + 0x000ee480u, 0x03120388u, 0x00000c00u);
+	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight + SLIP_TRACK_BACKGROUND_LONDON_HEIGHT_OFFSET,
+	                                SLIP_TRACK_BACKGROUND_DEFAULT_COLOUR, SLIP_TRACK_BACKGROUND_LONDON_CURVATURE);
 	out.callReadDetailLevel = true;
 	out.detailLevel = args->detailLevel;
-	if (args->detailLevel == 3u) {
+	if (args->detailLevel == SLIP_TRACK_BACKGROUND_LONDON_CLOUD_DETAIL) {
 		out.frame.callConfigCloudsEnabled = true;
 		out.frame.cloudSetting = args->cloudSetting;
 		out.frame.callCloudHook = args->cloudSetting != 0;
@@ -6220,7 +6439,9 @@ bool SlipRaceTrack_DrawLondonBackground(const SlipRaceTrackFrameCallbackExecuteA
 
 bool SlipRaceTrack_DrawFranceBackground(const SlipRaceTrackFrameCallbackExecuteArgs *args,
                                         SlipRaceTrackFrameCallbackExecute *result) {
-	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - 0x00100000u, 0x28000000u, 0x00001200u);
+	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight - SLIP_TRACK_BACKGROUND_DEFAULT_HEIGHT_OFFSET,
+	                                SLIP_TRACK_BACKGROUND_HAWAII_FRANCE_COLOUR,
+	                                SLIP_TRACK_BACKGROUND_COASTAL_CURVATURE);
 	out.frame.savedBackgroundColour = out.frame.backgroundColour;
 	out.savedBackgroundColour = out.frame.savedBackgroundColour;
 	out.frame.callConfigCloudsEnabled = true;
@@ -6239,7 +6460,8 @@ bool SlipRaceTrack_DrawFranceBackground(const SlipRaceTrackFrameCallbackExecuteA
 
 bool SlipRaceTrack_DrawNewYorkBackground(const SlipRaceTrackFrameCallbackExecuteArgs *args,
                                          SlipRaceTrackFrameCallbackExecute *result) {
-	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight, 0x01000000u, 0x00001200u);
+	SLIP_RACE_TRACK_BACKGROUND_BODY(args->cameraHeight, SLIP_TRACK_BACKGROUND_NEW_YORK_COLOUR,
+	                                SLIP_TRACK_BACKGROUND_COASTAL_CURVATURE);
 	out.frame.savedBackgroundColour = out.frame.backgroundColour;
 	out.savedBackgroundColour = out.frame.savedBackgroundColour;
 	out.frame.callConfigCloudsEnabled = true;
@@ -6266,8 +6488,8 @@ bool SlipRaceTrack_DrawAmazonBackground(const SlipRaceTrackFrameCallbackExecuteA
 		return false;
 	}
 	*result = (SlipRaceTrackFrameCallbackExecute){.callLoadClipAndCenter = true, .callFillClipRect = true, .ret = true};
-	Raster_FillRectClipped(1, (int16_t)clip.clipMinX, (int16_t)clip.clipMinY, (int16_t)clip.clipMaxX,
-	                       (int16_t)clip.clipMaxY);
+	Raster_FillRectClipped(SLIP_TRACK_BACKGROUND_AMAZON_COLOUR, (int16_t)clip.clipMinX, (int16_t)clip.clipMinY,
+	                       (int16_t)clip.clipMaxX, (int16_t)clip.clipMaxY);
 	return true;
 }
 
@@ -6283,8 +6505,8 @@ bool SlipRaceTrack_MaterialGlobals(const uint8_t *materialTable, size_t material
 	}
 
 	memset(result, 0, sizeof(*result));
-	result->skyNameAddress = 0x00042c9eu;
-	result->groundNameAddress = 0x00042ca2u;
+	result->skyNameAddress = SLIP_TRACK_SKY_NAME_DOS_TOKEN;
+	result->groundNameAddress = SLIP_TRACK_GROUND_NAME_DOS_TOKEN;
 	result->callSkyLookup = true;
 	if (!SlipDraw3D_GetMaterialNumber(materialTable, materialTableBytes, materialGlobal, skyName, sizeof(skyName),
 	                                  &skyLookup)) {
@@ -6408,13 +6630,14 @@ bool SlipTrackWorld_StateReset(uint32_t recordIndex, SlipTrackWorldStateReset *r
 		return false;
 	}
 	stateIndex = SlipDraw3D_CurrentStateRecordIndex(recordIndex);
-	loopCount = 3u;
+	loopCount = SLIP_TRACK_STATE_RESET_COUNT;
 	*result = (SlipTrackWorldStateReset){true, stateIndex, loopCount, {{0}}, stateIndex, true, true};
-	for (i = 0; i < 3u; ++i) {
+	for (i = 0; i < SLIP_TRACK_STATE_RESET_COUNT; ++i) {
 		SlipTrackWorldStateResetVisit *const visit = &result->visits[i];
 
 		*visit = (SlipTrackWorldStateResetVisit){
-		    loopCount, stateIndex, true, 0x00033d48u, 0, 0, 0, 0xffffffffu, true, stateIndex + 1u, loopCount - 1u};
+		    loopCount, stateIndex,      true,          SLIP_TRACK_WORLD_CAMERA_MATRIX_TOKEN, 0, 0, 0, UINT32_MAX,
+		    true,      stateIndex + 1u, loopCount - 1u};
 		++stateIndex;
 		--loopCount;
 	}
@@ -6437,20 +6660,23 @@ bool SlipTrackWorld_FillAxisRamp(uint8_t *ramp, size_t rampBytes, uint16_t direc
 		return false;
 	}
 	loopCount = (uint16_t)(lastTripletIndex + 1u);
-	tripletCount = loopCount == 0 ? 0x10000u : (size_t)loopCount;
-	if (tripletCount > (SIZE_MAX / 12u) || rampBytes < tripletCount * 12u) {
+	tripletCount = loopCount == 0 ? SLIP_TRACK_AXIS_WRAPPED_LOOP_COUNT : (size_t)loopCount;
+	if (tripletCount > (SIZE_MAX / SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES) ||
+	    rampBytes < tripletCount * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES) {
 		return false;
 	}
-	stepX = ((uint32_t)(int32_t)(int16_t)directionX) << 6;
-	stepY = ((uint32_t)(int32_t)(int16_t)directionY) << 6;
-	stepZ = ((uint32_t)(int32_t)(int16_t)directionZ) << 6;
+	stepX = ((uint32_t)(int32_t)(int16_t)directionX) << SLIP_TRC_POINT_COORDINATE_SHIFT;
+	stepY = ((uint32_t)(int32_t)(int16_t)directionY) << SLIP_TRC_POINT_COORDINATE_SHIFT;
+	stepZ = ((uint32_t)(int32_t)(int16_t)directionZ) << SLIP_TRC_POINT_COORDINATE_SHIFT;
 	rampX = 0;
 	rampY = 0;
 	rampZ = 0;
 	for (i = 0; i < tripletCount; ++i) {
-		SlipTrackWorld_WriteLE32(ramp + i * 12u, rampX);
-		SlipTrackWorld_WriteLE32(ramp + i * 12u + 4u, rampY);
-		SlipTrackWorld_WriteLE32(ramp + i * 12u + 8u, rampZ);
+		SlipTrackWorld_WriteLE32(ramp + i * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES, rampX);
+		SlipTrackWorld_WriteLE32(ramp + i * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES + offsetof(SlipView3DVec32, y),
+		                         rampY);
+		SlipTrackWorld_WriteLE32(ramp + i * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES + offsetof(SlipView3DVec32, z),
+		                         rampZ);
 		rampX += stepX;
 		rampY += stepY;
 		rampZ += stepZ;
@@ -6475,22 +6701,28 @@ bool SlipTrackWorld_BuildAxisRamps(const uint8_t *viewMatrix, size_t matrixBytes
 	SlipTrackWorldAxisRamp second;
 	SlipTrackWorldAxisRamp third;
 
-	if (viewMatrix == 0 || rampX == 0 || rampY == 0 || rampZ == 0 || result == 0 || matrixBytes < 18u) {
+	if (viewMatrix == 0 || rampX == 0 || rampY == 0 || rampZ == 0 || result == 0 ||
+	    matrixBytes < sizeof(SlipView3DMatrix)) {
 		return false;
 	}
 	if (!SlipTrackWorld_FillAxisRamp(rampX, rampXBytes, SlipBytes_ReadLE16(viewMatrix),
-	                                 SlipBytes_ReadLE16(viewMatrix + 0x02u), SlipBytes_ReadLE16(viewMatrix + 0x04u),
-	                                 0x000cu, &first)) {
+	                                 SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[1])),
+	                                 SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[2])),
+	                                 SLIP_TRACK_WORLD_AXIS_RAMP_X_LAST_INDEX, &first)) {
 		return false;
 	}
-	if (!SlipTrackWorld_FillAxisRamp(rampY, rampYBytes, SlipBytes_ReadLE16(viewMatrix + 0x06u),
-	                                 SlipBytes_ReadLE16(viewMatrix + 0x08u), SlipBytes_ReadLE16(viewMatrix + 0x0au),
-	                                 0x0004u, &second)) {
+	if (!SlipTrackWorld_FillAxisRamp(rampY, rampYBytes,
+	                                 SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[3])),
+	                                 SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[4])),
+	                                 SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[5])),
+	                                 SLIP_TRACK_WORLD_AXIS_RAMP_Y_LAST_INDEX, &second)) {
 		return false;
 	}
-	if (!SlipTrackWorld_FillAxisRamp(rampZ, rampZBytes, SlipBytes_ReadLE16(viewMatrix + 0x0cu),
-	                                 SlipBytes_ReadLE16(viewMatrix + 0x0eu), SlipBytes_ReadLE16(viewMatrix + 0x10u),
-	                                 0x0014u, &third)) {
+	if (!SlipTrackWorld_FillAxisRamp(rampZ, rampZBytes,
+	                                 SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[6])),
+	                                 SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[7])),
+	                                 SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[8])),
+	                                 SLIP_TRACK_WORLD_AXIS_RAMP_Z_LAST_INDEX, &third)) {
 		return false;
 	}
 	*result = (SlipTrackWorldBuildAxisRamps){.viewMatrix = viewMatrix,
@@ -6522,7 +6754,7 @@ bool SlipTrackWorld_AxisTestWord(uint32_t mode, uint32_t positionX, uint32_t pos
 	*result = (SlipTrackWorldAxisTestWord){.callTrackWorldClassifyAxisPlane = true,
 	                                       .classify = classify,
 	                                       .trackWorldClassifyAxisPlaneCarry = classify.carry,
-	                                       .classificationMask = classify.carry ? 0x0000u : 0xffffu,
+	                                       .classificationMask = classify.carry ? 0 : UINT16_MAX,
 	                                       .ret = true};
 	return true;
 }
@@ -6539,27 +6771,33 @@ bool SlipTrackWorld_BuildAxisTests(uint32_t mode, const uint8_t *viewMatrix, siz
 	size_t i;
 
 	if (viewMatrix == 0 || rampX == 0 || rampY == 0 || rampZ == 0 || tableFirst == 0 || tableSecond == 0 ||
-	    tableThird == 0 || visits == 0 || result == 0 || matrixBytes < 18u || rampXBytes < 0x90u ||
-	    rampYBytes < 0x30u || rampZBytes < 0xf0u || tableFirstBytes < 0x16u || tableSecondBytes < 0x06u ||
-	    tableThirdBytes < 0x26u || visitCapacity < 33u) {
+	    tableThird == 0 || visits == 0 || result == 0 || matrixBytes < sizeof(SlipView3DMatrix) ||
+	    rampXBytes < (SLIP_TRACK_WORLD_AXIS_TEST_X_COUNT + 1u) * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES ||
+	    rampYBytes < (SLIP_TRACK_WORLD_AXIS_TEST_Y_COUNT + 1u) * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES ||
+	    rampZBytes < (SLIP_TRACK_WORLD_AXIS_TEST_Z_COUNT + 1u) * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES ||
+	    tableFirstBytes < SLIP_TRACK_WORLD_AXIS_TEST_X_COUNT * sizeof(uint16_t) ||
+	    tableSecondBytes < SLIP_TRACK_WORLD_AXIS_TEST_Y_COUNT * sizeof(uint16_t) ||
+	    tableThirdBytes < SLIP_TRACK_WORLD_AXIS_TEST_Z_COUNT * sizeof(uint16_t) ||
+	    visitCapacity < SLIP_TRACK_WORLD_AXIS_TEST_COUNT) {
 		return false;
 	}
 	visitIndex = 0;
-	for (i = 0; i < 11u; ++i) {
+	for (i = 0; i < SLIP_TRACK_WORLD_AXIS_TEST_X_COUNT; ++i) {
 		SlipTrackWorldAxisTestVisit *const visit = &visits[visitIndex];
 
-		rampTriplet = rampX + 0x0cu + i * 0x0cu;
+		rampTriplet = rampX + SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES + i * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES;
 		tableEntry = tableFirst + i * 2u;
-		*visit = (SlipTrackWorldAxisTestVisit){.loopCountBefore = (uint32_t)(11u - i),
-		                                       .rampTriplet = rampTriplet,
-		                                       .tableEntry = tableEntry,
-		                                       .rampX = SlipBytes_ReadLE32(rampTriplet),
-		                                       .rampY = SlipBytes_ReadLE32(rampTriplet + 4u),
-		                                       .rampZ = SlipBytes_ReadLE32(rampTriplet + 8u),
-		                                       .normalX = SlipBytes_ReadLE16(viewMatrix),
-		                                       .normalY = SlipBytes_ReadLE16(viewMatrix + 0x02u),
-		                                       .normalZ = SlipBytes_ReadLE16(viewMatrix + 0x04u),
-		                                       .callTrackWorldAxisTestWord = true};
+		*visit =
+		    (SlipTrackWorldAxisTestVisit){.loopCountBefore = (uint32_t)(SLIP_TRACK_WORLD_AXIS_TEST_X_COUNT - i),
+		                                  .rampTriplet = rampTriplet,
+		                                  .tableEntry = tableEntry,
+		                                  .rampX = SlipBytes_ReadLE32(rampTriplet),
+		                                  .rampY = SlipBytes_ReadLE32(rampTriplet + offsetof(SlipView3DVec32, y)),
+		                                  .rampZ = SlipBytes_ReadLE32(rampTriplet + offsetof(SlipView3DVec32, z)),
+		                                  .normalX = SlipBytes_ReadLE16(viewMatrix),
+		                                  .normalY = SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[1])),
+		                                  .normalZ = SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[2])),
+		                                  .callTrackWorldAxisTestWord = true};
 		visit->positionX = visit->rampX + addX;
 		visit->positionY = visit->rampY + addY;
 		visit->positionZ = visit->rampZ + addZ;
@@ -6571,21 +6809,22 @@ bool SlipTrackWorld_BuildAxisTests(uint32_t mode, const uint8_t *viewMatrix, siz
 		SlipTrackWorld_WriteLE16(tableEntry, visit->classificationMask);
 		++visitIndex;
 	}
-	for (i = 0; i < 3u; ++i) {
+	for (i = 0; i < SLIP_TRACK_WORLD_AXIS_TEST_Y_COUNT; ++i) {
 		SlipTrackWorldAxisTestVisit *const visit = &visits[visitIndex];
 
-		rampTriplet = rampY + 0x0cu + i * 0x0cu;
+		rampTriplet = rampY + SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES + i * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES;
 		tableEntry = tableSecond + i * 2u;
-		*visit = (SlipTrackWorldAxisTestVisit){.loopCountBefore = (uint32_t)(3u - i),
-		                                       .rampTriplet = rampTriplet,
-		                                       .tableEntry = tableEntry,
-		                                       .rampX = SlipBytes_ReadLE32(rampTriplet),
-		                                       .rampY = SlipBytes_ReadLE32(rampTriplet + 4u),
-		                                       .rampZ = SlipBytes_ReadLE32(rampTriplet + 8u),
-		                                       .normalX = SlipBytes_ReadLE16(viewMatrix + 0x06u),
-		                                       .normalY = SlipBytes_ReadLE16(viewMatrix + 0x08u),
-		                                       .normalZ = SlipBytes_ReadLE16(viewMatrix + 0x0au),
-		                                       .callTrackWorldAxisTestWord = true};
+		*visit =
+		    (SlipTrackWorldAxisTestVisit){.loopCountBefore = (uint32_t)(SLIP_TRACK_WORLD_AXIS_TEST_Y_COUNT - i),
+		                                  .rampTriplet = rampTriplet,
+		                                  .tableEntry = tableEntry,
+		                                  .rampX = SlipBytes_ReadLE32(rampTriplet),
+		                                  .rampY = SlipBytes_ReadLE32(rampTriplet + offsetof(SlipView3DVec32, y)),
+		                                  .rampZ = SlipBytes_ReadLE32(rampTriplet + offsetof(SlipView3DVec32, z)),
+		                                  .normalX = SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[3])),
+		                                  .normalY = SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[4])),
+		                                  .normalZ = SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[5])),
+		                                  .callTrackWorldAxisTestWord = true};
 		visit->positionX = visit->rampX + addX;
 		visit->positionY = visit->rampY + addY;
 		visit->positionZ = visit->rampZ + addZ;
@@ -6597,21 +6836,22 @@ bool SlipTrackWorld_BuildAxisTests(uint32_t mode, const uint8_t *viewMatrix, siz
 		SlipTrackWorld_WriteLE16(tableEntry, visit->classificationMask);
 		++visitIndex;
 	}
-	for (i = 0; i < 19u; ++i) {
+	for (i = 0; i < SLIP_TRACK_WORLD_AXIS_TEST_Z_COUNT; ++i) {
 		SlipTrackWorldAxisTestVisit *const visit = &visits[visitIndex];
 
-		rampTriplet = rampZ + 0x0cu + i * 0x0cu;
+		rampTriplet = rampZ + SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES + i * SLIP_TRACK_WORLD_AXIS_RAMP_POINT_BYTES;
 		tableEntry = tableThird + i * 2u;
-		*visit = (SlipTrackWorldAxisTestVisit){.loopCountBefore = (uint32_t)(19u - i),
-		                                       .rampTriplet = rampTriplet,
-		                                       .tableEntry = tableEntry,
-		                                       .rampX = SlipBytes_ReadLE32(rampTriplet),
-		                                       .rampY = SlipBytes_ReadLE32(rampTriplet + 4u),
-		                                       .rampZ = SlipBytes_ReadLE32(rampTriplet + 8u),
-		                                       .normalX = SlipBytes_ReadLE16(viewMatrix + 0x0cu),
-		                                       .normalY = SlipBytes_ReadLE16(viewMatrix + 0x0eu),
-		                                       .normalZ = SlipBytes_ReadLE16(viewMatrix + 0x10u),
-		                                       .callTrackWorldAxisTestWord = true};
+		*visit =
+		    (SlipTrackWorldAxisTestVisit){.loopCountBefore = (uint32_t)(SLIP_TRACK_WORLD_AXIS_TEST_Z_COUNT - i),
+		                                  .rampTriplet = rampTriplet,
+		                                  .tableEntry = tableEntry,
+		                                  .rampX = SlipBytes_ReadLE32(rampTriplet),
+		                                  .rampY = SlipBytes_ReadLE32(rampTriplet + offsetof(SlipView3DVec32, y)),
+		                                  .rampZ = SlipBytes_ReadLE32(rampTriplet + offsetof(SlipView3DVec32, z)),
+		                                  .normalX = SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[6])),
+		                                  .normalY = SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[7])),
+		                                  .normalZ = SlipBytes_ReadLE16(viewMatrix + offsetof(SlipView3DMatrix, m[8])),
+		                                  .callTrackWorldAxisTestWord = true};
 		visit->positionX = visit->rampX + addX;
 		visit->positionY = visit->rampY + addY;
 		visit->positionZ = visit->rampZ + addZ;
@@ -6659,9 +6899,10 @@ bool SlipTrackWorld_InitSlotDrawRing(uint8_t *slotDrawBase, size_t slotDrawBytes
 	*result = (SlipTrackWorldSlotDrawRing){slotDrawCount, slotDrawBaseAddress, 0, 0, 0, 0, false, true};
 	currentOffset = 0;
 	for (i = 0; i < slotDrawCount; ++i) {
-		const uint32_t nextOffset = currentOffset + 0x38u;
+		const uint32_t nextOffset = currentOffset + sizeof(SlipTrackDrawRecord);
 
-		if ((size_t)currentOffset + 4u > slotDrawBytes || (size_t)nextOffset + 8u > slotDrawBytes) {
+		if ((size_t)currentOffset + offsetof(SlipTrackDrawRecord, nextAddress) + sizeof(uint32_t) > slotDrawBytes ||
+		    (size_t)nextOffset + offsetof(SlipTrackDrawRecord, previousAddress) + sizeof(uint32_t) > slotDrawBytes) {
 			return false;
 		}
 		if (visits != 0 && i < visitCapacity) {
@@ -6694,11 +6935,11 @@ bool SlipTrackWorld_AllocSlotDrawRecord(uint8_t *slotDrawBase, size_t slotDrawBy
 	uint32_t nextFreeOffset;
 	uint16_t slotDrawOffsetWord;
 
-	if (slotDrawBase == 0 || slotListEntry == 0 || result == 0 || slotListEntryBytes < 0x12u) {
+	if (slotDrawBase == 0 || slotListEntry == 0 || result == 0 || slotListEntryBytes < SLIP_TRD_SECTION_DRAW_LIST_END) {
 		return false;
 	}
 	if (!SlipTrackWorld_DosAddressToOffset(freeListAddress, slotDrawBaseAddress, slotDrawBytes, &freeListOffset) ||
-	    freeListOffset + 8u > slotDrawBytes) {
+	    freeListOffset + SLIP_TRACK_DRAW_LINKS_END > slotDrawBytes) {
 		return false;
 	}
 	allocatedAddress = ((const SlipTrackDrawRecord *)(const void *)(slotDrawBase + freeListOffset))->nextAddress;
@@ -6713,18 +6954,18 @@ bool SlipTrackWorld_AllocSlotDrawRecord(uint8_t *slotDrawBase, size_t slotDrawBy
 		SlipRuntime_Fatal("SlotDrawAlloc - out of SlotDraw records");
 	}
 	if (!SlipTrackWorld_DosAddressToOffset(allocatedAddress, slotDrawBaseAddress, slotDrawBytes, &allocatedOffset) ||
-	    allocatedOffset + 0x20u > slotDrawBytes) {
+	    allocatedOffset + SLIP_TRACK_DRAW_OWNER_END > slotDrawBytes) {
 		return false;
 	}
 	nextFreeAddress = ((const SlipTrackDrawRecord *)(const void *)(slotDrawBase + allocatedOffset))->nextAddress;
 	if (!SlipTrackWorld_DosAddressToOffset(nextFreeAddress, slotDrawBaseAddress, slotDrawBytes, &nextFreeOffset) ||
-	    nextFreeOffset + 8u > slotDrawBytes) {
+	    nextFreeOffset + SLIP_TRACK_DRAW_LINKS_END > slotDrawBytes) {
 		return false;
 	}
 	((SlipTrackDrawRecord *)(void *)(slotDrawBase + freeListOffset))->nextAddress = nextFreeAddress;
 	((SlipTrackDrawRecord *)(void *)(slotDrawBase + nextFreeOffset))->previousAddress = freeListAddress;
 
-	slotDrawOffsetWord = SlipBytes_ReadLE16(slotListEntry + 0x10u);
+	slotDrawOffsetWord = SlipBytes_ReadLE16(slotListEntry + offsetof(SlipTrackSectionDrawLinks, firstDrawOffset));
 	result->allocatedOffset = allocatedOffset;
 	result->nextFreeAddress = nextFreeAddress;
 	result->nextFreeOffset = nextFreeOffset;
@@ -6735,12 +6976,12 @@ bool SlipTrackWorld_AllocSlotDrawRecord(uint8_t *slotDrawBase, size_t slotDrawBy
 		uint32_t ringNextAddress;
 		uint32_t ringNextOffset;
 
-		if (ringOffset + 8u > slotDrawBytes) {
+		if (ringOffset + SLIP_TRACK_DRAW_LINKS_END > slotDrawBytes) {
 			return false;
 		}
 		ringNextAddress = ((const SlipTrackDrawRecord *)(const void *)(slotDrawBase + ringOffset))->nextAddress;
 		if (!SlipTrackWorld_DosAddressToOffset(ringNextAddress, slotDrawBaseAddress, slotDrawBytes, &ringNextOffset) ||
-		    ringNextOffset + 8u > slotDrawBytes) {
+		    ringNextOffset + SLIP_TRACK_DRAW_LINKS_END > slotDrawBytes) {
 			return false;
 		}
 		((SlipTrackDrawRecord *)(void *)(slotDrawBase + ringOffset))->nextAddress = allocatedAddress;
@@ -6757,7 +6998,8 @@ bool SlipTrackWorld_AllocSlotDrawRecord(uint8_t *slotDrawBase, size_t slotDrawBy
 
 		((SlipTrackDrawRecord *)(void *)(slotDrawBase + allocatedOffset))->nextAddress = allocatedAddress;
 		((SlipTrackDrawRecord *)(void *)(slotDrawBase + allocatedOffset))->previousAddress = allocatedAddress;
-		SlipTrackWorld_WriteLE16(slotListEntry + 0x10u, allocatedOffsetWord);
+		SlipTrackWorld_WriteLE16(slotListEntry + offsetof(SlipTrackSectionDrawLinks, firstDrawOffset),
+		                         allocatedOffsetWord);
 		result->branch = SLIP_TRACK_WORLD_SLOT_DRAW_ALLOC_BRANCH_NEW_RING;
 		result->storedSlotDrawOffset = allocatedOffsetWord;
 	}
@@ -6787,21 +7029,21 @@ bool SlipTrackWorld_FreeSlotDrawRecord(uint8_t *slotDrawBase, size_t slotDrawByt
 		return false;
 	}
 	if (!SlipTrackWorld_DosAddressToOffset(drawRecordAddress, slotDrawBaseAddress, slotDrawBytes, &drawRecordOffset) ||
-	    drawRecordOffset + 0x20u > slotDrawBytes) {
+	    drawRecordOffset + SLIP_TRACK_DRAW_OWNER_END > slotDrawBytes) {
 		return false;
 	}
 	ownerAddress =
 	    ((const SlipTrackDrawRecord *)(const void *)(slotDrawBase + drawRecordOffset))->ownerTrackRecordAddress;
 	if (!SlipTrackWorld_DosAddressToOffset(ownerAddress, trdBaseAddress, trackDataSize, &ownerOffset) ||
-	    ownerOffset + 0x12u > trackDataSize) {
+	    ownerOffset + SLIP_TRD_SECTION_DRAW_LIST_END > trackDataSize) {
 		return false;
 	}
 	nextAddress = ((const SlipTrackDrawRecord *)(const void *)(slotDrawBase + drawRecordOffset))->nextAddress;
 	prevAddress = ((const SlipTrackDrawRecord *)(const void *)(slotDrawBase + drawRecordOffset))->previousAddress;
 	if (!SlipTrackWorld_DosAddressToOffset(nextAddress, slotDrawBaseAddress, slotDrawBytes, &nextOffset) ||
-	    nextOffset + 8u > slotDrawBytes ||
+	    nextOffset + SLIP_TRACK_DRAW_LINKS_END > slotDrawBytes ||
 	    !SlipTrackWorld_DosAddressToOffset(prevAddress, slotDrawBaseAddress, slotDrawBytes, &prevOffset) ||
-	    prevOffset + 8u > slotDrawBytes) {
+	    prevOffset + SLIP_TRACK_DRAW_LINKS_END > slotDrawBytes) {
 		return false;
 	}
 	((SlipTrackDrawRecord *)(void *)(slotDrawBase + prevOffset))->nextAddress = nextAddress;
@@ -6811,14 +7053,15 @@ bool SlipTrackWorld_FreeSlotDrawRecord(uint8_t *slotDrawBase, size_t slotDrawByt
 		ownerSlotNextAddress = slotDrawBaseAddress;
 	}
 	ownerSlotOffsetWord = (uint16_t)(ownerSlotNextAddress - slotDrawBaseAddress);
-	SlipTrackWorld_WriteLE16(trdBase + ownerOffset + 0x10u, ownerSlotOffsetWord);
+	SlipTrackWorld_WriteLE16(trdBase + ownerOffset + offsetof(SlipTrackSectionDrawLinks, firstDrawOffset),
+	                         ownerSlotOffsetWord);
 	if (!SlipTrackWorld_DosAddressToOffset(freeListAddress, slotDrawBaseAddress, slotDrawBytes, &freeListOffset) ||
-	    freeListOffset + 8u > slotDrawBytes) {
+	    freeListOffset + SLIP_TRACK_DRAW_LINKS_END > slotDrawBytes) {
 		return false;
 	}
 	freeNextAddress = ((const SlipTrackDrawRecord *)(const void *)(slotDrawBase + freeListOffset))->nextAddress;
 	if (!SlipTrackWorld_DosAddressToOffset(freeNextAddress, slotDrawBaseAddress, slotDrawBytes, &freeNextOffset) ||
-	    freeNextOffset + 8u > slotDrawBytes) {
+	    freeNextOffset + SLIP_TRACK_DRAW_LINKS_END > slotDrawBytes) {
 		return false;
 	}
 	((SlipTrackDrawRecord *)(void *)(slotDrawBase + freeListOffset))->nextAddress = drawRecordAddress;
@@ -6857,7 +7100,7 @@ bool SlipTrackWorld_ClearOwnerDrawLinks(uint16_t trackHandle, uint8_t *slotDrawB
 	if (trackHandle == 0) {
 		return true;
 	}
-	if (slotListEntry == 0 || slotListEntryBytes < 0xd0u) {
+	if (slotListEntry == 0 || slotListEntryBytes < SLIP_TRACK_SLOT_DRAW_ADDRESSES_END) {
 		return false;
 	}
 	SlipTrackSlotRecord *const slot = (SlipTrackSlotRecord *)(void *)slotListEntry;
@@ -6906,7 +7149,7 @@ bool SlipTrackWorld_SelectSlotListEntry(uint32_t callerValue, uint32_t slotListB
 		result->skippedNoSlotList = true;
 		return true;
 	}
-	if (objectTableBase == 0 || (size_t)objectOffset + 0x10u > objectTableBytes) {
+	if (objectTableBase == 0 || (size_t)objectOffset + SLIP_OBJECT_DOS_TRACK_SLOT_END > objectTableBytes) {
 		return false;
 	}
 	slotOffset = objectTableBase[objectOffset / SLIP_OBJECT_DOS_STRIDE].trackSlotOffset;
@@ -6945,19 +7188,20 @@ const uint8_t *SlipTrackWorld_GetCurrentName(uint32_t currentToken, uint16_t obj
 	if (!SlipTrackWorld_UpdateSlotRecord(slot, objectTable, objectTableBytes, trdBase, trackDataSize, trdBaseAddress,
 	                                     componentBase, componentBaseBytes, componentBaseAddress, table, tableBytes))
 		return NULL;
-	recordOffset = SlipBytes_ReadLE32(slot + 0xd0u) - trdBaseAddress;
-	if ((size_t)recordOffset > trackDataSize || trackDataSize - recordOffset < 4u)
+	recordOffset = SlipBytes_ReadLE32(slot + offsetof(SlipTrackSlotRecord, currentTrackRecordAddress)) - trdBaseAddress;
+	if ((size_t)recordOffset > trackDataSize || trackDataSize - recordOffset < SLIP_TRD_SECTION_COMPONENT_END)
 		return NULL;
 	record = trdBase + recordOffset;
-	componentOffset = SlipBytes_ReadLE16(record + 2u);
-	if ((size_t)componentOffset > componentBaseBytes || componentBaseBytes - componentOffset < 0x1au)
+	componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if ((size_t)componentOffset > componentBaseBytes ||
+	    componentBaseBytes - componentOffset < SLIP_TRC_COMPONENT_NAME_PRESENT_END)
 		return NULL;
 	component = componentBase + componentOffset;
-	if (SlipBytes_ReadLE16(component + 0x18u) == 0u)
+	if (SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_NAME_PRESENT_OFFSET) == 0u)
 		return NULL;
-	if (componentBaseBytes - componentOffset < 0x1eu)
+	if (componentBaseBytes - componentOffset < SLIP_TRC_COMPONENT_NAME_PREFIX_END)
 		return NULL;
-	return component + 0x1au;
+	return component + SLIP_TRC_COMPONENT_NAME_OFFSET;
 }
 
 void SlipTrackWorld_CurrentSlot(uint32_t currentToken, uint16_t objectOffset, uint8_t *slotListBase,
@@ -6980,7 +7224,7 @@ void SlipTrackWorld_CurrentSlot(uint32_t currentToken, uint16_t objectOffset, ui
 	SlipTrackWorld_UpdateSlotRecord(slot, objectTable, objectTableBytes, trdBase, trackDataSize, trdBaseAddress,
 	                                componentBase, componentBaseBytes, componentBaseAddress, table, tableBytes);
 	result->slotRecordAddress = select.slotAddress;
-	result->trackRecordAddress = SlipBytes_ReadLE32(slot + 0xd0u);
+	result->trackRecordAddress = SlipBytes_ReadLE32(slot + offsetof(SlipTrackSlotRecord, currentTrackRecordAddress));
 	result->carryOut = result->trackRecordAddress == currentComponentToken;
 }
 
@@ -7009,9 +7253,13 @@ uint32_t SlipTrackWorld_CurrentComponent(uint32_t currentToken, uint16_t objectO
 	return slot->currentTrackRecordAddress - trdBaseAddress;
 }
 
-uint16_t SlipTrackWorld_StartComponent(const uint8_t *trdBase) { return SlipBytes_ReadLE16(trdBase + 4u); }
+uint16_t SlipTrackWorld_StartComponent(const uint8_t *trdBase) {
+	return SlipBytes_ReadLE16(trdBase + SLIP_TRD_START_COMPONENT_OFFSET);
+}
 
-uint16_t SlipTrackWorld_PreviousComponent(const uint8_t *trdBase) { return SlipBytes_ReadLE16(trdBase + 6u); }
+uint16_t SlipTrackWorld_PreviousComponent(const uint8_t *trdBase) {
+	return SlipBytes_ReadLE16(trdBase + SLIP_TRD_PREVIOUS_COMPONENT_OFFSET);
+}
 
 uint32_t SlipTrackWorld_RaceProgress(uint16_t objectOffset, uint8_t *slotListBase, size_t slotListBytes,
                                      uint32_t slotListBaseAddress, const SlipObject *objectTable,
@@ -7041,58 +7289,60 @@ uint32_t SlipTrackWorld_RaceProgress(uint16_t objectOffset, uint8_t *slotListBas
 	const SlipTrackSlotRecord *const slot = (const SlipTrackSlotRecord *)(const void *)currentSlot;
 	trackRecordAddress = slot->currentTrackRecordAddress;
 	trackRecordOffset = trackRecordAddress - trdBaseAddress;
-	waypoint = trdBase + SlipBytes_ReadLE16(trdBase + trackRecordOffset + 0x1eu);
+	waypoint = trdBase + SlipBytes_ReadLE16(trdBase + trackRecordOffset + SLIP_TRD_SECTION_ROUTE_OFFSET);
 	SlipObject_Position(objectTable, objectTableBytes, objectOffset, &objectPosition);
-	SlipDraw3D_ApproxAbsVectorLength(objectPosition.positionX - SlipBytes_ReadLE32(waypoint + 0x0cu),
-	                                 objectPosition.positionY - SlipBytes_ReadLE32(waypoint + 0x10u),
-	                                 objectPosition.positionZ - SlipBytes_ReadLE32(waypoint + 0x14u), &distance);
-	return distance.approximateLength + SlipBytes_ReadLE32(waypoint + 0x24u);
+	SlipDraw3D_ApproxAbsVectorLength(
+	    objectPosition.positionX - SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_X_OFFSET),
+	    objectPosition.positionY - SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Y_OFFSET),
+	    objectPosition.positionZ - SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Z_OFFSET), &distance);
+	return distance.approximateLength + SlipBytes_ReadLE32(waypoint + SLIP_TRD_WAYPOINT_LAP_DISTANCE_OFFSET);
 }
 
 void SlipTrackWorld_SetLapDistance(uint8_t *trdBase) {
-	uint8_t *waypoint = trdBase + SlipBytes_ReadLE16(trdBase + 0x08u);
+	uint8_t *waypoint = trdBase + SlipBytes_ReadLE16(trdBase + SLIP_TRD_ROUTE_TABLE_OFFSET);
 	uint32_t waypointCount = SlipBytes_ReadLE16(waypoint);
 	uint8_t *firstWaypoint;
 
-	waypoint += 2u;
+	waypoint += SLIP_TRD_TABLE_COUNT_BYTES;
 	firstWaypoint = waypoint;
 	do {
 		uint8_t *const targetWaypoint = waypoint;
 		uint32_t lapDistance = 0;
 
 		while (waypoint != firstWaypoint) {
-			uint32_t previousX = SlipBytes_ReadLE32(waypoint + 0x0cu);
-			uint32_t previousY = SlipBytes_ReadLE32(waypoint + 0x10u);
-			uint32_t previousZ = SlipBytes_ReadLE32(waypoint + 0x14u);
+			uint32_t previousX = SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_X_OFFSET);
+			uint32_t previousY = SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Y_OFFSET);
+			uint32_t previousZ = SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Z_OFFSET);
 
-			if (SlipBytes_ReadLE16(waypoint + 0x04u) != 0) {
+			if (SlipBytes_ReadLE16(waypoint + SLIP_TRD_ROUTE_SECOND_LINK_OFFSET) != 0) {
 				uint8_t *const savedWaypoint = waypoint;
 				uint8_t *joinWaypoint;
 				uint32_t branchDistance = 0;
 				uint32_t forwardDistance = 0;
 
-				waypoint = trdBase + SlipBytes_ReadLE16(waypoint + 0x04u);
+				waypoint = trdBase + SlipBytes_ReadLE16(waypoint + SLIP_TRD_ROUTE_SECOND_LINK_OFFSET);
 				do {
-					branchDistance +=
-					    SlipView3D_VectorLength((int32_t)(SlipBytes_ReadLE32(waypoint + 0x0cu) - previousX),
-					                            (int32_t)(SlipBytes_ReadLE32(waypoint + 0x10u) - previousY),
-					                            (int32_t)(SlipBytes_ReadLE32(waypoint + 0x14u) - previousZ));
-					if ((SlipBytes_ReadLE16(waypoint + 0x04u) | SlipBytes_ReadLE16(waypoint)) == 0) {
+					branchDistance += SlipView3D_VectorLength(
+					    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_X_OFFSET) - previousX),
+					    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Y_OFFSET) - previousY),
+					    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Z_OFFSET) - previousZ));
+					if ((SlipBytes_ReadLE16(waypoint + SLIP_TRD_ROUTE_SECOND_LINK_OFFSET) |
+					     SlipBytes_ReadLE16(waypoint)) == 0) {
 						SlipRuntime_Fatal("TrackSetLapDist - fwd node not linked!");
 					}
 					waypoint = trdBase + SlipBytes_ReadLE16(waypoint);
-				} while (SlipBytes_ReadLE16(waypoint + 0x06u) == 0);
+				} while (SlipBytes_ReadLE16(waypoint + SLIP_TRD_ROUTE_LAP_JOIN_OFFSET) == 0);
 				joinWaypoint = waypoint;
 				waypoint = savedWaypoint;
 				do {
 					waypoint = trdBase + SlipBytes_ReadLE16(waypoint);
-					forwardDistance +=
-					    SlipView3D_VectorLength((int32_t)(SlipBytes_ReadLE32(waypoint + 0x0cu) - previousX),
-					                            (int32_t)(SlipBytes_ReadLE32(waypoint + 0x10u) - previousY),
-					                            (int32_t)(SlipBytes_ReadLE32(waypoint + 0x14u) - previousZ));
-					previousX = SlipBytes_ReadLE32(waypoint + 0x0cu);
-					previousY = SlipBytes_ReadLE32(waypoint + 0x10u);
-					previousZ = SlipBytes_ReadLE32(waypoint + 0x14u);
+					forwardDistance += SlipView3D_VectorLength(
+					    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_X_OFFSET) - previousX),
+					    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Y_OFFSET) - previousY),
+					    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Z_OFFSET) - previousZ));
+					previousX = SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_X_OFFSET);
+					previousY = SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Y_OFFSET);
+					previousZ = SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Z_OFFSET);
 				} while (waypoint != joinWaypoint);
 				lapDistance += branchDistance < forwardDistance ? branchDistance : forwardDistance;
 			} else {
@@ -7102,14 +7352,15 @@ void SlipTrackWorld_SetLapDistance(uint8_t *trdBase) {
 					break;
 				}
 				waypoint = trdBase + nextWaypoint;
-				lapDistance += SlipView3D_VectorLength((int32_t)(SlipBytes_ReadLE32(waypoint + 0x0cu) - previousX),
-				                                       (int32_t)(SlipBytes_ReadLE32(waypoint + 0x10u) - previousY),
-				                                       (int32_t)(SlipBytes_ReadLE32(waypoint + 0x14u) - previousZ));
+				lapDistance += SlipView3D_VectorLength(
+				    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_X_OFFSET) - previousX),
+				    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Y_OFFSET) - previousY),
+				    (int32_t)(SlipBytes_ReadLE32(waypoint + SLIP_TRD_POSITION_Z_OFFSET) - previousZ));
 			}
 		}
 		waypoint = targetWaypoint;
-		SlipTrackWorld_WriteLE32(waypoint + 0x24u, lapDistance);
-		waypoint += 0x32u;
+		SlipTrackWorld_WriteLE32(waypoint + SLIP_TRD_WAYPOINT_LAP_DISTANCE_OFFSET, lapDistance);
+		waypoint += SLIP_TRD_ROUTE_RECORD_BYTES;
 	} while (--waypointCount != 0);
 }
 
@@ -7124,11 +7375,11 @@ uint32_t SlipTrackWorld_TotalLength(const uint8_t *trdBase) {
 	uint32_t previousY;
 	uint32_t previousZ;
 
-	currentOffset = (uint32_t)SlipBytes_ReadLE16(trdBase + 0x08u) + 2u;
+	currentOffset = (uint32_t)SlipBytes_ReadLE16(trdBase + SLIP_TRD_ROUTE_TABLE_OFFSET) + SLIP_TRD_TABLE_COUNT_BYTES;
 	firstOffset = currentOffset;
-	previousX = SlipBytes_ReadLE32(trdBase + currentOffset + 0x0cu);
-	previousY = SlipBytes_ReadLE32(trdBase + currentOffset + 0x10u);
-	previousZ = SlipBytes_ReadLE32(trdBase + currentOffset + 0x14u);
+	previousX = SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_X_OFFSET);
+	previousY = SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_Y_OFFSET);
+	previousZ = SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_Z_OFFSET);
 
 	for (;;) {
 		nextOffset = SlipBytes_ReadLE16(trdBase + currentOffset);
@@ -7136,20 +7387,23 @@ uint32_t SlipTrackWorld_TotalLength(const uint8_t *trdBase) {
 			return SlipTrackWorld_totalLength;
 		}
 		currentOffset = nextOffset;
-		SlipDraw3D_ApproxAbsVectorLength(SlipBytes_ReadLE32(trdBase + currentOffset + 0x0cu) - previousX,
-		                                 SlipBytes_ReadLE32(trdBase + currentOffset + 0x10u) - previousY,
-		                                 SlipBytes_ReadLE32(trdBase + currentOffset + 0x14u) - previousZ, &distance);
+		SlipDraw3D_ApproxAbsVectorLength(
+		    SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_X_OFFSET) - previousX,
+		    SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_Y_OFFSET) - previousY,
+		    SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_Z_OFFSET) - previousZ, &distance);
 		SlipTrackWorld_totalLength += distance.approximateLength;
-		previousX = SlipBytes_ReadLE32(trdBase + currentOffset + 0x0cu);
-		previousY = SlipBytes_ReadLE32(trdBase + currentOffset + 0x10u);
-		previousZ = SlipBytes_ReadLE32(trdBase + currentOffset + 0x14u);
+		previousX = SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_X_OFFSET);
+		previousY = SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_Y_OFFSET);
+		previousZ = SlipBytes_ReadLE32(trdBase + currentOffset + SLIP_TRD_POSITION_Z_OFFSET);
 		if (currentOffset == firstOffset) {
 			return SlipTrackWorld_totalLength;
 		}
 	}
 }
 
-uint32_t SlipTrackWorld_TrackFloor(const uint8_t *trkBase) { return SlipBytes_ReadLE32(trkBase + 0xacu); }
+uint32_t SlipTrackWorld_TrackFloor(const uint8_t *trkBase) {
+	return SlipBytes_ReadLE32(trkBase + SLIP_TRK_FLOOR_HEIGHT_OFFSET);
+}
 
 bool SlipTrackWorld_ExecuteObjectAttachmentDraw(const uint8_t *drawRecord, size_t recordBytesRemaining,
                                                 uint32_t callerValue, const uint8_t *slotListBase, size_t slotListBytes,
@@ -7163,10 +7417,10 @@ bool SlipTrackWorld_ExecuteObjectAttachmentDraw(const uint8_t *drawRecord, size_
 	uint32_t cmpOffset;
 	uint32_t cmp;
 
-	if (drawRecord == 0 || result == 0 || recordBytesRemaining < 0x9cu) {
+	if (drawRecord == 0 || result == 0 || recordBytesRemaining < SLIP_TRACK_SLOT_DOOR_ADDRESS_END) {
 		return false;
 	}
-	objectOffset = SlipBytes_ReadLE32(drawRecord + 0x34u);
+	objectOffset = SlipBytes_ReadLE32(drawRecord + offsetof(SlipTrackDrawRecord, objectOffset));
 	currentObjectOffset = (uint16_t)objectOffset;
 	if (!SlipTrackWorld_SelectSlotListEntry(callerValue, slotListBaseAddress, objectTableBase, objectTableBytes,
 	                                        currentObjectOffset, &result->select)) {
@@ -7180,14 +7434,14 @@ bool SlipTrackWorld_ExecuteObjectAttachmentDraw(const uint8_t *drawRecord, size_
 		if (slotListBase == 0 ||
 		    !SlipTrackWorld_DosAddressToOffset(result->select.slotAddress, slotListBaseAddress, slotListBytes,
 		                                       &cmpOffset) ||
-		    cmpOffset + 0x9cu > slotListBytes) {
+		    cmpOffset + SLIP_TRACK_SLOT_DOOR_ADDRESS_END > slotListBytes) {
 			return false;
 		}
 		cmpBase = slotListBase + cmpOffset;
 		cmpAddress = result->select.slotAddress;
 		result->cmpUsesSlotListEntry = true;
 	}
-	cmp = SlipBytes_ReadLE32(cmpBase + 0x98u);
+	cmp = SlipBytes_ReadLE32(cmpBase + SLIP_TRACK_SLOT_DOOR_ADDRESS_OFFSET);
 	result->block = (SlipTrackWorldObjectAttachmentDraw){drawRecord,
 	                                                     true,
 	                                                     drawRecord,
@@ -7223,7 +7477,7 @@ bool SlipTrackWorld_ExecuteObjectAttachmentDraw(const uint8_t *drawRecord, size_
 	result->block.savedRecordForCallbackRead = true;
 	result->block.callObjectGetSlotDrawCallback = true;
 	result->block.savedDrawCallback = true;
-	result->block.schedulingCallbackAddress = 0x00037c93u;
+	result->block.schedulingCallbackAddress = SLIP_TRACK_WORLD_OBJECT_SCHEDULING_CALLBACK_TOKEN;
 	result->block.callInstallSchedulingCallback = true;
 	result->block.callDrawObject = true;
 	result->block.callDraw3DListTraverse = true;
@@ -7247,10 +7501,10 @@ bool SlipTrackWorld_ExecuteObjectCallbackDraw(const uint8_t *drawRecord, size_t 
 	uint32_t cmpOffset;
 	uint32_t cmp;
 
-	if (drawRecord == 0 || result == 0 || recordBytesRemaining < 0x9cu) {
+	if (drawRecord == 0 || result == 0 || recordBytesRemaining < SLIP_TRACK_SLOT_DOOR_ADDRESS_END) {
 		return false;
 	}
-	objectOffset = SlipBytes_ReadLE32(drawRecord + 0x34u);
+	objectOffset = SlipBytes_ReadLE32(drawRecord + offsetof(SlipTrackDrawRecord, objectOffset));
 	currentObjectOffset = (uint16_t)objectOffset;
 	if (!SlipTrackWorld_SelectSlotListEntry(callerValue, slotListBaseAddress, objectTableBase, objectTableBytes,
 	                                        currentObjectOffset, &result->select)) {
@@ -7264,14 +7518,14 @@ bool SlipTrackWorld_ExecuteObjectCallbackDraw(const uint8_t *drawRecord, size_t 
 		if (slotListBase == 0 ||
 		    !SlipTrackWorld_DosAddressToOffset(result->select.slotAddress, slotListBaseAddress, slotListBytes,
 		                                       &cmpOffset) ||
-		    cmpOffset + 0x9cu > slotListBytes) {
+		    cmpOffset + SLIP_TRACK_SLOT_DOOR_ADDRESS_END > slotListBytes) {
 			return false;
 		}
 		cmpBase = slotListBase + cmpOffset;
 		cmpAddress = result->select.slotAddress;
 		result->cmpUsesSlotListEntry = true;
 	}
-	cmp = SlipBytes_ReadLE32(cmpBase + 0x98u);
+	cmp = SlipBytes_ReadLE32(cmpBase + SLIP_TRACK_SLOT_DOOR_ADDRESS_OFFSET);
 	result->block = (SlipTrackWorldObjectCallbackDraw){drawRecord,
 	                                                   drawRecord,
 	                                                   objectOffset,
@@ -7302,7 +7556,7 @@ bool SlipTrackWorld_ExecuteObjectCallbackDraw(const uint8_t *drawRecord, size_t 
 	result->block.savedRecordForCallbackRead = true;
 	result->block.callObjectGetSlotDrawCallback = true;
 	result->block.savedDrawCallback = true;
-	result->block.schedulingCallbackAddress = 0x00037c93u;
+	result->block.schedulingCallbackAddress = SLIP_TRACK_WORLD_OBJECT_SCHEDULING_CALLBACK_TOKEN;
 	result->block.callInstallSchedulingCallback = true;
 	result->block.callDrawObject = true;
 	result->block.restoredDrawCallback = true;
@@ -7325,9 +7579,9 @@ bool SlipTrackWorld_BindSlotDraw(uint16_t requestedDrawCount, uint8_t *slotDrawB
 	if (slotDrawBase == 0 || result == 0) {
 		return false;
 	}
-	slotDrawCount = (uint16_t)(requestedDrawCount << 1);
+	slotDrawCount = (uint16_t)(requestedDrawCount * SLIP_TRACK_SLOT_DRAW_CAPACITY_MULTIPLIER);
 	drawCountWithSentinel = (uint16_t)(slotDrawCount + 1u);
-	allocationBytes = (uint32_t)drawCountWithSentinel * 0x38u;
+	allocationBytes = drawCountWithSentinel * sizeof(SlipTrackDrawRecord);
 	if (slotDrawCount == 0 || allocationBytes > slotDrawBytes) {
 		return false;
 	}
@@ -7338,7 +7592,7 @@ bool SlipTrackWorld_BindSlotDraw(uint16_t requestedDrawCount, uint8_t *slotDrawB
 	*result = (SlipTrackWorldSlotDrawInstall){requestedDrawCount,
 	                                          slotDrawCount,
 	                                          drawCountWithSentinel,
-	                                          0x38u,
+	                                          (uint32_t)sizeof(SlipTrackDrawRecord),
 	                                          allocationBytes,
 	                                          true,
 	                                          allocationHandle,
@@ -7366,14 +7620,14 @@ bool SlipTrackWorld_BindSlotList(uint16_t requestedSlotCount, uint8_t *slotListB
 	if (slotListBase == 0 || result == 0) {
 		return false;
 	}
-	countPlusEight = (uint32_t)requestedSlotCount + 8u;
-	countPlusTen = countPlusEight + 2u;
-	allocationBytes = countPlusTen * 0x118u;
+	countPlusEight = (uint32_t)requestedSlotCount + SLIP_TRACK_SLOT_SPARE_COUNT;
+	countPlusTen = countPlusEight + SLIP_TRACK_SLOT_SENTINEL_COUNT;
+	allocationBytes = countPlusTen * sizeof(SlipTrackSlotRecord);
 	if (countPlusEight == 0 || allocationBytes > slotListBytes) {
 		return false;
 	}
-	freeListOffset = 0x118u;
-	if (freeListOffset + 0xacu > slotListBytes) {
+	freeListOffset = sizeof(SlipTrackSlotRecord);
+	if (freeListOffset + SLIP_TRACK_SLOT_LINKS_END > slotListBytes) {
 		return false;
 	}
 	freeListAddress = slotListBaseAddress + freeListOffset;
@@ -7383,9 +7637,10 @@ bool SlipTrackWorld_BindSlotList(uint16_t requestedSlotCount, uint8_t *slotListB
 	currentOffset = freeListOffset;
 	hitVisitCapacity = false;
 	for (i = 0; i < (uint16_t)countPlusEight; ++i) {
-		const uint32_t nextOffset = currentOffset + 0x118u;
+		const uint32_t nextOffset = currentOffset + sizeof(SlipTrackSlotRecord);
 
-		if ((size_t)currentOffset + 0xa8u > slotListBytes || (size_t)nextOffset + 0xacu > slotListBytes) {
+		if ((size_t)currentOffset + SLIP_TRACK_SLOT_NEXT_ADDRESS_END > slotListBytes ||
+		    (size_t)nextOffset + SLIP_TRACK_SLOT_LINKS_END > slotListBytes) {
 			return false;
 		}
 		if (visits != 0 && i < visitCapacity) {
@@ -7404,7 +7659,7 @@ bool SlipTrackWorld_BindSlotList(uint16_t requestedSlotCount, uint8_t *slotListB
 	                                          countPlusEight,
 	                                          (uint16_t)countPlusEight,
 	                                          countPlusTen,
-	                                          0x118u,
+	                                          (uint32_t)sizeof(SlipTrackSlotRecord),
 	                                          allocationBytes,
 	                                          true,
 	                                          allocationHandle,
@@ -7438,9 +7693,9 @@ bool SlipTrackWorld_AllocSlotListEntry(uint8_t *slotListBase, size_t slotListByt
 		return false;
 	}
 	if (!SlipTrackWorld_DosAddressToOffset(activeListAddress, slotListBaseAddress, slotListBytes, &activeListOffset) ||
-	    activeListOffset + 0xacu > slotListBytes ||
+	    activeListOffset + SLIP_TRACK_SLOT_LINKS_END > slotListBytes ||
 	    !SlipTrackWorld_DosAddressToOffset(freeListAddress, slotListBaseAddress, slotListBytes, &freeListOffset) ||
-	    freeListOffset + 0xacu > slotListBytes) {
+	    freeListOffset + SLIP_TRACK_SLOT_LINKS_END > slotListBytes) {
 		return false;
 	}
 	SlipTrackSlotRecord *const freeHead = (SlipTrackSlotRecord *)(void *)(slotListBase + freeListOffset);
@@ -7456,19 +7711,19 @@ bool SlipTrackWorld_AllocSlotListEntry(uint8_t *slotListBase, size_t slotListByt
 		return true;
 	}
 	if (!SlipTrackWorld_DosAddressToOffset(allocatedAddress, slotListBaseAddress, slotListBytes, &allocatedOffset) ||
-	    allocatedOffset + 0xd4u > slotListBytes) {
+	    allocatedOffset + SLIP_TRACK_SLOT_CURRENT_RECORD_END > slotListBytes) {
 		return false;
 	}
 	SlipTrackSlotRecord *const slot = (SlipTrackSlotRecord *)(void *)(slotListBase + allocatedOffset);
 	nextFreeAddress = slot->nextSlotAddress;
 	if (!SlipTrackWorld_DosAddressToOffset(nextFreeAddress, slotListBaseAddress, slotListBytes, &nextFreeOffset) ||
-	    nextFreeOffset + 0xacu > slotListBytes) {
+	    nextFreeOffset + SLIP_TRACK_SLOT_LINKS_END > slotListBytes) {
 		return false;
 	}
 	SlipTrackSlotRecord *const activeHead = (SlipTrackSlotRecord *)(void *)(slotListBase + activeListOffset);
 	activeNextAddress = activeHead->nextSlotAddress;
 	if (!SlipTrackWorld_DosAddressToOffset(activeNextAddress, slotListBaseAddress, slotListBytes, &activeNextOffset) ||
-	    activeNextOffset + 0xacu > slotListBytes) {
+	    activeNextOffset + SLIP_TRACK_SLOT_LINKS_END > slotListBytes) {
 		return false;
 	}
 
@@ -7483,7 +7738,7 @@ bool SlipTrackWorld_AllocSlotListEntry(uint8_t *slotListBase, size_t slotListByt
 	slot->firstDrawAddress = 0;
 	slot->secondDrawAddress = 0;
 	slot->currentTrackRecordAddress = 0;
-	for (zeroIndex = 0; zeroIndex < 8u; ++zeroIndex) {
+	for (zeroIndex = 0; zeroIndex < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++zeroIndex) {
 		slot->cornerTrackRecords[zeroIndex] = 0;
 	}
 	result->allocatedOffset = allocatedOffset;
@@ -7492,7 +7747,7 @@ bool SlipTrackWorld_AllocSlotListEntry(uint8_t *slotListBase, size_t slotListByt
 	result->activeNextAddress = activeNextAddress;
 	result->activeNextOffset = activeNextOffset;
 	result->clearedTail = true;
-	result->zeroedDwords = 8u;
+	result->zeroedDwords = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	result->carry = false;
 	return true;
 }
@@ -7505,11 +7760,14 @@ bool SlipTrackWorld_ClearSlotDrawLinks(uint8_t *slotDrawBase, size_t slotDrawByt
 	if (slotDrawBase == 0 || result == 0 || slotDrawCount == 0) {
 		return false;
 	}
-	*result = (SlipTrackWorldSlotDrawClear){slotDrawCount, 0x38u, 0x38u, 0, false, true};
+	*result = (SlipTrackWorldSlotDrawClear){
+	    slotDrawCount, (uint32_t)sizeof(SlipTrackDrawRecord), (uint32_t)sizeof(SlipTrackDrawRecord), 0, false, true};
 	for (i = 0; i < slotDrawCount; ++i) {
-		const uint32_t clearOffset = 0x38u + (uint32_t)i * 0x38u + 0x24u;
+		const uint32_t clearOffset = (uint32_t)sizeof(SlipTrackDrawRecord) +
+		                             (uint32_t)i * (uint32_t)sizeof(SlipTrackDrawRecord) +
+		                             SLIP_TRACK_DRAW_ATTACHMENT_READY_OFFSET;
 
-		if ((size_t)clearOffset + 4u > slotDrawBytes) {
+		if ((size_t)clearOffset + sizeof(uint32_t) > slotDrawBytes) {
 			return false;
 		}
 		SlipTrackDrawRecord *const record = &((SlipTrackDrawRecord *)(void *)slotDrawBase)[i + 1u];
@@ -7613,7 +7871,8 @@ bool SlipTrackWorld_ScaledCallSetup(uint16_t lightMultiplierQ14, uint32_t ambien
 	                                          .ambientLightScaleQ14 = ambientLightScaleQ14,
 	                                          .ambientLightProduct = ambientLightProduct,
 	                                          .ambientLightWithPreservedHighWord =
-	                                              (ambientLightScaleQ14 & 0xffff0000u) | shiftedProductWord,
+	                                              (ambientLightScaleQ14 & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) |
+	                                              shiftedProductWord,
 	                                          .callDraw3DSetAmbientLight = true,
 	                                          .directLightScaleQ14 = directLightScaleQ14,
 	                                          .directLightProduct = directLightProduct,
@@ -7641,17 +7900,17 @@ bool SlipTrackWorld_RecordAdvance(const uint8_t *record, size_t recordBytesRemai
 	*result = (SlipTrackWorldRecordAdvance){.recordOffsetBefore = recordOffsetBefore,
 	                                        .savedCallbackValue = savedCallbackValue,
 	                                        .vertexDescriptor = descriptor,
-	                                        .wideIndices = (descriptor & 0x8000u) != 0,
+	                                        .wideIndices = (descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0,
 	                                        .restoredCallbackValue = savedCallbackValue};
-	if ((descriptor & 0x8000u) != 0) {
-		callbackValue &= 0x7fffu;
+	if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0) {
+		callbackValue &= SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK;
 		result->savedMultiplierState = true;
-		result->indexStride = 6u;
-		result->recordAdvanceBytes = (callbackValue * 6u) + 0x0cu;
+		result->indexStride = SLIP_TRC_TEXTURED_VERTEX_BYTES;
+		result->recordAdvanceBytes = (callbackValue * SLIP_TRC_TEXTURED_VERTEX_BYTES) + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		result->restoredMultiplierState = true;
 		result->branch = SLIP_TRACK_WORLD_RECORD_ADVANCE_BRANCH_HIGH_DESCRIPTOR;
 	} else {
-		result->recordAdvanceBytes = (callbackValue << 1u) + 0x0cu;
+		result->recordAdvanceBytes = (callbackValue * SLIP_SERIALIZED_INDEX_BYTES) + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		result->branch = SLIP_TRACK_WORLD_RECORD_ADVANCE_BRANCH_LOW_DESCRIPTOR;
 	}
 	result->recordOffsetAfter = recordOffsetBefore + (size_t)result->recordAdvanceBytes;
@@ -7669,11 +7928,12 @@ bool SlipTrackWorld_PrimitiveWalker(const uint8_t *component, size_t componentBy
 	size_t visitCount;
 	const uint8_t *record;
 
-	if (component == 0 || componentBase == 0 || result == 0 || componentBytesRemaining < 6u) {
+	if (component == 0 || componentBase == 0 || result == 0 ||
+	    componentBytesRemaining < SLIP_TRC_COMPONENT_PRIMITIVE_LIST_END) {
 		return false;
 	}
 	memset(result, 0, sizeof(*result));
-	childOffset = SlipBytes_ReadLE16(component + 0x04u);
+	childOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 	result->childOffset = childOffset;
 	result->childZeroBranch = childOffset == 0;
 	result->count = count;
@@ -7684,7 +7944,8 @@ bool SlipTrackWorld_PrimitiveWalker(const uint8_t *component, size_t componentBy
 	if (childOffset == 0 || count == 0) {
 		return true;
 	}
-	if ((size_t)childOffset > componentBaseBytes || componentBaseBytes - (size_t)childOffset < 2u) {
+	if ((size_t)childOffset > componentBaseBytes ||
+	    componentBaseBytes - (size_t)childOffset < SLIP_TRC_TABLE_COUNT_BYTES) {
 		return false;
 	}
 	listOffset = childOffset;
@@ -7708,44 +7969,44 @@ bool SlipTrackWorld_PrimitiveWalker(const uint8_t *component, size_t componentBy
 		uint16_t vertexCountAndFlags;
 		uint16_t materialIndex;
 
-		if (listOffset > componentBaseBytes || componentBaseBytes - listOffset < 0x0cu) {
+		if (listOffset > componentBaseBytes || componentBaseBytes - listOffset < SLIP_TRC_PRIMITIVE_HEADER_BYTES) {
 			return false;
 		}
 		record = componentBase + listOffset;
 		visit = visits + visitCount;
 		memset(visit, 0, sizeof(*visit));
-		flags = record[0x08u];
+		flags = record[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
 		visit->recordOffset = listOffset;
 		visit->remainingPrimitiveCount = remainingPrimitiveCount;
 		visit->flags = flags;
-		visit->skipOnFlags = (flags & 0x05u) != 0;
+		visit->skipOnFlags = (flags & SLIP_TRC_PRIMITIVE_WALK_SKIP_MASK) != 0;
 		if (!visit->skipOnFlags) {
-			materialIndex = SlipBytes_ReadLE16(record + 0x0au);
-			visit->materialIndexHighBitCleared = (materialIndex & 0x8000u) != 0;
+			materialIndex = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET);
+			visit->materialIndexHighBitCleared = (materialIndex & SLIP_TRC_PRIMITIVE_MATERIAL_UNRESOLVED) != 0;
 			if (visit->materialIndexHighBitCleared) {
 				materialIndex = 0;
 			}
 			visit->materialIndex = materialIndex;
 			vertexCountAndFlags = SlipBytes_ReadLE16(record);
-			materialFlags = record[0x09u];
+			materialFlags = record[SLIP_TRC_PRIMITIVE_MATERIAL_FLAGS_OFFSET];
 			visit->vertexCountAndFlags = vertexCountAndFlags;
-			visit->normalX = SlipBytes_ReadLE16(record + 0x02u);
-			visit->normalY = SlipBytes_ReadLE16(record + 0x04u);
-			visit->normalZ = SlipBytes_ReadLE16(record + 0x06u);
-			visit->indexStreamOffset = listOffset + 0x0cu;
+			visit->normalX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+			visit->normalY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+			visit->normalZ = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
+			visit->indexStreamOffset = listOffset + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 			visit->callPlaneVisible = true;
-			visit->specialPlaneFlag = (flags & 0x80u) != 0;
-			visit->callTrackWorldGlobalCarryGate = (flags & 0x80u) != 0;
-			visit->texturedPath = (vertexCountAndFlags & 0x8000u) != 0;
+			visit->specialPlaneFlag = (flags & SLIP_TRC_PRIMITIVE_SPECIAL_PLANE) != 0;
+			visit->callTrackWorldGlobalCarryGate = (flags & SLIP_TRC_PRIMITIVE_SPECIAL_PLANE) != 0;
+			visit->texturedPath = (vertexCountAndFlags & SLIP_TRC_PRIMITIVE_TEXTURED) != 0;
 			if (!visit->texturedPath) {
 				if (materialFlags == 0) {
 					visit->callSolidEmitWithoutMaterial = true;
-				} else if ((materialFlags & 0x80u) == 0) {
+				} else if ((materialFlags & SLIP_TRC_MATERIAL_EXTENDED) == 0) {
 					visit->callSolidEmitWithMaterial = true;
-					if ((flags & 0x02u) == 0) {
+					if ((flags & SLIP_TRC_PRIMITIVE_REPLAY_PLANE) == 0) {
 						visit->callMaterialDispatchRegular = true;
 					}
-				} else if ((flags & 0x02u) != 0) {
+				} else if ((flags & SLIP_TRC_PRIMITIVE_REPLAY_PLANE) != 0) {
 					visit->callPolygonStatusOptional = true;
 				} else {
 					visit->callPolygonStatusMaterial = true;
@@ -7779,16 +8040,16 @@ bool SlipTrackWorld_PrimitiveCallbackDispatch(
 	uint16_t materialIndex;
 	uint16_t vertexCountAndFlags;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x0cu) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRC_PRIMITIVE_HEADER_BYTES) {
 		return false;
 	}
 	memset(result, 0, sizeof(*result));
-	flags = record[0x08u];
-	callbackValueResult = (callbackValueEntry & 0xffffff00u) | flags;
+	flags = record[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
+	callbackValueResult = (callbackValueEntry & SLIP_TRACK_REGISTER_UPPER_BYTES_MASK) | flags;
 	result->callbackValueEntry = callbackValueEntry;
 	result->flags = flags;
 	result->callbackValueWithFlags = callbackValueResult;
-	result->skipOnFlags = (flags & 0x15u) != 0;
+	result->skipOnFlags = (flags & SLIP_TRC_PRIMITIVE_CALLBACK_SKIP_MASK) != 0;
 	result->ret = true;
 	if (result->skipOnFlags) {
 		result->returnStateKnown = true;
@@ -7796,20 +8057,20 @@ bool SlipTrackWorld_PrimitiveCallbackDispatch(
 		result->carryOut = false;
 		return true;
 	}
-	materialIndex = SlipBytes_ReadLE16(record + 0x0au);
-	result->materialIndexHighBitCleared = (materialIndex & 0x8000u) != 0;
+	materialIndex = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET);
+	result->materialIndexHighBitCleared = (materialIndex & SLIP_TRC_PRIMITIVE_MATERIAL_UNRESOLVED) != 0;
 	if (result->materialIndexHighBitCleared) {
 		materialIndex = 0;
 	}
 	result->materialIndex = materialIndex;
 	vertexCountAndFlags = SlipBytes_ReadLE16(record);
-	materialFlags = record[0x09u];
+	materialFlags = record[SLIP_TRC_PRIMITIVE_MATERIAL_FLAGS_OFFSET];
 	result->vertexCountAndFlags = vertexCountAndFlags;
-	result->normalX = SlipBytes_ReadLE16(record + 0x02u);
-	result->normalY = SlipBytes_ReadLE16(record + 0x04u);
-	result->normalZ = SlipBytes_ReadLE16(record + 0x06u);
-	result->indexStreamOffset = recordOffset + 0x0cu;
-	callbackValueResult = (callbackValueResult & 0xffff0000u) | result->normalX;
+	result->normalX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+	result->normalY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+	result->normalZ = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
+	result->indexStreamOffset = recordOffset + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
+	callbackValueResult = (callbackValueResult & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | result->normalX;
 	result->callbackValueWithNormalX = callbackValueResult;
 	result->callPlaneVisible = true;
 	result->planeVisibleCarry = planeVisibleCarry;
@@ -7819,8 +8080,8 @@ bool SlipTrackWorld_PrimitiveCallbackDispatch(
 		result->carryOut = true;
 		return true;
 	}
-	result->specialPlaneFlag = (flags & 0x80u) != 0;
-	result->callTrackWorldGlobalCarryGate = (flags & 0x80u) != 0;
+	result->specialPlaneFlag = (flags & SLIP_TRC_PRIMITIVE_SPECIAL_PLANE) != 0;
+	result->callTrackWorldGlobalCarryGate = (flags & SLIP_TRC_PRIMITIVE_SPECIAL_PLANE) != 0;
 	result->trackWorldGlobalCarryGateCarry = result->callTrackWorldGlobalCarryGate && trackWorldGlobalCarryGateCarry;
 	if (result->trackWorldGlobalCarryGateCarry) {
 		result->returnStateKnown = true;
@@ -7828,7 +8089,7 @@ bool SlipTrackWorld_PrimitiveCallbackDispatch(
 		result->carryOut = true;
 		return true;
 	}
-	result->texturedPath = (vertexCountAndFlags & 0x8000u) != 0;
+	result->texturedPath = (vertexCountAndFlags & SLIP_TRC_PRIMITIVE_TEXTURED) != 0;
 	if (result->texturedPath) {
 		result->pushIndexStream = true;
 		result->callMaterialFramePointer = true;
@@ -7851,9 +8112,9 @@ bool SlipTrackWorld_PrimitiveCallbackDispatch(
 				result->renderFlagsFrom = renderFlagsValue;
 				result->savedRenderFlags = renderFlagsValue;
 				if (result->depthGreaterThanNear) {
-					result->renderFlagsTo = renderFlagsValue | 0x20u;
+					result->renderFlagsTo = renderFlagsValue | SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
 				} else {
-					result->renderFlagsTo = renderFlagsValue & 0xffffffdfu;
+					result->renderFlagsTo = renderFlagsValue & ~SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
 				}
 				result->callRenderFlagsWrite = true;
 				result->restoredCallbackValueBeforeEmit = true;
@@ -7864,13 +8125,13 @@ bool SlipTrackWorld_PrimitiveCallbackDispatch(
 				result->restoreRenderFlags = true;
 				result->callRestoreRenderFlags = true;
 				result->returnStateKnown = true;
-				result->callbackValueResult = renderFlagsValue & 0xffffu;
+				result->callbackValueResult = renderFlagsValue & UINT16_MAX;
 				result->carryOut = false;
 				return true;
 			}
 		}
 	}
-	vertexCountAndFlags &= 0x7fffu;
+	vertexCountAndFlags &= SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK;
 	result->vertexCountAndFlags = vertexCountAndFlags;
 	if (materialFlags == 0) {
 		result->callSolidEmitWithoutMaterial = true;
@@ -7878,7 +8139,7 @@ bool SlipTrackWorld_PrimitiveCallbackDispatch(
 		result->returnStateKnown = true;
 		result->callbackValueResult = callbackValueResult;
 		result->carryOut = solidEmitCarry;
-	} else if ((materialFlags & 0x80u) == 0) {
+	} else if ((materialFlags & SLIP_TRC_MATERIAL_EXTENDED) == 0) {
 		result->callSolidEmitWithMaterial = true;
 		result->solidEmitCarry = solidEmitCarry;
 		if (solidEmitCarry) {
@@ -7924,12 +8185,14 @@ bool SlipTrackWorld_DirectCallbackLoop(const uint8_t *component, size_t componen
 	size_t i;
 	uint32_t callbackValue;
 
-	if (component == 0 || componentBytesRemaining < 6u || componentBase == 0 || visits == 0 || result == 0) {
+	if (component == 0 || componentBytesRemaining < SLIP_TRC_COMPONENT_PRIMITIVE_LIST_END || componentBase == 0 ||
+	    visits == 0 || result == 0) {
 		return false;
 	}
 
-	childOffset = SlipBytes_ReadLE16(component + 0x04u);
-	if ((size_t)childOffset > componentBaseBytes || componentBaseBytes - (size_t)childOffset < 2u) {
+	childOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
+	if ((size_t)childOffset > componentBaseBytes ||
+	    componentBaseBytes - (size_t)childOffset < SLIP_TRC_TABLE_COUNT_BYTES) {
 		return false;
 	}
 	recordOffset = childOffset;
@@ -8030,7 +8293,8 @@ bool SlipTrackWorld_ReplayList(uint16_t count, const uint8_t *list, size_t listB
 	if (count == 0) {
 		return true;
 	}
-	if (list == 0 || visits == 0 || visitCapacity < (size_t)count || listBytes < (size_t)count * 2u) {
+	if (list == 0 || visits == 0 || visitCapacity < (size_t)count ||
+	    listBytes < (size_t)count * SLIP_TRACK_REPLAY_OBJECT_OFFSET_BYTES) {
 		return false;
 	}
 	result->callGetDrawStateBeforeChunk = true;
@@ -8038,18 +8302,19 @@ bool SlipTrackWorld_ReplayList(uint16_t count, const uint8_t *list, size_t listB
 	result->drawStateIndexForChunk = drawStateIndexBeforeChunk + 1u;
 	result->callLoadDrawStateForChunk = true;
 	result->savedSourcePointer = true;
-	result->listAddress = 0x00033ef4u;
+	result->listAddress = SLIP_TRACK_WORLD_REPLAY_LIST_TOKEN;
 	result->visitCount = count;
 	remainingActors = count;
 	for (i = 0; i < (size_t)count; ++i) {
 		SlipTrackWorldReplayListVisit *const visit = visits + i;
 
-		*visit = (SlipTrackWorldReplayListVisit){.listOffset = i * 2u,
-		                                         .objectOffset = SlipBytes_ReadLE16(list + i * 2u),
-		                                         .callObjectDraw = true,
-		                                         .nextListOffset = i * 2u + 2u,
-		                                         .remainingObjectCount = (uint16_t)(remainingActors - 1u),
-		                                         .loop = remainingActors != 1u};
+		*visit = (SlipTrackWorldReplayListVisit){
+		    .listOffset = i * SLIP_TRACK_REPLAY_OBJECT_OFFSET_BYTES,
+		    .objectOffset = SlipBytes_ReadLE16(list + i * SLIP_TRACK_REPLAY_OBJECT_OFFSET_BYTES),
+		    .callObjectDraw = true,
+		    .nextListOffset = (i + 1u) * SLIP_TRACK_REPLAY_OBJECT_OFFSET_BYTES,
+		    .remainingObjectCount = (uint16_t)(remainingActors - 1u),
+		    .loop = remainingActors != 1u};
 		--remainingActors;
 	}
 	result->restoredSourcePointer = true;
@@ -8070,28 +8335,28 @@ bool SlipTrackWorld_OptionalRecord(const uint8_t *record, size_t recordBytesRema
 	uint8_t flags;
 	uint32_t pushedDword;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x10u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_DWORD_END) {
 		return false;
 	}
-	flags = record[0x08u];
+	flags = record[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
 	*result = (SlipTrackWorldOptionalRecord){.flags = flags,
-	                                         .optionalPlaneDisabled = (flags & 0x02u) == 0,
+	                                         .optionalPlaneDisabled = (flags & SLIP_TRC_PRIMITIVE_REPLAY_PLANE) == 0,
 	                                         .ret = true,
 	                                         .branch = SLIP_TRACK_WORLD_OPTIONAL_RECORD_BRANCH_SKIPPED};
-	if ((flags & 0x02u) == 0) {
+	if ((flags & SLIP_TRC_PRIMITIVE_REPLAY_PLANE) == 0) {
 		return true;
 	}
-	pushedDword = SlipBytes_ReadLE32(record + 0x0cu);
-	result->materialIndex = SlipBytes_ReadLE16(record + 0x0au);
+	pushedDword = SlipBytes_ReadLE32(record + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET);
+	result->materialIndex = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET);
 	result->callGetMaterialFrameAddress = true;
 	result->materialFrameAddress = materialFrameAddress;
 	result->materialFrameSource = materialFrameAddress;
 	result->savedRecordPointer = true;
 	result->pushedDword = pushedDword;
-	result->planeNormalX = SlipBytes_ReadLE16(record + 0x02u);
+	result->planeNormalX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
 	result->planeNormalY = planeNormalY;
 	result->planeNormalZ = planeNormalZ;
-	result->viewMatrixAddress = 0x00033d48u;
+	result->viewMatrixAddress = SLIP_TRACK_WORLD_CAMERA_MATRIX_TOKEN;
 	result->callTransformPlaneNormal = true;
 	result->transformedNormalX = transformedNormalX;
 	result->transformedNormalY = transformedNormalY;
@@ -8126,7 +8391,7 @@ bool SlipTrackWorld_ReplaySourceDispatch(const uint8_t *initialRecord, size_t re
                                          SlipTrackWorldReplaySourceDispatch *result) {
 	uint16_t offset;
 
-	if (initialRecord == 0 || result == 0 || recordBytesRemaining < 0x0eu) {
+	if (initialRecord == 0 || result == 0 || recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldReplaySourceDispatch){.savedSourcePointer = true,
@@ -8140,15 +8405,15 @@ bool SlipTrackWorld_ReplaySourceDispatch(const uint8_t *initialRecord, size_t re
 	                                               .restoredRecordAfterThirdExit = true,
 	                                               .restoredSourcePointer = true,
 	                                               .ret = true};
-	offset = SlipBytes_ReadLE16(initialRecord + 0x04u);
+	offset = SlipBytes_ReadLE16(initialRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
 	if (!SlipTrackWorld_ReplaySourceChild(offset, chunkBase, chunkBaseBytes, &result->firstExit)) {
 		return false;
 	}
-	offset = SlipBytes_ReadLE16(initialRecord + 0x08u);
+	offset = SlipBytes_ReadLE16(initialRecord + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET);
 	if (!SlipTrackWorld_ReplaySourceChild(offset, chunkBase, chunkBaseBytes, &result->secondExit)) {
 		return false;
 	}
-	offset = SlipBytes_ReadLE16(initialRecord + 0x0cu);
+	offset = SlipBytes_ReadLE16(initialRecord + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET);
 	if (!SlipTrackWorld_ReplaySourceChild(offset, chunkBase, chunkBaseBytes, &result->thirdExit)) {
 		return false;
 	}
@@ -8157,9 +8422,10 @@ bool SlipTrackWorld_ReplaySourceDispatch(const uint8_t *initialRecord, size_t re
 
 bool SlipTrackWorld_ReplaySourceScan(const uint8_t *record, size_t recordBytesRemaining, uint32_t objectBaseAddress,
                                      const uint8_t *objectBase, size_t objectBaseBytes, uint16_t initialCount,
-                                     uint16_t replayList[10], uint32_t *objectDrawCallbacks,
-                                     size_t objectDrawCallbackCount, SlipTrackWorldReplaySourceScanVisit *visits,
-                                     size_t visitCapacity, SlipTrackWorldReplaySourceScan *result) {
+                                     uint16_t replayList[SLIP_TRACK_REPLAY_OBJECT_CAPACITY],
+                                     uint32_t *objectDrawCallbacks, size_t objectDrawCallbackCount,
+                                     SlipTrackWorldReplaySourceScanVisit *visits, size_t visitCapacity,
+                                     SlipTrackWorldReplaySourceScan *result) {
 	uint16_t objectListOffset;
 	size_t firstNodeOffset;
 	size_t nodeOffset;
@@ -8168,10 +8434,11 @@ bool SlipTrackWorld_ReplaySourceScan(const uint8_t *record, size_t recordBytesRe
 	uint16_t count;
 	size_t visitCount;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x12u || initialCount > 10u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRD_SECTION_DRAW_LIST_END ||
+	    initialCount > SLIP_TRACK_REPLAY_OBJECT_CAPACITY) {
 		return false;
 	}
-	objectListOffset = SlipBytes_ReadLE16(record + 0x10u);
+	objectListOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_DRAW_LIST_OFFSET);
 	*result = (SlipTrackWorldReplaySourceScan){.savedRecordPointer = true,
 	                                           .objectListOffset = objectListOffset,
 	                                           .finalCount = initialCount,
@@ -8184,7 +8451,8 @@ bool SlipTrackWorld_ReplaySourceScan(const uint8_t *record, size_t recordBytesRe
 		return true;
 	}
 	if (objectBase == 0 || replayList == 0 || objectDrawCallbacks == 0 || visits == 0 ||
-	    (size_t)objectListOffset > objectBaseBytes || objectBaseBytes - (size_t)objectListOffset < 0x38u) {
+	    (size_t)objectListOffset > objectBaseBytes ||
+	    objectBaseBytes - (size_t)objectListOffset < sizeof(SlipTrackDrawRecord)) {
 		return false;
 	}
 	firstNodeOffset = objectListOffset;
@@ -8204,12 +8472,12 @@ bool SlipTrackWorld_ReplaySourceScan(const uint8_t *record, size_t recordBytesRe
 		if (visitCount >= visitCapacity || visitCount >= objectDrawCallbackCount) {
 			return false;
 		}
-		if (nodeOffset > objectBaseBytes || objectBaseBytes - nodeOffset < 0x38u) {
+		if (nodeOffset > objectBaseBytes || objectBaseBytes - nodeOffset < sizeof(SlipTrackDrawRecord)) {
 			return false;
 		}
 		node = objectBase + nodeOffset;
 		visit = visits + visitCount;
-		objectOffset = (uint16_t)SlipBytes_ReadLE32(node + 0x34u);
+		objectOffset = (uint16_t)SlipBytes_ReadLE32(node + offsetof(SlipTrackDrawRecord, objectOffset));
 		*visit = (SlipTrackWorldReplaySourceScanVisit){.nodeOffset = nodeOffset,
 		                                               .nodeAddress = nodeAddress,
 		                                               .objectOffset = objectOffset,
@@ -8222,7 +8490,7 @@ bool SlipTrackWorld_ReplaySourceScan(const uint8_t *record, size_t recordBytesRe
 		if (visit->testedObjectDrawCallback == 0) {
 			visit->branch = SLIP_TRACK_WORLD_REPLAY_SOURCE_SCAN_VISIT_BRANCH_ZERO_EAX_AFTER_MOV;
 		} else {
-			if (count == 10u) {
+			if (count == SLIP_TRACK_REPLAY_OBJECT_CAPACITY) {
 				visit->listFull = true;
 				visit->branch = SLIP_TRACK_WORLD_REPLAY_SOURCE_SCAN_VISIT_BRANCH_LIST_FULL;
 				++visitCount;
@@ -8239,7 +8507,7 @@ bool SlipTrackWorld_ReplaySourceScan(const uint8_t *record, size_t recordBytesRe
 			if (duplicate) {
 				visit->branch = SLIP_TRACK_WORLD_REPLAY_SOURCE_SCAN_VISIT_BRANCH_DUPLICATE;
 			} else {
-				visit->listStoreOffset = (size_t)count * 2u;
+				visit->listStoreOffset = (size_t)count * sizeof(replayList[0]);
 				replayList[count] = objectOffset;
 				count = (uint16_t)(count + 1u);
 				visit->countAfter = count;
@@ -8290,7 +8558,7 @@ bool SlipTrackWorld_MaterialHandler(uint32_t perspectiveDepth, uint16_t positive
 		return false;
 	}
 	*result = (SlipTrackWorldMaterialHandler){.perspectiveDepth = perspectiveDepth, .ret = true};
-	if ((int32_t)perspectiveDepth > 0x0017d400) {
+	if ((int32_t)perspectiveDepth > SLIP_TRACK_MATERIAL_HANDLER_MAXIMUM_DEPTH) {
 		result->thresholdReturn = true;
 		result->branch = SLIP_TRACK_WORLD_MATERIAL_HANDLER_BRANCH_THRESHOLD_RET;
 		return true;
@@ -8298,10 +8566,10 @@ bool SlipTrackWorld_MaterialHandler(uint32_t perspectiveDepth, uint16_t positive
 	result->positiveShadeOffset = 1u;
 	result->callReadPositiveShade = true;
 	result->positiveShade = positiveShade;
-	result->negativeShadeOffset = 0xffffffffu;
+	result->negativeShadeOffset = UINT32_MAX;
 	result->callReadNegativeShade = true;
 	result->negativeShade = negativeShade;
-	result->polygonIndicesAddress = 0x0003fdf2u;
+	result->polygonIndicesAddress = SLIP_TRACK_WORLD_POLYGON_INDICES_TOKEN;
 	result->callBuildMaterialPolygon = true;
 	result->materialPolygonCarry = carryFrom;
 	if (carryFrom) {
@@ -8313,16 +8581,16 @@ bool SlipTrackWorld_MaterialHandler(uint32_t perspectiveDepth, uint16_t positive
 	}
 	shadeEntryCount = SlipBytes_ReadLE16(list);
 	if (shadeEntryCount == 0 || visitCapacity < (size_t)shadeEntryCount ||
-	    listBytes - 2u < (size_t)shadeEntryCount * 6u) {
+	    listBytes - 2u < (size_t)shadeEntryCount * SLIP_TRACK_SHADE_ENTRY_BYTES) {
 		return false;
 	}
-	result->shadeEntriesAddress = 0x0003fd90u;
+	result->shadeEntriesAddress = SLIP_TRACK_WORLD_SHADE_ENTRIES_TOKEN;
 	result->shadeEntryCount = shadeEntryCount;
 	entryOffset = 2u;
 	visitCount = 0;
 	while (shadeEntryCount != 0) {
 		SlipTrackWorldMaterialHandlerVisit *const visit = visits + visitCount;
-		const uint16_t selector = SlipBytes_ReadLE16(list + entryOffset + 4u);
+		const uint16_t selector = SlipBytes_ReadLE16(list + entryOffset + SLIP_TRACK_SHADE_SELECTOR_OFFSET);
 
 		*visit = (SlipTrackWorldMaterialHandlerVisit){.entryOffset = entryOffset,
 		                                              .remainingBefore = shadeEntryCount,
@@ -8331,10 +8599,10 @@ bool SlipTrackWorld_MaterialHandler(uint32_t perspectiveDepth, uint16_t positive
 		                                              .selectedShade =
 		                                                  selector == 0 ? result->positiveShade : result->negativeShade,
 		                                              .callShadeEmit = true,
-		                                              .nextEntryOffset = entryOffset + 6u,
+		                                              .nextEntryOffset = entryOffset + SLIP_TRACK_SHADE_ENTRY_BYTES,
 		                                              .remainingAfter = (uint16_t)(shadeEntryCount - 1u),
 		                                              .loop = (uint16_t)(shadeEntryCount - 1u) != 0};
-		entryOffset += 6u;
+		entryOffset += SLIP_TRACK_SHADE_ENTRY_BYTES;
 		shadeEntryCount = (uint16_t)(shadeEntryCount - 1u);
 		++visitCount;
 	}
@@ -8373,7 +8641,7 @@ static void SlipTrackWorld_ReplaySourceScanInternal(const uint8_t *record, SlipT
 	    track_world_actorObjectTable == NULL) {
 		return;
 	}
-	objectListOffset = SlipBytes_ReadLE16(record + 0x10u);
+	objectListOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_DRAW_LIST_OFFSET);
 	if (objectListOffset == 0) {
 		return;
 	}
@@ -8390,15 +8658,15 @@ static void SlipTrackWorld_ReplaySourceScanInternal(const uint8_t *record, SlipT
 			return;
 		}
 		nodeOffset = nodeAddress - track_world_actorSlotDrawBaseAddress;
-		if ((size_t)nodeOffset + 0x38u > track_world_actorSlotDrawBytes) {
+		if ((size_t)nodeOffset + sizeof(SlipTrackDrawRecord) > track_world_actorSlotDrawBytes) {
 			return;
 		}
 		node = track_world_actorSlotDrawBase + nodeOffset;
-		objectOffset = (uint16_t)SlipBytes_ReadLE32(node + 0x34u);
+		objectOffset = (uint16_t)SlipBytes_ReadLE32(node + offsetof(SlipTrackDrawRecord, objectOffset));
 		if ((size_t)objectOffset + SLIP_OBJECT_DOS_STRIDE <= track_world_actorObjectTableBytes) {
 			object = &track_world_actorObjectTable[objectOffset / SLIP_OBJECT_DOS_STRIDE];
 			if (object->drawCallback != NULL) {
-				if (result->replayCount == 10u) {
+				if (result->replayCount == SLIP_TRACK_REPLAY_OBJECT_CAPACITY) {
 					return;
 				}
 				for (replayIndex = 0; replayIndex < result->replayCount; ++replayIndex) {
@@ -8419,14 +8687,16 @@ static void SlipTrackWorld_ReplayListBuild(const uint8_t *record, size_t recordB
                                            SlipTrackWorldComponentSetup *result) {
 	uint32_t linkIndex;
 
-	if (track_world_actorTrdBase == NULL || record == NULL || result == NULL || recordBytesRemaining < 0x12u) {
+	if (track_world_actorTrdBase == NULL || record == NULL || result == NULL ||
+	    recordBytesRemaining < SLIP_TRD_SECTION_DRAW_LIST_END) {
 		return;
 	}
 	SlipTrackWorld_ReplaySourceScanInternal(record, result);
-	for (linkIndex = 0x04u; linkIndex <= 0x0cu; linkIndex += 0x04u) {
+	for (linkIndex = SLIP_TRD_SECTION_FIRST_EXIT_OFFSET; linkIndex <= SLIP_TRD_SECTION_THIRD_EXIT_OFFSET;
+	     linkIndex += SLIP_TRD_SECTION_EXIT_BYTES) {
 		const uint16_t childOffset = SlipBytes_ReadLE16(record + linkIndex);
 
-		if (childOffset != 0 && (size_t)childOffset + 0x12u <= track_world_actorTrdBytes) {
+		if (childOffset != 0 && (size_t)childOffset + SLIP_TRD_SECTION_DRAW_LIST_END <= track_world_actorTrdBytes) {
 			SlipTrackWorld_ReplaySourceScanInternal(track_world_actorTrdBase + childOffset, result);
 		}
 	}
@@ -8446,7 +8716,7 @@ bool SlipTrackWorld_ComponentSetup(const uint8_t *currentRecord, size_t recordBy
 	uint32_t y;
 	SlipTrackWorldDrawFlags drawFlags;
 
-	if (currentRecord == 0 || result == 0 || recordBytesRemaining < 0x22u) {
+	if (currentRecord == 0 || result == 0 || recordBytesRemaining < SLIP_TRD_SECTION_BYTES) {
 		return false;
 	}
 	currentComponentViewZ = componentViewZ;
@@ -8457,7 +8727,7 @@ bool SlipTrackWorld_ComponentSetup(const uint8_t *currentRecord, size_t recordBy
 
 	if (refuel)
 		refuel->build(refuel->context, currentRecord, incomingValue, &drawFlags, &globalAfter);
-	recordShade = SlipBytes_ReadLE16(currentRecord + 0x20u);
+	recordShade = SlipBytes_ReadLE16(currentRecord + SLIP_TRD_SECTION_SHADE_OFFSET);
 	*result = (SlipTrackWorldComponentSetup){currentComponentViewZ,
 	                                         true,
 	                                         drawFlags,
@@ -8481,8 +8751,6 @@ bool SlipTrackWorld_ComponentSetup(const uint8_t *currentRecord, size_t recordBy
 	if (currentRecord == specialRecord && globalAfter != 0) {
 		uint16_t randomShade = refuel ? refuel->random(refuel->context) : SlipTrackWorld_RandomStep(randomState);
 
-		enum { SLIP_REFUEL_SHADE_MASK = 0x3fffu };
-
 		randomShade &= SLIP_REFUEL_SHADE_MASK;
 		recordShade = randomShade;
 		result->specialRecord = true;
@@ -8490,7 +8758,7 @@ bool SlipTrackWorld_ComponentSetup(const uint8_t *currentRecord, size_t recordBy
 		result->randomShade = randomShade;
 	}
 	result->shade = recordShade;
-	attachmentListOffset = SlipBytes_ReadLE16(currentRecord + 0x10u);
+	attachmentListOffset = SlipBytes_ReadLE16(currentRecord + SLIP_TRD_SECTION_DRAW_LIST_OFFSET);
 	result->attachmentListOffset = attachmentListOffset;
 	result->replayCount = 0;
 	if (shadows != 0) {
@@ -8498,9 +8766,9 @@ bool SlipTrackWorld_ComponentSetup(const uint8_t *currentRecord, size_t recordBy
 
 		SlipTrackWorld_ReplayListBuild(currentRecord, recordBytesRemaining, result);
 	}
-	x = SlipBytes_ReadLE32(currentRecord + 0x12u);
-	y = SlipBytes_ReadLE32(currentRecord + 0x16u);
-	currentComponentViewZ = SlipBytes_ReadLE32(currentRecord + 0x1au);
+	x = SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_X_OFFSET);
+	y = SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET);
+	currentComponentViewZ = SlipBytes_ReadLE32(currentRecord + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET);
 	result->objectWorldPosition = (SlipView3DVec32){(int32_t)x, (int32_t)y, (int32_t)currentComponentViewZ};
 	return true;
 }
@@ -8517,11 +8785,12 @@ bool SlipTrackWorld_ComponentTail(const uint8_t *component, size_t componentByte
 	uint16_t nestedOffset;
 	uint32_t currentDrawStateIndexBefore;
 
-	if (component == 0 || componentBase == 0 || visitCount == 0 || result == 0 || componentBytesRemaining < 4u) {
+	if (component == 0 || componentBase == 0 || visitCount == 0 || result == 0 ||
+	    componentBytesRemaining < SLIP_TRC_COMPONENT_POINT_LIST_END) {
 		return false;
 	}
 	*visitCount = 0;
-	childOffset = SlipBytes_ReadLE16(component + 0x02u);
+	childOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_POINT_LIST_OFFSET);
 	memset(result, 0, sizeof(*result));
 	result->childOffset = childOffset;
 	result->noChildList = childOffset == 0;
@@ -8537,7 +8806,8 @@ bool SlipTrackWorld_ComponentTail(const uint8_t *component, size_t componentByte
 		const uint8_t *childRecord;
 		uint16_t vertexCount;
 
-		if ((size_t)childOffset > componentBaseBytes || componentBaseBytes - (size_t)childOffset < 2u) {
+		if ((size_t)childOffset > componentBaseBytes ||
+		    componentBaseBytes - (size_t)childOffset < SLIP_TRC_TABLE_COUNT_BYTES) {
 			return false;
 		}
 		childRecord = componentBase + childOffset;
@@ -8546,8 +8816,8 @@ bool SlipTrackWorld_ComponentTail(const uint8_t *component, size_t componentByte
 		result->childRecord = childRecord;
 		result->vertexCount = vertexCount;
 		result->savedComponentForVertexBuild = true;
-		result->vertexSource = childRecord + 2u;
-		result->vertexSourceStride = 6u;
+		result->vertexSource = childRecord + SLIP_TRC_TABLE_COUNT_BYTES;
+		result->vertexSourceStride = SLIP_TRC_POINT_BYTES;
 		result->callBuildVertexRecords = true;
 		result->restoredComponentAfterVertexBuild = true;
 		result->shade = shade;
@@ -8573,23 +8843,24 @@ bool SlipTrackWorld_ComponentTail(const uint8_t *component, size_t componentByte
 		result->callDraw3DSetLightVector = true;
 		result->renderContextCount = renderContextCount;
 		if (renderContextCount != 0) {
-			if (componentBytesRemaining < 8u) {
+			if (componentBytesRemaining < SLIP_TRC_COMPONENT_LINK_HEADER_BYTES) {
 				return false;
 			}
-			nestedOffset = SlipBytes_ReadLE16(component + 0x06u);
+			nestedOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_NESTED_LIST_OFFSET);
 			result->nestedOffset = nestedOffset;
 			if (nestedOffset != 0) {
 				const uint8_t *primitiveRecord;
 				uint16_t loopCount;
 
-				if ((size_t)nestedOffset > componentBaseBytes || componentBaseBytes - (size_t)nestedOffset < 2u) {
+				if ((size_t)nestedOffset > componentBaseBytes ||
+				    componentBaseBytes - (size_t)nestedOffset < SLIP_TRC_TABLE_COUNT_BYTES) {
 					return false;
 				}
 				result->savedComponentForNestedList = true;
 				result->nestedList = componentBase + nestedOffset;
 				loopCount = SlipBytes_ReadLE16(result->nestedList);
 				result->loopCount = loopCount;
-				primitiveRecord = result->nestedList + 2u;
+				primitiveRecord = result->nestedList + SLIP_TRC_TABLE_COUNT_BYTES;
 				while (loopCount != 0) {
 					SlipTrackWorldComponentTailVisit visit;
 
@@ -8612,11 +8883,14 @@ bool SlipTrackWorld_ComponentTail(const uint8_t *component, size_t componentByte
 					}
 					visit.descriptor = SlipBytes_ReadLE16(primitiveRecord);
 					visit.readAdvance = true;
-					visit.highBit = (visit.descriptor & 0x8000u) != 0;
+					visit.highBit = (visit.descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0;
 					if (visit.highBit) {
-						visit.advance = ((uint32_t)(visit.descriptor & 0x7fffu) * 6u) + 0x0cu;
+						visit.advance = ((uint32_t)(visit.descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) *
+						                 SLIP_TRC_TEXTURED_VERTEX_BYTES) +
+						                SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 					} else {
-						visit.advance = ((uint32_t)visit.descriptor << 1u) + 0x0cu;
+						visit.advance = ((uint32_t)visit.descriptor * SLIP_SERIALIZED_INDEX_BYTES) +
+						                SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 					}
 					visits[*visitCount - 1u] = visit;
 					primitiveRecord += visit.advance;
@@ -8634,12 +8908,15 @@ bool SlipTrackWorld_ComponentTail(const uint8_t *component, size_t componentByte
 
 bool SlipTrackWorld_ClearListHeads(uint8_t *objectList, size_t objectListBytes, uint8_t *deferredList,
                                    size_t deferredListBytes, SlipTrackWorldListHeadClear *result) {
-	if (objectList == 0 || deferredList == 0 || result == 0 || objectListBytes < 4u || deferredListBytes < 4u) {
+	if (objectList == 0 || deferredList == 0 || result == 0 ||
+	    objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES ||
+	    deferredListBytes < SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES) {
 		return false;
 	}
 	SlipTrackWorld_WriteLE32(objectList, 0);
 	SlipTrackWorld_WriteLE32(deferredList, 0);
-	*result = (SlipTrackWorldListHeadClear){objectList, true, objectList + 4u, deferredList, true};
+	*result = (SlipTrackWorldListHeadClear){objectList, true, objectList + SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES,
+	                                        deferredList, true};
 	return true;
 }
 
@@ -8709,7 +8986,7 @@ bool SlipTrackWorld_ListSetup(uint8_t *objectList, size_t objectListBytes, uint3
 	                                    false,
 	                                    {0},
 	                                    SLIP_TRACK_WORLD_LIST_SETUP_BRANCH_INITIALIZED};
-	if (frameRenderFlags == 0xffffffffu) {
+	if (frameRenderFlags == UINT32_MAX) {
 
 		result->primaryLeft = viewportMinX;
 		result->primaryTop = viewportMinY;
@@ -8753,7 +9030,7 @@ bool SlipTrackWorld_ListSetup(uint8_t *objectList, size_t objectListBytes, uint3
 	result->primaryRight = viewportMaxX;
 	result->primaryBottom = viewportMaxY;
 	result->renderContextCount = 1u;
-	result->componentMask = 0xffffu;
+	result->componentMask = UINT16_MAX;
 
 	if (traversalContext != NULL) {
 		if (traversalContext->primaryLeft != NULL) {
@@ -8926,14 +9203,16 @@ bool SlipTrackWorld_ObjectSelect(const uint8_t *searchedRecord, size_t recordByt
 		result->defaultTraversalGate = 0;
 		return true;
 	}
-	if (recordBytesRemaining < 0x0eu) {
+	if (recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 		return false;
 	}
-	firstRelatedOffset = SlipBytes_ReadLE16(searchedRecord + 0x04u);
+	firstRelatedOffset = SlipBytes_ReadLE16(searchedRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
 	result->firstRelatedOffset = firstRelatedOffset;
-	firstRelatedOffset = (uint16_t)(firstRelatedOffset | SlipBytes_ReadLE16(searchedRecord + 0x08u));
+	firstRelatedOffset =
+	    (uint16_t)(firstRelatedOffset | SlipBytes_ReadLE16(searchedRecord + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET));
 	result->firstTwoRelatedOffsets = firstRelatedOffset;
-	firstRelatedOffset = (uint16_t)(firstRelatedOffset | SlipBytes_ReadLE16(searchedRecord + 0x0cu));
+	firstRelatedOffset =
+	    (uint16_t)(firstRelatedOffset | SlipBytes_ReadLE16(searchedRecord + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET));
 	result->relatedOffsets = firstRelatedOffset;
 	if (firstRelatedOffset == 0) {
 		result->noRelatedRecords = true;
@@ -8942,21 +9221,22 @@ bool SlipTrackWorld_ObjectSelect(const uint8_t *searchedRecord, size_t recordByt
 	if (componentBase == 0) {
 		return false;
 	}
-	componentOffset = SlipBytes_ReadLE16(searchedRecord + 0x02u);
-	if ((size_t)componentOffset > componentBaseBytes || componentBaseBytes - (size_t)componentOffset < 0x18u) {
+	componentOffset = SlipBytes_ReadLE16(searchedRecord + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if ((size_t)componentOffset > componentBaseBytes ||
+	    componentBaseBytes - (size_t)componentOffset < SLIP_TRC_COMPONENT_FLAGS_END) {
 		return false;
 	}
 	component = componentBase + componentOffset;
 	result->renderContextCount = 0;
-	result->primaryLeft = 0x00007fffu;
-	result->primaryTop = 0x00007fffu;
-	result->primaryRight = 0xffff9000u;
-	result->primaryBottom = 0xffff9000u;
+	result->primaryLeft = INT16_MAX;
+	result->primaryTop = INT16_MAX;
+	result->primaryRight = SLIP_DRAW3D_ACTIVE_BOUNDS_MAXIMUM_INITIAL;
+	result->primaryBottom = SLIP_DRAW3D_ACTIVE_BOUNDS_MAXIMUM_INITIAL;
 	result->selectedRecord = searchedRecord;
 	result->componentOffset = componentOffset;
 	result->componentRecord = component;
-	result->componentFlags = SlipBytes_ReadLE16(component + 0x16u);
-	result->componentMask = (uint16_t)(result->componentFlags & 0x5fu);
+	result->componentFlags = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_FLAGS_OFFSET);
+	result->componentMask = (uint16_t)(result->componentFlags & SLIP_TRC_COMPONENT_RANGE_MASK);
 	result->rangeMode = 0;
 	result->rangeFlag = 0;
 	result->processedComponentCount = 0;
@@ -8964,7 +9244,9 @@ bool SlipTrackWorld_ObjectSelect(const uint8_t *searchedRecord, size_t recordByt
 	return true;
 }
 
-static int32_t SlipTrackWorld_I16Scaled64(const uint8_t *p) { return (int32_t)(int16_t)SlipBytes_ReadLE16(p) * 0x40; }
+static int32_t SlipTrackWorld_I16Scaled64(const uint8_t *p) {
+	return (int32_t)(int16_t)SlipBytes_ReadLE16(p) * (1 << SLIP_TRC_POINT_COORDINATE_SHIFT);
+}
 
 bool SlipTrackWorld_ComponentBoundsGate(const uint8_t *componentBase, size_t componentBaseBytes,
                                         uint16_t componentOffset, int32_t localX, int32_t localY, int32_t localZ,
@@ -8975,11 +9257,11 @@ bool SlipTrackWorld_ComponentBoundsGate(const uint8_t *componentBase, size_t com
 	if (componentBase == 0 || result == 0) {
 		return false;
 	}
-	if ((size_t)componentOffset + 0x14u > componentBaseBytes) {
+	if ((size_t)componentOffset + SLIP_TRC_COMPONENT_BOUNDS_END > componentBaseBytes) {
 		return false;
 	}
 	component = componentBase + componentOffset;
-	childListOffset = SlipBytes_ReadLE16(component + 0x04u);
+	childListOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 	*result = (SlipTrackWorldComponentBounds){.componentOffsetWord = componentOffset,
 	                                          .componentOffset = componentOffset,
 	                                          .childListOffset = childListOffset,
@@ -8991,44 +9273,44 @@ bool SlipTrackWorld_ComponentBoundsGate(const uint8_t *componentBase, size_t com
 	if (childListOffset == 0) {
 		return true;
 	}
-	result->minX = SlipTrackWorld_I16Scaled64(component + 0x08u);
+	result->minX = SlipTrackWorld_I16Scaled64(component + SLIP_TRC_COMPONENT_MINIMUM_X_OFFSET);
 	if (localX < result->minX) {
 		result->branch = SLIP_TRACK_WORLD_COMPONENT_BOUNDS_BRANCH_X_BELOW;
 		return true;
 	}
-	result->maxX = SlipTrackWorld_I16Scaled64(component + 0x0au);
+	result->maxX = SlipTrackWorld_I16Scaled64(component + SLIP_TRC_COMPONENT_MAXIMUM_X_OFFSET);
 	if (localX > result->maxX) {
 		result->branch = SLIP_TRACK_WORLD_COMPONENT_BOUNDS_BRANCH_X_ABOVE;
 		return true;
 	}
-	result->minY = SlipTrackWorld_I16Scaled64(component + 0x0cu);
+	result->minY = SlipTrackWorld_I16Scaled64(component + SLIP_TRC_COMPONENT_MINIMUM_Y_OFFSET);
 	if (localY < result->minY) {
 		result->branch = SLIP_TRACK_WORLD_COMPONENT_BOUNDS_BRANCH_Y_BELOW;
 		return true;
 	}
-	result->maxY = SlipTrackWorld_I16Scaled64(component + 0x0eu);
+	result->maxY = SlipTrackWorld_I16Scaled64(component + SLIP_TRC_COMPONENT_MAXIMUM_Y_OFFSET);
 	if (localY > result->maxY) {
 		result->branch = SLIP_TRACK_WORLD_COMPONENT_BOUNDS_BRANCH_Y_ABOVE;
 		return true;
 	}
-	result->minZ = SlipTrackWorld_I16Scaled64(component + 0x10u);
+	result->minZ = SlipTrackWorld_I16Scaled64(component + SLIP_TRC_COMPONENT_MINIMUM_Z_OFFSET);
 	if (localZ < result->minZ) {
 		result->branch = SLIP_TRACK_WORLD_COMPONENT_BOUNDS_BRANCH_Z_BELOW;
 		return true;
 	}
-	result->maxZ = SlipTrackWorld_I16Scaled64(component + 0x12u);
+	result->maxZ = SlipTrackWorld_I16Scaled64(component + SLIP_TRC_COMPONENT_MAXIMUM_Z_OFFSET);
 	if (localZ > result->maxZ) {
 		result->branch = SLIP_TRACK_WORLD_COMPONENT_BOUNDS_BRANCH_Z_ABOVE;
 		return true;
 	}
-	if ((size_t)childListOffset + 2u > componentBaseBytes) {
+	if ((size_t)childListOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 		return false;
 	}
 	result->storedLocalX = (uint32_t)localX;
 	result->storedLocalY = (uint32_t)localY;
 	result->storedLocalZ = (uint32_t)localZ;
 	result->childListCount = SlipBytes_ReadLE16(componentBase + childListOffset);
-	result->firstChildRecordOffset = (size_t)childListOffset + 2u;
+	result->firstChildRecordOffset = (size_t)childListOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 	result->rejected = false;
 	result->branch = SLIP_TRACK_WORLD_COMPONENT_BOUNDS_BRANCH_CHILD_LIST;
 	return true;
@@ -9049,7 +9331,7 @@ bool SlipTrackWorld_ComponentChildRangeScan(const uint8_t *componentBase, size_t
 	if (componentBase == 0 || result == 0) {
 		return false;
 	}
-	if ((size_t)componentOffset + 4u > componentBaseBytes) {
+	if ((size_t)componentOffset + SLIP_TRC_COMPONENT_POINT_LIST_OFFSET + sizeof(uint16_t) > componentBaseBytes) {
 		return false;
 	}
 	*result = (SlipTrackWorldComponentChildRangeScan){childRecordCount,
@@ -9069,15 +9351,15 @@ bool SlipTrackWorld_ComponentChildRangeScan(const uint8_t *componentBase, size_t
 		const uint8_t *childRecord;
 		size_t strideBytes;
 
-		if (childRecordOffset + 0x09u > componentBaseBytes) {
+		if (childRecordOffset + SLIP_TRC_PRIMITIVE_FLAGS_BYTE_END > componentBaseBytes) {
 			return false;
 		}
 		childRecord = componentBase + childRecordOffset;
 		memset(&visit, 0, sizeof(visit));
 		visit.recordIndex = recordIndex;
 		visit.childRecordOffset = childRecordOffset;
-		visit.recordFlags = childRecord[0x08u];
-		visit.skipRangeTest = (childRecord[0x08u] & 0x40u) != 0;
+		visit.recordFlags = childRecord[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
+		visit.skipRangeTest = (childRecord[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_TRENCH) != 0;
 		if (!visit.skipRangeTest) {
 			SlipTrackWorldPointLookup pointLookup;
 			SlipTrackWorldRangePlane rangePlane;
@@ -9085,10 +9367,10 @@ bool SlipTrackWorld_ComponentChildRangeScan(const uint8_t *componentBase, size_t
 			uint32_t deltaY;
 			uint32_t deltaZ;
 
-			if (childRecordOffset + 0x0eu > componentBaseBytes) {
+			if (childRecordOffset + SLIP_TRC_PRIMITIVE_FIRST_INDEX_END > componentBaseBytes) {
 				return false;
 			}
-			visit.pointIndex = SlipBytes_ReadLE16(childRecord + 0x0cu);
+			visit.pointIndex = SlipBytes_ReadLE16(childRecord + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET);
 			visit.callTrackWorldPointLookup = true;
 			if (!SlipTrackWorld_PointLookup(componentRecord, componentBase, componentBaseBytes, visit.pointIndex,
 			                                pointXOrRangeDistance, pointY, remainingCount, &pointLookup)) {
@@ -9097,9 +9379,9 @@ bool SlipTrackWorld_ComponentChildRangeScan(const uint8_t *componentBase, size_t
 			visit.pointLookup = pointLookup;
 			pointXOrRangeDistance = pointLookup.pointXOrInput;
 			pointY = pointLookup.pointYOrInput;
-			visit.normalX = SlipBytes_ReadLE16(childRecord + 0x02u);
-			visit.normalY = SlipBytes_ReadLE16(childRecord + 0x04u);
-			visit.normalZ = SlipBytes_ReadLE16(childRecord + 0x06u);
+			visit.normalX = SlipBytes_ReadLE16(childRecord + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+			visit.normalY = SlipBytes_ReadLE16(childRecord + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+			visit.normalZ = SlipBytes_ReadLE16(childRecord + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 			visit.callTrackWorldStoreRangePlane = true;
 			if (!SlipTrackWorld_StoreRangePlane(pointXOrRangeDistance, pointY, pointLookup.pointZOrCountMergedWithInput,
 			                                    visit.normalX, visit.normalY, visit.normalZ, &rangePlane)) {
@@ -9116,13 +9398,15 @@ bool SlipTrackWorld_ComponentChildRangeScan(const uint8_t *componentBase, size_t
 
 			pointXOrRangeDistance = visit.rangeDotRounded;
 			pointY = deltaY;
-			visit.depthRejected = (int32_t)visit.rangeDotRounded < (int32_t)0xffffff00u;
+			visit.depthRejected = (int32_t)visit.rangeDotRounded < SLIP_TRACK_COMPONENT_RANGE_MINIMUM_DEPTH;
 		}
 		visit.strideWord = SlipBytes_ReadLE16(childRecord);
-		if ((visit.strideWord & 0x8000u) == 0) {
-			strideBytes = (size_t)visit.strideWord * 2u + 0x0cu;
+		if ((visit.strideWord & SLIP_TRC_PRIMITIVE_TEXTURED) == 0) {
+			strideBytes = (size_t)visit.strideWord * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		} else {
-			strideBytes = (size_t)(visit.strideWord & 0x7fffu) * 6u + 0x0cu;
+			strideBytes =
+			    (size_t)(visit.strideWord & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+			    SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		}
 		if (childRecordOffset > SIZE_MAX - strideBytes) {
 			return false;
@@ -9162,14 +9446,14 @@ bool SlipTrackWorld_RecordComponentTest(const uint8_t *trdBase, size_t trdBytes,
 	}
 	recordOffset = (size_t)(recordAddress - trdBaseAddress);
 	result->recordOffset = recordOffset;
-	if (recordOffset + 0x1eu > trdBytes) {
+	if (recordOffset + SLIP_TRD_SECTION_ORIGIN_END > trdBytes) {
 		return false;
 	}
 	record = trdBase + recordOffset;
-	result->localX = (int32_t)((uint32_t)objectX - SlipBytes_ReadLE32(record + 0x12u));
-	result->localY = (int32_t)((uint32_t)objectY - SlipBytes_ReadLE32(record + 0x16u));
-	result->localZ = (int32_t)((uint32_t)objectZ - SlipBytes_ReadLE32(record + 0x1au));
-	result->componentOffset = SlipBytes_ReadLE16(record + 0x02u);
+	result->localX = (int32_t)((uint32_t)objectX - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_X_OFFSET));
+	result->localY = (int32_t)((uint32_t)objectY - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET));
+	result->localZ = (int32_t)((uint32_t)objectZ - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET));
+	result->componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 	result->callTrackWorldComponentBoundsGate = true;
 	if (!SlipTrackWorld_ComponentBoundsGate(componentBase, componentBaseBytes, result->componentOffset, result->localX,
 	                                        result->localY, result->localZ, &result->bounds)) {
@@ -9213,25 +9497,25 @@ bool SlipTrackWorld_CellRecordBoundsScan(const uint8_t *trdBase, size_t trdBytes
 	}
 	cellDescriptorOffset = (size_t)(cellDescriptorAddress - trdBaseAddress);
 	result->cellDescriptorOffset = cellDescriptorOffset;
-	if (cellDescriptorOffset + 6u > trdBytes) {
+	if (cellDescriptorOffset + SLIP_TRACK_LINKED_HEADER_BYTES > trdBytes) {
 		return false;
 	}
-	recordListOffset = SlipBytes_ReadLE16(trdBase + cellDescriptorOffset + 0x04u);
+	recordListOffset = SlipBytes_ReadLE16(trdBase + cellDescriptorOffset + SLIP_TRACK_LINKED_OFFSET);
 	result->recordListOffset = recordListOffset;
 	result->branch = SLIP_TRACK_WORLD_CELL_RECORD_BOUNDS_SCAN_BRANCH_NO_LIST;
 	if (recordListOffset == 0) {
 		return true;
 	}
-	if ((size_t)recordListOffset + 2u > trdBytes) {
+	if ((size_t)recordListOffset + SLIP_TRD_TABLE_COUNT_BYTES > trdBytes) {
 		return false;
 	}
 	recordCount = SlipBytes_ReadLE16(trdBase + recordListOffset);
-	recordOffset = (size_t)recordListOffset + 2u;
+	recordOffset = (size_t)recordListOffset + SLIP_TRD_TABLE_COUNT_BYTES;
 	result->recordCount = recordCount;
 	result->firstRecordOffset = recordOffset;
 	result->branch = SLIP_TRACK_WORLD_CELL_RECORD_BOUNDS_SCAN_BRANCH_EXHAUSTED;
-	if ((size_t)recordCount > (SIZE_MAX - recordOffset) / 0x22u ||
-	    recordOffset + (size_t)recordCount * 0x22u > trdBytes) {
+	if ((size_t)recordCount > (SIZE_MAX - recordOffset) / SLIP_TRD_SECTION_BYTES ||
+	    recordOffset + (size_t)recordCount * SLIP_TRD_SECTION_BYTES > trdBytes) {
 		return false;
 	}
 	for (i = 0; i < recordCount; ++i) {
@@ -9243,15 +9527,15 @@ bool SlipTrackWorld_CellRecordBoundsScan(const uint8_t *trdBase, size_t trdBytes
 		visit.recordIndex = i;
 		visit.recordOffset = recordOffset;
 		visit.recordAddress = trdBaseAddress + (uint32_t)recordOffset;
-		visit.localX = (int32_t)((uint32_t)objectX - SlipBytes_ReadLE32(record + 0x12u));
-		visit.localY = (int32_t)((uint32_t)objectY - SlipBytes_ReadLE32(record + 0x16u));
-		visit.localZ = (int32_t)((uint32_t)objectZ - SlipBytes_ReadLE32(record + 0x1au));
-		orChildOffsets = SlipBytes_ReadLE16(record + 0x04u);
-		orChildOffsets = (uint16_t)(orChildOffsets | SlipBytes_ReadLE16(record + 0x08u));
-		orChildOffsets = (uint16_t)(orChildOffsets | SlipBytes_ReadLE16(record + 0x0cu));
+		visit.localX = (int32_t)((uint32_t)objectX - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_X_OFFSET));
+		visit.localY = (int32_t)((uint32_t)objectY - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET));
+		visit.localZ = (int32_t)((uint32_t)objectZ - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET));
+		orChildOffsets = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
+		orChildOffsets = (uint16_t)(orChildOffsets | SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET));
+		orChildOffsets = (uint16_t)(orChildOffsets | SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET));
 		visit.orChildOffsets = orChildOffsets;
 		if (orChildOffsets != 0) {
-			visit.componentOffset = SlipBytes_ReadLE16(record + 0x02u);
+			visit.componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 			if (!SlipTrackWorld_RecordComponentTest(trdBase, trdBytes, componentBase, componentBaseBytes,
 			                                        trdBaseAddress, visit.recordAddress, objectX, objectY, objectZ,
 			                                        &visit.componentTest)) {
@@ -9272,7 +9556,7 @@ bool SlipTrackWorld_CellRecordBoundsScan(const uint8_t *trdBase, size_t trdBytes
 			result->branch = SLIP_TRACK_WORLD_CELL_RECORD_BOUNDS_SCAN_BRANCH_COMPONENT_PASS;
 			return true;
 		}
-		recordOffset += 0x22u;
+		recordOffset += SLIP_TRD_SECTION_BYTES;
 	}
 	return true;
 }
@@ -9300,7 +9584,7 @@ bool SlipTrackWorld_RecordSearch(const uint8_t *trdBase, size_t trdBytes, const 
 		}
 		currentRecordAddress = initialRecordAddress;
 		currentRecordOffset = (size_t)(currentRecordAddress - trdBaseAddress);
-		if (currentRecordOffset + 0x0eu > trdBytes) {
+		if (currentRecordOffset + SLIP_TRD_SECTION_EXIT_LINKS_END > trdBytes) {
 			return false;
 		}
 		result->storedInitialRecordAddress = currentRecordAddress;
@@ -9316,7 +9600,7 @@ bool SlipTrackWorld_RecordSearch(const uint8_t *trdBase, size_t trdBytes, const 
 			result->branch = SLIP_TRACK_WORLD_RECORD_SEARCH_BRANCH_EXISTING_RECORD;
 			return true;
 		}
-		result->link04Offset = SlipBytes_ReadLE16(trdBase + currentRecordOffset + 0x04u);
+		result->link04Offset = SlipBytes_ReadLE16(trdBase + currentRecordOffset + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
 		if (result->link04Offset != 0) {
 			result->link04RecordAddress = trdBaseAddress + result->link04Offset;
 			if (!SlipTrackWorld_RecordComponentTest(trdBase, trdBytes, componentBase, componentBaseBytes,
@@ -9332,7 +9616,7 @@ bool SlipTrackWorld_RecordSearch(const uint8_t *trdBase, size_t trdBytes, const 
 				return true;
 			}
 		}
-		result->link08Offset = SlipBytes_ReadLE16(trdBase + currentRecordOffset + 0x08u);
+		result->link08Offset = SlipBytes_ReadLE16(trdBase + currentRecordOffset + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET);
 		if (result->link08Offset != 0) {
 			result->link08RecordAddress = trdBaseAddress + result->link08Offset;
 			if (!SlipTrackWorld_RecordComponentTest(trdBase, trdBytes, componentBase, componentBaseBytes,
@@ -9348,7 +9632,7 @@ bool SlipTrackWorld_RecordSearch(const uint8_t *trdBase, size_t trdBytes, const 
 				return true;
 			}
 		}
-		result->link0cOffset = SlipBytes_ReadLE16(trdBase + currentRecordOffset + 0x0cu);
+		result->link0cOffset = SlipBytes_ReadLE16(trdBase + currentRecordOffset + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET);
 		if (result->link0cOffset != 0) {
 			result->link0cRecordAddress = trdBaseAddress + result->link0cOffset;
 			if (!SlipTrackWorld_RecordComponentTest(trdBase, trdBytes, componentBase, componentBaseBytes,
@@ -9434,15 +9718,16 @@ bool SlipTrackWorld_ObjectDraw(const uint8_t *listCursor, uint8_t *objectList, s
 		return false;
 	}
 	if (objectListEntry.branch != SLIP_TRACK_WORLD_OBJECT_LIST_ENTRY_BRANCH_CAPACITY_REACHED) {
-		if (viewMatrix == 0 || matrixBytes < 18u) {
+		if (viewMatrix == 0 || matrixBytes < sizeof(matrix.m)) {
 			return false;
 		}
-		for (i = 0; i < 9u; ++i) {
-			matrix.m[i] = (int16_t)SlipBytes_ReadLE16(viewMatrix + i * 2u);
+		for (i = 0; i < sizeof(matrix.m) / sizeof(matrix.m[0]); ++i) {
+			matrix.m[i] = (int16_t)SlipBytes_ReadLE16(viewMatrix + i * sizeof(matrix.m[0]));
 		}
-		relativeObject = (SlipView3DVec32){(int32_t)(uint32_t)(SlipBytes_ReadLE32(object + 0x12u) - cameraWorldX),
-		                                   (int32_t)(uint32_t)(SlipBytes_ReadLE32(object + 0x16u) - cameraWorldY),
-		                                   (int32_t)(uint32_t)(SlipBytes_ReadLE32(object + 0x1au) - cameraWorldZ)};
+		relativeObject = (SlipView3DVec32){
+		    (int32_t)(uint32_t)(SlipBytes_ReadLE32(object + SLIP_TRD_SECTION_ORIGIN_X_OFFSET) - cameraWorldX),
+		    (int32_t)(uint32_t)(SlipBytes_ReadLE32(object + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET) - cameraWorldY),
+		    (int32_t)(uint32_t)(SlipBytes_ReadLE32(object + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET) - cameraWorldZ)};
 		transformedObject = SlipView3D_TransformPositionByColumns(&matrix, relativeObject);
 		if (!SlipTrackWorld_ObjectTransform(object, objectBytesRemaining, objectListEntry.entry,
 		                                    objectListBytes - (size_t)(objectListEntry.entry - objectList),
@@ -9478,7 +9763,7 @@ bool SlipTrackWorld_ObjectDraw(const uint8_t *listCursor, uint8_t *objectList, s
 			return false;
 	}
 	installedRecordCallback = SLIP_TRACK_WORLD_RECORD_CALLBACK_DEFERRED_HEADER;
-	if (mask == 0x10u) {
+	if (mask == SLIP_TRACK_SPECIAL_RENDER_MODE) {
 		installedRecordCallback = SLIP_TRACK_WORLD_RECORD_CALLBACK_DEFERRED_HEADER_ENTRY;
 	}
 	drawStateIndexBefore = SlipDraw3D_CurrentStateRecordIndex(drawStateIndex);
@@ -9517,7 +9802,7 @@ bool SlipTrackWorld_ObjectDraw(const uint8_t *listCursor, uint8_t *objectList, s
 			return false;
 	}
 	*result = (SlipTrackWorldObjectDraw){listCursor,
-	                                     0x7fffffffu,
+	                                     INT32_MAX,
 	                                     true,
 	                                     true,
 	                                     true,
@@ -9584,7 +9869,8 @@ bool SlipTrackWorld_ObjectListEntry(uint8_t *objectList, size_t objectListBytes,
 	uint32_t useClipBounds;
 
 	(void)objectBytesRemaining;
-	if (objectList == 0 || objectListCursorAddress == 0 || result == 0 || objectListBytes < 4u) {
+	if (objectList == 0 || objectListCursorAddress == 0 || result == 0 ||
+	    objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) {
 		return false;
 	}
 	uint32_t *const objectCount = (uint32_t *)(void *)objectList;
@@ -9594,7 +9880,7 @@ bool SlipTrackWorld_ObjectListEntry(uint8_t *objectList, size_t objectListBytes,
 	                                                currentObject,
 	                                                currentObjectAddress,
 	                                                count,
-	                                                count == 0x300u,
+	                                                count == SLIP_TRACK_VISIBILITY_ENTRY_CAPACITY,
 	                                                0,
 	                                                false,
 	                                                count,
@@ -9619,15 +9905,17 @@ bool SlipTrackWorld_ObjectListEntry(uint8_t *objectList, size_t objectListBytes,
 	                                                0,
 	                                                0,
 	                                                SLIP_TRACK_WORLD_OBJECT_LIST_ENTRY_BRANCH_READY};
-	if (count == 0x300u) {
+	if (count == SLIP_TRACK_VISIBILITY_ENTRY_CAPACITY) {
 		result->branch = SLIP_TRACK_WORLD_OBJECT_LIST_ENTRY_BRANCH_CAPACITY_REACHED;
 		return true;
 	}
-	if (count > 0x300u || objectListBytes - 4u < (size_t)count * 0x2cu) {
+	if (count > SLIP_TRACK_VISIBILITY_ENTRY_CAPACITY ||
+	    objectListBytes - SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES < (size_t)count * SLIP_TRACK_VISIBILITY_ENTRY_BYTES) {
 		return false;
 	}
 	for (i = 0; i < count; ++i) {
-		const size_t entryOffset = 4u + (size_t)i * 0x2cu;
+		const size_t entryOffset =
+		    SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES + (size_t)i * SLIP_TRACK_VISIBILITY_ENTRY_BYTES;
 		result->scanIndex = i;
 		const SlipTrackVisibilityEntry *const candidate =
 		    (const SlipTrackVisibilityEntry *)(const void *)(objectList + entryOffset);
@@ -9644,33 +9932,33 @@ bool SlipTrackWorld_ObjectListEntry(uint8_t *objectList, size_t objectListBytes,
 		return false;
 	}
 	cursorOffset = (size_t)(cursorAddress - objectListBaseAddress);
-	if (cursorOffset > objectListBytes || objectListBytes - cursorOffset < 0x2cu) {
+	if (cursorOffset > objectListBytes || objectListBytes - cursorOffset < SLIP_TRACK_VISIBILITY_ENTRY_BYTES) {
 		return false;
 	}
 	entry = objectList + cursorOffset;
 	SlipTrackVisibilityEntry *const visibility = (SlipTrackVisibilityEntry *)(void *)entry;
 	*objectCount = count + 1u;
-	*objectListCursorAddress = cursorAddress + 0x2cu;
+	*objectListCursorAddress = cursorAddress + SLIP_TRACK_VISIBILITY_ENTRY_BYTES;
 	result->countAfter = count + 1u;
 	result->entryIndex = count;
 	result->entry = entry;
 	result->entryAddress = cursorAddress;
 	result->listCursorAddressAfter = *objectListCursorAddress;
-	result->advance = 0x2cu;
+	result->advance = SLIP_TRACK_VISIBILITY_ENTRY_BYTES;
 	visibility->recordAddress = currentObjectAddress;
 	visibility->callbackFlag = 0;
-	visibility->resetMaximumDepth = 0xffffffffu;
+	visibility->resetMaximumDepth = UINT32_MAX;
 	result->entryObject = currentObject;
 	result->entryObjectAddress = currentObjectAddress;
 	result->callbackFlag = 0;
-	result->resetMaximumDepth = 0xffffffffu;
+	result->resetMaximumDepth = UINT32_MAX;
 	result->rangeFlag = rangeFlag;
 	result->callTrackWorldLoadClipRegisters = true;
 	minX = viewX;
 	minY = viewY;
 	maxX = viewZ;
 	maxY = objectToken;
-	useClipBounds = 0xffffffffu;
+	useClipBounds = UINT32_MAX;
 	if (defaultTraversalGate == 0 && rangeFlag != 0) {
 		useClipBounds = 0;
 	} else {
@@ -9704,12 +9992,13 @@ bool SlipTrackWorld_ObjectTransform(const uint8_t *object, size_t objectBytesRem
 	uint32_t objectWorldY;
 	uint32_t objectWorldZ;
 
-	if (object == 0 || inputEntry == 0 || result == 0 || objectBytesRemaining < 0x1eu || entryBytesRemaining < 0x0cu) {
+	if (object == 0 || inputEntry == 0 || result == 0 || objectBytesRemaining < SLIP_TRD_SECTION_ORIGIN_END ||
+	    entryBytesRemaining < SLIP_TRACK_VISIBILITY_POSITION_END) {
 		return false;
 	}
-	objectWorldX = SlipBytes_ReadLE32(object + 0x12u);
-	objectWorldY = SlipBytes_ReadLE32(object + 0x16u);
-	objectWorldZ = SlipBytes_ReadLE32(object + 0x1au);
+	objectWorldX = SlipBytes_ReadLE32(object + SLIP_TRD_SECTION_ORIGIN_X_OFFSET);
+	objectWorldY = SlipBytes_ReadLE32(object + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET);
+	objectWorldZ = SlipBytes_ReadLE32(object + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET);
 	SlipTrackVisibilityEntry *const entry = (SlipTrackVisibilityEntry *)(void *)inputEntry;
 	entry->viewPosition.x = (int32_t)x;
 	entry->viewPosition.y = (int32_t)y;
@@ -9724,7 +10013,7 @@ bool SlipTrackWorld_ObjectTransform(const uint8_t *object, size_t objectBytesRem
 	                                          objectWorldY - cameraWorldY,
 	                                          objectWorldZ - cameraWorldZ,
 	                                          true,
-	                                          0x00033d48u,
+	                                          SLIP_TRACK_WORLD_CAMERA_MATRIX_TOKEN,
 	                                          true,
 	                                          x,
 	                                          y,
@@ -9747,15 +10036,17 @@ bool SlipTrackWorld_ComponentList(const uint8_t *currentObject, size_t objectByt
 	uint16_t childOffset;
 	uint16_t listOffset;
 
-	if (currentObject == 0 || componentBase == 0 || result == 0 || objectBytesRemaining < 4u) {
+	if (currentObject == 0 || componentBase == 0 || result == 0 ||
+	    objectBytesRemaining < SLIP_TRD_SECTION_COMPONENT_END) {
 		return false;
 	}
-	componentOffset = SlipBytes_ReadLE16(currentObject + 0x02u);
-	if ((size_t)componentOffset > componentBaseBytes || componentBaseBytes - (size_t)componentOffset < 4u) {
+	componentOffset = SlipBytes_ReadLE16(currentObject + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if ((size_t)componentOffset > componentBaseBytes ||
+	    componentBaseBytes - (size_t)componentOffset < SLIP_TRC_COMPONENT_POINT_LIST_END) {
 		return false;
 	}
 	component = componentBase + componentOffset;
-	childOffset = SlipBytes_ReadLE16(component + 0x02u);
+	childOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_POINT_LIST_OFFSET);
 	*result = (SlipTrackWorldComponentList){currentObject,
 	                                        componentOffset,
 	                                        component,
@@ -9772,10 +10063,10 @@ bool SlipTrackWorld_ComponentList(const uint8_t *currentObject, size_t objectByt
 		return true;
 	}
 	if ((size_t)childOffset > componentBaseBytes || componentBaseBytes - (size_t)childOffset < 1u ||
-	    componentBaseBytes - (size_t)componentOffset < 6u) {
+	    componentBaseBytes - (size_t)componentOffset < SLIP_TRC_COMPONENT_PRIMITIVE_LIST_END) {
 		return false;
 	}
-	listOffset = SlipBytes_ReadLE16(component + 0x04u);
+	listOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 	if ((size_t)listOffset > componentBaseBytes) {
 		return false;
 	}
@@ -9825,7 +10116,8 @@ bool SlipTrackWorld_PrimitiveBounds(const uint8_t *list, size_t listBytesRemaini
 		uint32_t advance;
 		SlipTrackWorldPrimitiveBoundsVisit *visit;
 
-		if (recordOffsetAfterAdvance > listBytesRemaining || listBytesRemaining - recordOffsetAfterAdvance < 9u) {
+		if (recordOffsetAfterAdvance > listBytesRemaining ||
+		    listBytesRemaining - recordOffsetAfterAdvance < SLIP_TRC_PRIMITIVE_FLAGS_BYTE_END) {
 			return false;
 		}
 		record = list + recordOffsetAfterAdvance;
@@ -9834,23 +10126,24 @@ bool SlipTrackWorld_PrimitiveBounds(const uint8_t *list, size_t listBytesRemaini
 		*visit = (SlipTrackWorldPrimitiveBoundsVisit){0};
 		visit->primitiveRecord = record;
 		visit->remainingCountBefore = remainingCountBefore;
-		visit->recordFlags = record[0x08u];
-		visit->boundsBit = (uint8_t)(visit->recordFlags & 0x08u);
+		visit->recordFlags = record[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
+		visit->boundsBit = (uint8_t)(visit->recordFlags & SLIP_TRC_PRIMITIVE_CLIP_BOUNDS);
 		visit->skippedBounds = visit->boundsBit == 0;
 		if (visit->boundsBit != 0) {
 			const SlipTrackWorldPrimitiveBoundsCall *call;
 
-			if (listBytesRemaining - recordOffsetAfterAdvance < 0x0eu || calls == 0 || i >= callCount) {
+			if (listBytesRemaining - recordOffsetAfterAdvance < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END || calls == 0 ||
+			    i >= callCount) {
 				return false;
 			}
 			call = calls + i;
 			visit->descriptorBeforeMask = SlipBytes_ReadLE16(record);
-			visit->vertexCount = (uint16_t)(visit->descriptorBeforeMask & 0x7fffu);
-			visit->vertexIndexList = record + 0x0cu;
+			visit->vertexCount = (uint16_t)(visit->descriptorBeforeMask & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
+			visit->vertexIndexList = record + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET;
 			visit->pointIndex = SlipBytes_ReadLE16(visit->vertexIndexList);
-			visit->normalX = SlipBytes_ReadLE16(record + 0x02u);
-			visit->normalY = SlipBytes_ReadLE16(record + 0x04u);
-			visit->normalZ = SlipBytes_ReadLE16(record + 0x06u);
+			visit->normalX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+			visit->normalY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
+			visit->normalZ = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 			visit->calledPlaneClassify = true;
 			visit->planeRejected = call->planeRejected;
 			if (!visit->planeRejected) {
@@ -9884,11 +10177,12 @@ bool SlipTrackWorld_PrimitiveBounds(const uint8_t *list, size_t listBytesRemaini
 		visit->primaryBottom = currentPrimaryBottom;
 		descriptor = SlipBytes_ReadLE16(record);
 		visit->descriptor = descriptor;
-		visit->highBit = (descriptor & 0x8000u) != 0;
+		visit->highBit = (descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0;
 		if (visit->highBit) {
-			advance = (uint32_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+			advance = (uint32_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+			          SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		} else {
-			advance = (uint32_t)descriptor * 2u + 0x0cu;
+			advance = (uint32_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		}
 		visit->advance = advance;
 		recordOffsetAfterAdvance += (size_t)advance;
@@ -9945,28 +10239,29 @@ bool SlipTrackWorld_PrimitiveBoundsEvaluated(
 		uint32_t advance;
 		SlipTrackWorldPrimitiveBoundsEvaluatedVisit *evaluated;
 
-		if (recordOffsetAfterAdvance > listBytesRemaining || listBytesRemaining - recordOffsetAfterAdvance < 9u) {
+		if (recordOffsetAfterAdvance > listBytesRemaining ||
+		    listBytesRemaining - recordOffsetAfterAdvance < SLIP_TRC_PRIMITIVE_FLAGS_BYTE_END) {
 			return false;
 		}
 		record = list + recordOffsetAfterAdvance;
 		evaluated = evaluatedVisits + i;
 		*evaluated = (SlipTrackWorldPrimitiveBoundsEvaluatedVisit){0};
 		evaluated->primitiveRecord = record;
-		evaluated->recordFlags = record[0x08u];
-		evaluated->boundsBit = (uint8_t)(evaluated->recordFlags & 0x08u);
+		evaluated->recordFlags = record[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
+		evaluated->boundsBit = (uint8_t)(evaluated->recordFlags & SLIP_TRC_PRIMITIVE_CLIP_BOUNDS);
 		if (evaluated->boundsBit != 0) {
 			uint16_t boundsMinX;
 			uint16_t boundsMinY;
 			uint16_t boundsMaxX;
 			uint16_t boundsMaxY;
 
-			if (listBytesRemaining - recordOffsetAfterAdvance < 0x0eu) {
+			if (listBytesRemaining - recordOffsetAfterAdvance < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 				return false;
 			}
-			boundsMinX = SlipBytes_ReadLE16(record + 0x0cu);
-			boundsMinY = SlipBytes_ReadLE16(record + 0x02u);
-			boundsMaxX = SlipBytes_ReadLE16(record + 0x04u);
-			boundsMaxY = SlipBytes_ReadLE16(record + 0x06u);
+			boundsMinX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MINIMUM_X_OFFSET);
+			boundsMinY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MINIMUM_Y_OFFSET);
+			boundsMaxX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MAXIMUM_X_OFFSET);
+			boundsMaxY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MAXIMUM_Y_OFFSET);
 			evaluated->calledPlaneClassify = true;
 			if (!SlipTrackWorld_ClassifyPlaneFromSource(mode, boundsMinX, boundsMinY, boundsMaxX, boundsMaxY,
 			                                            vertexCacheBase, vertexCacheBytes, origin, sourcePoint,
@@ -9975,18 +10270,20 @@ bool SlipTrackWorld_PrimitiveBoundsEvaluated(
 			}
 			calls[i].planeRejected = evaluated->plane.carry;
 			if (!calls[i].planeRejected) {
-				const uint16_t maskedVertexCount = (uint16_t)(SlipBytes_ReadLE16(record) & 0x7fffu);
+				const uint16_t maskedVertexCount =
+				    (uint16_t)(SlipBytes_ReadLE16(record) & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
 
 				evaluated->callDraw3DPrimitivePath = true;
 				if (pool == 0 || vertexRecords == 0 || state == 0 || transform == 0 || projectDepth == 0 ||
 				    returnVisits == 0 || activeVisits == 0 || boundsVisits == 0) {
 					return false;
 				}
-				if (!SlipDraw3D_PrimitivePath(pool, vertexRecords, vertexRecordCount, record + 0x0cu,
-				                              listBytesRemaining - recordOffsetAfterAdvance - 0x0cu, maskedVertexCount,
-				                              state, transform, projectDepth, userData, depthClipCarry, screenClipCarry,
-				                              returnVisits, returnVisitCapacity, activeVisits, activeVisitCapacity,
-				                              boundsVisits, boundsVisitCapacity, &evaluated->primitive)) {
+				if (!SlipDraw3D_PrimitivePath(
+				        pool, vertexRecords, vertexRecordCount, record + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+				        listBytesRemaining - recordOffsetAfterAdvance - SLIP_TRC_PRIMITIVE_HEADER_BYTES,
+				        maskedVertexCount, state, transform, projectDepth, userData, depthClipCarry, screenClipCarry,
+				        returnVisits, returnVisitCapacity, activeVisits, activeVisitCapacity, boundsVisits,
+				        boundsVisitCapacity, &evaluated->primitive)) {
 					return false;
 				}
 				calls[i].primitiveRejected = evaluated->primitive.carryOut;
@@ -9998,10 +10295,11 @@ bool SlipTrackWorld_PrimitiveBoundsEvaluated(
 		}
 		descriptor = SlipBytes_ReadLE16(record);
 		evaluated->descriptor = descriptor;
-		if ((descriptor & 0x8000u) != 0) {
-			advance = (uint32_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+		if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0) {
+			advance = (uint32_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+			          SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		} else {
-			advance = (uint32_t)descriptor * 2u + 0x0cu;
+			advance = (uint32_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		}
 		recordOffsetAfterAdvance += (size_t)advance;
 		evaluated->advance = advance;
@@ -10056,28 +10354,29 @@ bool SlipTrackWorld_PrimitiveBoundsEvaluatedExecute(
 		uint32_t advance;
 		SlipTrackWorldPrimitiveBoundsEvaluatedExecuteVisit *evaluated;
 
-		if (recordOffsetAfterAdvance > listBytesRemaining || listBytesRemaining - recordOffsetAfterAdvance < 9u) {
+		if (recordOffsetAfterAdvance > listBytesRemaining ||
+		    listBytesRemaining - recordOffsetAfterAdvance < SLIP_TRC_PRIMITIVE_FLAGS_BYTE_END) {
 			return false;
 		}
 		record = list + recordOffsetAfterAdvance;
 		evaluated = evaluatedVisits + i;
 		*evaluated = (SlipTrackWorldPrimitiveBoundsEvaluatedExecuteVisit){0};
 		evaluated->primitiveRecord = record;
-		evaluated->recordFlags = record[0x08u];
-		evaluated->boundsBit = (uint8_t)(evaluated->recordFlags & 0x08u);
+		evaluated->recordFlags = record[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET];
+		evaluated->boundsBit = (uint8_t)(evaluated->recordFlags & SLIP_TRC_PRIMITIVE_CLIP_BOUNDS);
 		if (evaluated->boundsBit != 0) {
 			uint16_t boundsMinX;
 			uint16_t boundsMinY;
 			uint16_t boundsMaxX;
 			uint16_t boundsMaxY;
 
-			if (listBytesRemaining - recordOffsetAfterAdvance < 0x0eu) {
+			if (listBytesRemaining - recordOffsetAfterAdvance < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 				return false;
 			}
-			boundsMinX = SlipBytes_ReadLE16(record + 0x0cu);
-			boundsMinY = SlipBytes_ReadLE16(record + 0x02u);
-			boundsMaxX = SlipBytes_ReadLE16(record + 0x04u);
-			boundsMaxY = SlipBytes_ReadLE16(record + 0x06u);
+			boundsMinX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MINIMUM_X_OFFSET);
+			boundsMinY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MINIMUM_Y_OFFSET);
+			boundsMaxX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MAXIMUM_X_OFFSET);
+			boundsMaxY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MAXIMUM_Y_OFFSET);
 			evaluated->calledPlaneClassify = true;
 			if (!SlipTrackWorld_ClassifyPlaneFromSource(mode, boundsMinX, boundsMinY, boundsMaxX, boundsMaxY,
 			                                            vertexCacheBase, vertexCacheBytes, origin, sourcePoint,
@@ -10086,7 +10385,8 @@ bool SlipTrackWorld_PrimitiveBoundsEvaluatedExecute(
 			}
 			calls[i].planeRejected = evaluated->plane.carry;
 			if (!calls[i].planeRejected) {
-				const uint16_t maskedVertexCount = (uint16_t)(SlipBytes_ReadLE16(record) & 0x7fffu);
+				const uint16_t maskedVertexCount =
+				    (uint16_t)(SlipBytes_ReadLE16(record) & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
 
 				evaluated->callDraw3DPrimitivePath = true;
 				if (pool == 0 || vertexRecords == 0 || state == 0 || transform == 0 || projectDepth == 0 ||
@@ -10095,14 +10395,14 @@ bool SlipTrackWorld_PrimitiveBoundsEvaluatedExecute(
 					return false;
 				}
 				if (!SlipDraw3D_PrimitivePathExecute(
-				        pool, vertexRecords, vertexRecordCount, record + 0x0cu,
-				        listBytesRemaining - recordOffsetAfterAdvance - 0x0cu, maskedVertexCount, state, transform,
-				        projectDepth, projectScreen, userData, hasPostPlanes, planeBase, planeBytes, planeHeadOffset,
-				        postLimitXMin, postLimitXMax, postLimitYMin, postLimitYMax, maxClipEdgeVisits, returnVisits,
-				        returnVisitCapacity, clipFlagVisits, clipFlagVisitCapacity, postBoundsVisits,
-				        postBoundsVisitCapacity, postClipRecordVisits, postClipRecordVisitCapacity, postClipPlaneVisits,
-				        postClipPlaneVisitCapacity, activeVisits, activeVisitCapacity, boundsVisits,
-				        boundsVisitCapacity, &evaluated->primitive)) {
+				        pool, vertexRecords, vertexRecordCount, record + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+				        listBytesRemaining - recordOffsetAfterAdvance - SLIP_TRC_PRIMITIVE_HEADER_BYTES,
+				        maskedVertexCount, state, transform, projectDepth, projectScreen, userData, hasPostPlanes,
+				        planeBase, planeBytes, planeHeadOffset, postLimitXMin, postLimitXMax, postLimitYMin,
+				        postLimitYMax, maxClipEdgeVisits, returnVisits, returnVisitCapacity, clipFlagVisits,
+				        clipFlagVisitCapacity, postBoundsVisits, postBoundsVisitCapacity, postClipRecordVisits,
+				        postClipRecordVisitCapacity, postClipPlaneVisits, postClipPlaneVisitCapacity, activeVisits,
+				        activeVisitCapacity, boundsVisits, boundsVisitCapacity, &evaluated->primitive)) {
 					return false;
 				}
 				calls[i].primitiveRejected = evaluated->primitive.carryOut;
@@ -10114,10 +10414,11 @@ bool SlipTrackWorld_PrimitiveBoundsEvaluatedExecute(
 		}
 		descriptor = SlipBytes_ReadLE16(record);
 		evaluated->descriptor = descriptor;
-		if ((descriptor & 0x8000u) != 0) {
-			advance = (uint32_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+		if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0) {
+			advance = (uint32_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+			          SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		} else {
-			advance = (uint32_t)descriptor * 2u + 0x0cu;
+			advance = (uint32_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		}
 		recordOffsetAfterAdvance += (size_t)advance;
 		evaluated->advance = advance;
@@ -10157,30 +10458,35 @@ bool SlipTrackWorld_PointLookup(const uint8_t *componentList, const uint8_t *com
 	}
 	*result = (SlipTrackWorldPointLookup){
 	    0, 0, pointIndex, 0, true, pointXOrInput, pointYOrInput, pointZOrCountMergedWithInput, true};
-	pointListOffset = SlipBytes_ReadLE16(componentList + 0x02u);
+	pointListOffset = SlipBytes_ReadLE16(componentList + SLIP_TRC_COMPONENT_POINT_LIST_OFFSET);
 	result->pointListOffset = pointListOffset;
 	if (pointListOffset == 0) {
 		return true;
 	}
-	if (componentBase == 0 || (size_t)pointListOffset + 2u > componentBaseBytes) {
+	if (componentBase == 0 || (size_t)pointListOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 		return false;
 	}
 	pointList = componentBase + pointListOffset;
 	pointCount = SlipBytes_ReadLE16(pointList);
 	result->pointCount = pointCount;
-	result->pointZOrCountMergedWithInput = (pointZOrCountMergedWithInput & 0xffff0000u) | pointCount;
+	result->pointZOrCountMergedWithInput =
+	    (pointZOrCountMergedWithInput & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | pointCount;
 	if (pointCount == 0 || pointIndex >= pointCount) {
 		return true;
 	}
-	pointByteOffset = (uint16_t)(6u * pointIndex);
+	pointByteOffset = (uint16_t)(SLIP_TRC_POINT_BYTES * pointIndex);
 	result->pointByteOffset = pointByteOffset;
-	if ((size_t)pointListOffset + 2u + (size_t)pointByteOffset + 6u > componentBaseBytes) {
+	if ((size_t)pointListOffset + SLIP_TRC_TABLE_COUNT_BYTES + (size_t)pointByteOffset + SLIP_TRC_POINT_BYTES >
+	    componentBaseBytes) {
 		return false;
 	}
-	point = pointList + 2u + pointByteOffset;
-	result->pointXOrInput = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(point) << 6;
-	result->pointYOrInput = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(point + 0x02u) << 6;
-	result->pointZOrCountMergedWithInput = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(point + 0x04u) << 6;
+	point = pointList + SLIP_TRC_TABLE_COUNT_BYTES + pointByteOffset;
+	result->pointXOrInput = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(point) << SLIP_TRC_POINT_COORDINATE_SHIFT;
+	result->pointYOrInput = (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(point + SLIP_TRC_POINT_Y_OFFSET)
+	                        << SLIP_TRC_POINT_COORDINATE_SHIFT;
+	result->pointZOrCountMergedWithInput =
+	    (uint32_t)(int32_t)(int16_t)SlipBytes_ReadLE16(point + SLIP_TRC_POINT_Z_OFFSET)
+	    << SLIP_TRC_POINT_COORDINATE_SHIFT;
 	result->carry = false;
 	return true;
 }
@@ -10197,43 +10503,44 @@ bool SlipTrackWorld_PrimitivePreGate(const uint8_t *record, size_t recordBytesRe
 	SlipTrackWorldRangePlane rangePlane;
 	SlipTrackWorldPointLookup pointLookup;
 
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x0eu) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 		return false;
 	}
-	*result = (SlipTrackWorldPrimitivePreGate){record[0x08u],
-	                                           (uint8_t)(record[0x08u] & 0x01u),
-	                                           rangeMode,
-	                                           false,
-	                                           0,
-	                                           0,
-	                                           0,
-	                                           false,
-	                                           {0},
-	                                           {0},
-	                                           0,
-	                                           0,
-	                                           0,
-	                                           false,
-	                                           false,
-	                                           {{0}, {0}, false},
-	                                           {0},
-	                                           {0},
-	                                           0,
-	                                           false,
-	                                           false,
-	                                           false,
-	                                           SLIP_TRACK_WORLD_PRIMITIVE_PRE_GATE_BRANCH_SKIP};
-	if ((result->recordFlags & 0x01u) == 0) {
+	*result = (SlipTrackWorldPrimitivePreGate){
+	    record[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET],
+	    (uint8_t)(record[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_RANGE_PLANE),
+	    rangeMode,
+	    false,
+	    0,
+	    0,
+	    0,
+	    false,
+	    {0},
+	    {0},
+	    0,
+	    0,
+	    0,
+	    false,
+	    false,
+	    {{0}, {0}, false},
+	    {0},
+	    {0},
+	    0,
+	    false,
+	    false,
+	    false,
+	    SLIP_TRACK_WORLD_PRIMITIVE_PRE_GATE_BRANCH_SKIP};
+	if ((result->recordFlags & SLIP_TRC_PRIMITIVE_RANGE_PLANE) == 0) {
 		return true;
 	}
-	if (rangeMode != 1u) {
+	if (rangeMode != SLIP_TRACK_OUTER_OBJECT_DEPTH) {
 		result->branch = SLIP_TRACK_WORLD_PRIMITIVE_PRE_GATE_BRANCH_DRAW;
 		return true;
 	}
 	result->storeRangeFlagZero = true;
 	result->rangeFlag = 0;
 	result->componentList = componentList;
-	result->pointIndex = SlipBytes_ReadLE16(record + 0x0cu);
+	result->pointIndex = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET);
 	result->callTrackWorldPointLookup = true;
 	if (!SlipTrackWorld_PointLookup(componentList, componentBase, componentBaseBytes, result->pointIndex, pointInputX,
 	                                pointInputY, pointInputZ, &pointLookup)) {
@@ -10244,10 +10551,10 @@ bool SlipTrackWorld_PrimitivePreGate(const uint8_t *record, size_t recordBytesRe
 	    (SlipView3DVec32){(int32_t)(pointLookup.pointXOrInput + (uint32_t)objectOffset.x),
 	                      (int32_t)(pointLookup.pointYOrInput + (uint32_t)objectOffset.y),
 	                      (int32_t)(pointLookup.pointZOrCountMergedWithInput + (uint32_t)objectOffset.z)};
-	result->normalX = SlipBytes_ReadLE16(record + 0x02u);
-	result->normalY = SlipBytes_ReadLE16(record + 0x04u);
+	result->normalX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET);
+	result->normalY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET);
 	result->savedPrimitivePointer = true;
-	result->normalZ = SlipBytes_ReadLE16(record + 0x06u);
+	result->normalZ = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 	result->callTrackWorldStoreRangePlane = true;
 	if (!SlipTrackWorld_StoreRangePlane((uint32_t)result->pointAfterObjectOffset.x,
 	                                    (uint32_t)result->pointAfterObjectOffset.y,
@@ -10264,18 +10571,18 @@ bool SlipTrackWorld_PrimitivePreGate(const uint8_t *record, size_t recordBytesRe
 	rangeDot = SlipTrackWorld_RoundedDotProductShift14(deltaX, deltaY, deltaZ, (uint32_t)rangePlane.normal.x,
 	                                                   (uint32_t)rangePlane.normal.y, (uint32_t)rangePlane.normal.z);
 	result->rangeDotRounded = rangeDot;
-	result->greaterThanUpper = (int32_t)rangeDot > 0x00004c40;
+	result->greaterThanUpper = (int32_t)rangeDot > SLIP_TRACK_PRIMITIVE_RANGE_DISTANCE;
 	if (result->greaterThanUpper) {
 		result->branch = SLIP_TRACK_WORLD_PRIMITIVE_PRE_GATE_BRANCH_DRAW;
 		return true;
 	}
-	result->lessThanLower = (int32_t)rangeDot < (int32_t)0xffffb3c0u;
+	result->lessThanLower = (int32_t)rangeDot < -SLIP_TRACK_PRIMITIVE_RANGE_DISTANCE;
 	if (result->lessThanLower) {
 		result->branch = SLIP_TRACK_WORLD_PRIMITIVE_PRE_GATE_BRANCH_DRAW;
 		return true;
 	}
 	result->storeRangeFlagMinusOne = true;
-	result->rangeFlag = 0xffffffffu;
+	result->rangeFlag = UINT32_MAX;
 	result->branch = SLIP_TRACK_WORLD_PRIMITIVE_PRE_GATE_BRANCH_RANGE_REJECT;
 	return true;
 }
@@ -10283,20 +10590,20 @@ bool SlipTrackWorld_PrimitivePreGate(const uint8_t *record, size_t recordBytesRe
 bool SlipTrackWorld_PrimitiveDrawGate(const uint8_t *record, size_t recordBytesRemaining, uint32_t countAt,
                                       SlipTrackWorldPrimitiveDrawGateCall rejectionState,
                                       SlipTrackWorldPrimitiveDrawGate *result) {
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x0eu) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 		return false;
 	}
-	*result = (SlipTrackWorldPrimitiveDrawGate){record + 0x0cu,
-	                                            SlipBytes_ReadLE16(record + 0x0cu),
-	                                            SlipBytes_ReadLE16(record + 0x02u),
-	                                            SlipBytes_ReadLE16(record + 0x04u),
-	                                            SlipBytes_ReadLE16(record + 0x06u),
+	*result = (SlipTrackWorldPrimitiveDrawGate){record + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+	                                            SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
+	                                            SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+	                                            SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+	                                            SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET),
 	                                            true,
 	                                            rejectionState.planeRejected,
 	                                            0,
 	                                            false,
 	                                            false,
-	                                            0x00033e74u,
+	                                            SLIP_TRACK_WORLD_PRIMITIVE_DRAW_LIST_TOKEN,
 	                                            0,
 	                                            false,
 	                                            SLIP_TRACK_WORLD_PRIMITIVE_DRAW_GATE_BRANCH_SKIP};
@@ -10310,7 +10617,7 @@ bool SlipTrackWorld_PrimitiveDrawGate(const uint8_t *record, size_t recordBytesR
 		return true;
 	}
 	result->objectListCount = countAt;
-	result->full = countAt == 0x300u;
+	result->full = countAt == SLIP_TRACK_VISIBILITY_ENTRY_CAPACITY;
 	if (result->full) {
 		return true;
 	}
@@ -10335,13 +10642,13 @@ bool SlipTrackWorld_PrimitiveDrawGateEvaluated(
 	uint16_t drawStateIndex;
 
 	if (record == 0 || vertexRecords == 0 || state == 0 || sourcePoint == 0 || transform == 0 || projectMask == 0 ||
-	    visits == 0 || result == 0 || recordBytesRemaining < 0x0eu) {
+	    visits == 0 || result == 0 || recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 		return false;
 	}
-	clipMinX = SlipBytes_ReadLE16(record + 0x0cu);
-	clipMinY = SlipBytes_ReadLE16(record + 0x02u);
-	clipMaxX = SlipBytes_ReadLE16(record + 0x04u);
-	clipMaxY = SlipBytes_ReadLE16(record + 0x06u);
+	clipMinX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MINIMUM_X_OFFSET);
+	clipMinY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MINIMUM_Y_OFFSET);
+	clipMaxX = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MAXIMUM_X_OFFSET);
+	clipMaxY = SlipBytes_ReadLE16(record + SLIP_TRC_PRIMITIVE_BOUNDS_MAXIMUM_Y_OFFSET);
 	drawStateIndex = SlipBytes_ReadLE16(record);
 	if (!SlipTrackWorld_ClassifyPlaneFromSource(
 	        mode, clipMinX, clipMinY, clipMaxX, clipMaxY, (const uint8_t *)vertexRecords,
@@ -10351,9 +10658,9 @@ bool SlipTrackWorld_PrimitiveDrawGateEvaluated(
 	call = (SlipTrackWorldPrimitiveDrawGateCall){plane.carry, false};
 	polygonStatus = (SlipDraw3DPolygonStatus){0};
 	if (!call.planeRejected) {
-		if (!SlipDraw3D_PolygonStatus(vertexRecords, vertexRecordCount, record + 0x0cu, recordBytesRemaining - 0x0cu,
-		                              drawStateIndex, state, transform, projectMask, userData, visits, visitCapacity,
-		                              &polygonStatus)) {
+		if (!SlipDraw3D_PolygonStatus(vertexRecords, vertexRecordCount, record + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+		                              recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, drawStateIndex, state,
+		                              transform, projectMask, userData, visits, visitCapacity, &polygonStatus)) {
 			return false;
 		}
 		call.polygonRejected = polygonStatus.signFlagAfterReturn;
@@ -10386,7 +10693,8 @@ bool SlipTrackWorld_PrimitiveRelatedScan(
 	if (visitCount != 0) {
 		*visitCount = 0;
 	}
-	if (componentRecord == 0 || visits == 0 || result == 0 || componentRecordBytes < 0x10u || visitCapacity < 3u) {
+	if (componentRecord == 0 || visits == 0 || result == 0 || componentRecordBytes < SLIP_TRC_RELATED_OBJECTS_END ||
+	    visitCapacity < SLIP_TRC_RELATED_OBJECT_COUNT) {
 		return false;
 	}
 	*result = (SlipTrackWorldPrimitiveRelatedScan){true,
@@ -10401,8 +10709,8 @@ bool SlipTrackWorld_PrimitiveRelatedScan(
 	                                               rangeMaxX,
 	                                               rangeMaxY,
 	                                               componentRecord,
-	                                               componentRecord + 0x04u,
-	                                               3u,
+	                                               componentRecord + SLIP_TRC_RELATED_OBJECTS_OFFSET,
+	                                               SLIP_TRC_RELATED_OBJECT_COUNT,
 	                                               0,
 	                                               0,
 	                                               false,
@@ -10416,18 +10724,18 @@ bool SlipTrackWorld_PrimitiveRelatedScan(
 	                                               0,
 	                                               false,
 	                                               SLIP_TRACK_WORLD_PRIMITIVE_RELATED_SCAN_BRANCH_UNMATCHED};
-	for (i = 0; i < 3u; ++i) {
+	for (i = 0; i < SLIP_TRC_RELATED_OBJECT_COUNT; ++i) {
 		const uint8_t *relatedRecord;
 		uint16_t componentOffset;
 		uint16_t objectOffset;
 		uint32_t objectAddress;
 		SlipTrackWorldPrimitiveRelatedScanVisit *visit;
 
-		relatedRecord = componentRecord + 0x04u + i * 4u;
+		relatedRecord = componentRecord + SLIP_TRC_RELATED_OBJECTS_OFFSET + i * SLIP_TRC_RELATED_OBJECT_BYTES;
 		visit = visits + i;
 		*visit = (SlipTrackWorldPrimitiveRelatedScanVisit){0};
 		visit->relatedRecord = relatedRecord;
-		componentOffset = SlipBytes_ReadLE16(relatedRecord + 0x02u);
+		componentOffset = SlipBytes_ReadLE16(relatedRecord + SLIP_TRC_RELATED_COMPONENT_OFFSET);
 		visit->componentOffset = componentOffset;
 		visit->componentAddress = componentBaseAddress + (uint32_t)componentOffset;
 		visit->matchesComponent = visit->componentAddress == primitiveToken;
@@ -10448,7 +10756,7 @@ bool SlipTrackWorld_PrimitiveRelatedScan(
 			visit->skippedRelatedRecord = true;
 			continue;
 		}
-		if (objectList == 0 || objectListBytes < 4u) {
+		if (objectList == 0 || objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) {
 			return false;
 		}
 		visit->enterObjectListScan = true;
@@ -10458,9 +10766,10 @@ bool SlipTrackWorld_PrimitiveRelatedScan(
 		}
 		for (visit->scannedObjectEntries = 0; visit->scannedObjectEntries < visit->objectListCount;
 		     ++visit->scannedObjectEntries) {
-			const size_t entryOffset = 4u + (size_t)visit->scannedObjectEntries * 0x2cu;
+			const size_t entryOffset = SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES +
+			                           (size_t)visit->scannedObjectEntries * SLIP_TRACK_VISIBILITY_ENTRY_BYTES;
 
-			if (entryOffset > objectListBytes || objectListBytes - entryOffset < 0x24u) {
+			if (entryOffset > objectListBytes || objectListBytes - entryOffset < SLIP_TRACK_VISIBILITY_BOUNDS_END) {
 				return false;
 			}
 			SlipTrackVisibilityEntry *const entry = (SlipTrackVisibilityEntry *)(void *)(objectList + entryOffset);
@@ -10559,7 +10868,7 @@ bool SlipTrackWorld_PrimitiveRangeState(const uint8_t *recordFrom, size_t record
 	                                              false,
 	                                              false,
 	                                              SLIP_TRACK_WORLD_PRIMITIVE_RANGE_STATE_BRANCH_CONTINUE};
-	if (rangeMode == 1u && rangeFlag != 0) {
+	if (rangeMode == SLIP_TRACK_OUTER_OBJECT_DEPTH && rangeFlag != 0) {
 		result->restoredPrimitiveToken = restoredPrimitiveToken;
 		result->rangeMinX = viewportMinX;
 		result->rangeMinY = viewportMinY;
@@ -10570,16 +10879,16 @@ bool SlipTrackWorld_PrimitiveRangeState(const uint8_t *recordFrom, size_t record
 		result->branch = SLIP_TRACK_WORLD_PRIMITIVE_RANGE_STATE_BRANCH_RESTORED;
 		return true;
 	}
-	if (recordBytesRemaining < 0x0eu) {
+	if (recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 		return false;
 	}
 	result->primitiveRecord = recordFrom;
 	result->descriptor = SlipBytes_ReadLE16(recordFrom);
-	result->vertexCount = (uint16_t)(result->descriptor & 0x7fffu);
-	result->vertexIndexList = recordFrom + 0x0cu;
+	result->vertexCount = (uint16_t)(result->descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
+	result->vertexIndexList = recordFrom + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET;
 	result->callDraw3DPrimitivePath = true;
 	result->primitiveRejected = callDraw3DPrimitivePath.primitiveRejected;
-	if (rangeMode == 1u) {
+	if (rangeMode == SLIP_TRACK_OUTER_OBJECT_DEPTH) {
 		result->savedPrimitiveInRangeMode = true;
 	} else {
 		result->savedPrimitiveInOtherMode = true;
@@ -10595,7 +10904,7 @@ bool SlipTrackWorld_PrimitiveRangeState(const uint8_t *recordFrom, size_t record
 	currentRangeMinY = callDraw3DPrimitivePath.minY;
 	currentRangeMaxX = callDraw3DPrimitivePath.maxX;
 	currentRangeMaxY = callDraw3DPrimitivePath.maxY;
-	if (rangeMode != 1u) {
+	if (rangeMode != SLIP_TRACK_OUTER_OBJECT_DEPTH) {
 		if ((int32_t)currentRangeMinX < (int32_t)rangeMinX) {
 			currentRangeMinX = rangeMinX;
 		}
@@ -10650,17 +10959,18 @@ bool SlipTrackWorld_PrimitiveRangeStateEvaluated(
 	}
 	callDraw3DPrimitivePath = (SlipTrackWorldPrimitiveRangeStateCall){0};
 	primitive = (SlipDraw3DPrimitivePath){0};
-	if (!(rangeMode == 1u && rangeFlag != 0)) {
-		if (recordBytesRemaining < 0x0eu || pool == 0 || vertexRecords == 0 || state == 0 || transform == 0 ||
-		    projectDepth == 0 || returnVisits == 0 || activeVisits == 0 || boundsVisits == 0) {
+	if (!(rangeMode == SLIP_TRACK_OUTER_OBJECT_DEPTH && rangeFlag != 0)) {
+		if (recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END || pool == 0 || vertexRecords == 0 ||
+		    state == 0 || transform == 0 || projectDepth == 0 || returnVisits == 0 || activeVisits == 0 ||
+		    boundsVisits == 0) {
 			return false;
 		}
-		maskedVertexCount = (uint16_t)(SlipBytes_ReadLE16(recordFrom) & 0x7fffu);
-		if (!SlipDraw3D_PrimitivePath(pool, vertexRecords, vertexRecordCount, recordFrom + 0x0cu,
-		                              recordBytesRemaining - 0x0cu, maskedVertexCount, state, transform, projectDepth,
-		                              userData, depthClipCarry, screenClipCarry, returnVisits, returnVisitCapacity,
-		                              activeVisits, activeVisitCapacity, boundsVisits, boundsVisitCapacity,
-		                              &primitive)) {
+		maskedVertexCount = (uint16_t)(SlipBytes_ReadLE16(recordFrom) & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
+		if (!SlipDraw3D_PrimitivePath(
+		        pool, vertexRecords, vertexRecordCount, recordFrom + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+		        recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, maskedVertexCount, state, transform,
+		        projectDepth, userData, depthClipCarry, screenClipCarry, returnVisits, returnVisitCapacity,
+		        activeVisits, activeVisitCapacity, boundsVisits, boundsVisitCapacity, &primitive)) {
 			return false;
 		}
 		callDraw3DPrimitivePath = (SlipTrackWorldPrimitiveRangeStateCall){
@@ -10701,21 +11011,21 @@ bool SlipTrackWorld_PrimitiveRangeStateEvaluatedExecute(
 	}
 	callDraw3DPrimitivePath = (SlipTrackWorldPrimitiveRangeStateCall){0};
 	primitive = (SlipDraw3DPrimitivePathExecute){0};
-	if (!(rangeMode == 1u && rangeFlag != 0)) {
-		if (recordBytesRemaining < 0x0eu || pool == 0 || vertexRecords == 0 || state == 0 || transform == 0 ||
-		    projectDepth == 0 || projectScreen == 0 || returnVisits == 0 || clipFlagVisits == 0 || activeVisits == 0 ||
-		    boundsVisits == 0) {
+	if (!(rangeMode == SLIP_TRACK_OUTER_OBJECT_DEPTH && rangeFlag != 0)) {
+		if (recordBytesRemaining < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END || pool == 0 || vertexRecords == 0 ||
+		    state == 0 || transform == 0 || projectDepth == 0 || projectScreen == 0 || returnVisits == 0 ||
+		    clipFlagVisits == 0 || activeVisits == 0 || boundsVisits == 0) {
 			return false;
 		}
-		maskedVertexCount = (uint16_t)(SlipBytes_ReadLE16(recordFrom) & 0x7fffu);
+		maskedVertexCount = (uint16_t)(SlipBytes_ReadLE16(recordFrom) & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK);
 		if (!SlipDraw3D_PrimitivePathExecute(
-		        pool, vertexRecords, vertexRecordCount, recordFrom + 0x0cu, recordBytesRemaining - 0x0cu,
-		        maskedVertexCount, state, transform, projectDepth, projectScreen, userData, hasPostPlanes, planeBase,
-		        planeBytes, planeHeadOffset, postLimitXMin, postLimitXMax, postLimitYMin, postLimitYMax,
-		        maxClipEdgeVisits, returnVisits, returnVisitCapacity, clipFlagVisits, clipFlagVisitCapacity,
-		        postBoundsVisits, postBoundsVisitCapacity, postClipRecordVisits, postClipRecordVisitCapacity,
-		        postClipPlaneVisits, postClipPlaneVisitCapacity, activeVisits, activeVisitCapacity, boundsVisits,
-		        boundsVisitCapacity, &primitive)) {
+		        pool, vertexRecords, vertexRecordCount, recordFrom + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET,
+		        recordBytesRemaining - SLIP_TRC_PRIMITIVE_HEADER_BYTES, maskedVertexCount, state, transform,
+		        projectDepth, projectScreen, userData, hasPostPlanes, planeBase, planeBytes, planeHeadOffset,
+		        postLimitXMin, postLimitXMax, postLimitYMin, postLimitYMax, maxClipEdgeVisits, returnVisits,
+		        returnVisitCapacity, clipFlagVisits, clipFlagVisitCapacity, postBoundsVisits, postBoundsVisitCapacity,
+		        postClipRecordVisits, postClipRecordVisitCapacity, postClipPlaneVisits, postClipPlaneVisitCapacity,
+		        activeVisits, activeVisitCapacity, boundsVisits, boundsVisitCapacity, &primitive)) {
 			return false;
 		}
 		callDraw3DPrimitivePath = (SlipTrackWorldPrimitiveRangeStateCall){
@@ -10799,7 +11109,7 @@ bool SlipTrackWorld_PrimitiveDrawAdvance(const uint8_t *record, size_t recordByt
 	*result = (SlipTrackWorldPrimitiveDrawAdvance){remainingCountBefore,
 	                                               true,
 	                                               descriptor,
-	                                               (descriptor & 0x8000u) != 0,
+	                                               (descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) != 0,
 	                                               false,
 	                                               0,
 	                                               0,
@@ -10810,11 +11120,12 @@ bool SlipTrackWorld_PrimitiveDrawAdvance(const uint8_t *record, size_t recordByt
 	                                               SLIP_TRACK_WORLD_PRIMITIVE_DRAW_ADVANCE_BRANCH_FINISHED};
 	if (result->highBit) {
 		result->savedStrideAccumulator = true;
-		result->vertexSourceStride = 6u;
-		advance = (uint32_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+		result->vertexSourceStride = SLIP_TRC_TEXTURED_VERTEX_BYTES;
+		advance = (uint32_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+		          SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		result->restoredStrideAccumulator = true;
 	} else {
-		advance = (uint32_t)descriptor * 2u + 0x0cu;
+		advance = (uint32_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 	}
 	result->advance = advance;
 	result->recordOffsetAfterAdvance = recordOffsetAfterAdvance + (size_t)advance;
@@ -10858,11 +11169,13 @@ bool SlipTrackWorld_ChildListDispatch(const uint8_t *componentBefore, size_t com
 	uint16_t childOffset;
 	const uint8_t *childList;
 
-	if (componentBefore == 0 || componentBase == 0 || result == 0 || componentBytesRemaining < 4u) {
+	if (componentBefore == 0 || componentBase == 0 || result == 0 ||
+	    componentBytesRemaining < SLIP_TRC_COMPONENT_POINT_LIST_END) {
 		return false;
 	}
-	childOffset = SlipBytes_ReadLE16(componentBefore + 0x02u);
-	if ((size_t)childOffset > componentBaseBytes || componentBaseBytes - (size_t)childOffset < 2u) {
+	childOffset = SlipBytes_ReadLE16(componentBefore + SLIP_TRC_COMPONENT_POINT_LIST_OFFSET);
+	if ((size_t)childOffset > componentBaseBytes ||
+	    componentBaseBytes - (size_t)childOffset < SLIP_TRC_TABLE_COUNT_BYTES) {
 		return false;
 	}
 	childList = componentBase + childOffset;
@@ -10871,8 +11184,8 @@ bool SlipTrackWorld_ChildListDispatch(const uint8_t *componentBefore, size_t com
 	                                            .vertexCount = SlipBytes_ReadLE16(childList),
 	                                            .savedComponentPointer = true,
 	                                            .componentBefore = componentBefore,
-	                                            .vertexSource = childList + 0x02u,
-	                                            .vertexSourceStride = 6u,
+	                                            .vertexSource = childList + SLIP_TRC_TABLE_COUNT_BYTES,
+	                                            .vertexSourceStride = SLIP_TRC_POINT_BYTES,
 	                                            .callBuildVertexRecords = true,
 	                                            .restoredComponent = componentBefore,
 	                                            .returned = true};
@@ -10917,7 +11230,7 @@ bool SlipTrackWorld_DeferredListSetup(uint32_t frameRenderFlags, uint32_t viewpo
 		return false;
 	}
 	*result = (SlipTrackWorldDeferredListSetup){frameRenderFlags,
-	                                            frameRenderFlags == 0xffffffffu,
+	                                            frameRenderFlags == UINT32_MAX,
 	                                            0,
 	                                            0,
 	                                            0,
@@ -10933,7 +11246,7 @@ bool SlipTrackWorld_DeferredListSetup(uint32_t frameRenderFlags, uint32_t viewpo
 		result->returned = true;
 		return true;
 	}
-	if (deferredList == 0 || listBytes < 4u) {
+	if (deferredList == 0 || listBytes < SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES) {
 		return false;
 	}
 	result->clipMinX = viewportMinX;
@@ -10948,7 +11261,7 @@ bool SlipTrackWorld_DeferredListSetup(uint32_t frameRenderFlags, uint32_t viewpo
 		result->returned = true;
 		return true;
 	}
-	result->firstCursor = deferredList + 4u;
+	result->firstCursor = deferredList + SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES;
 	result->branch = SLIP_TRACK_WORLD_DEFERRED_LIST_SETUP_BRANCH_READY;
 	return true;
 }
@@ -10958,8 +11271,9 @@ bool SlipTrackWorld_DeferredItemPrologue(uint32_t savedRemainingCount, const uin
                                          size_t entryBytesRemaining, uint32_t viewportMinX, uint32_t viewportMinY,
                                          uint32_t viewportMaxX, uint32_t viewportMaxY,
                                          SlipTrackWorldDeferredItemPrologue *result) {
-	if (savedCursor == 0 || inputEntry == 0 || result == 0 || cursorBytesRemaining < 4u ||
-	    entryBytesRemaining < 0x2cu) {
+	if (savedCursor == 0 || inputEntry == 0 || result == 0 ||
+	    cursorBytesRemaining < SLIP_TRACK_DEFERRED_REFERENCE_BYTES ||
+	    entryBytesRemaining < SLIP_TRACK_VISIBILITY_ENTRY_BYTES) {
 		return false;
 	}
 	const SlipTrackVisibilityEntry *const entry = (const SlipTrackVisibilityEntry *)(const void *)inputEntry;
@@ -10985,7 +11299,7 @@ bool SlipTrackWorld_DeferredItemPrologue(uint32_t savedRemainingCount, const uin
 	                                               false,
 	                                               SLIP_TRACK_WORLD_DEFERRED_ITEM_PROLOGUE_BRANCH_DIRECT};
 	if (result->resetMaximumDepth != 0) {
-		result->restoredMaximumDepth = 0x7fffffffu;
+		result->restoredMaximumDepth = INT32_MAX;
 		result->callDraw3DSetMaximumDepth = true;
 	}
 	result->useEntryTransform = result->useClipBounds != 0;
@@ -11032,17 +11346,19 @@ bool SlipTrackWorld_DeferredItemDirect(
 	uint16_t componentOffset;
 	const uint8_t *component;
 	SlipTrackWorldComponentSetup componentSetup;
-	SlipTrackWorldComponentTailVisit tailVisits[128];
+	SlipTrackWorldComponentTailVisit tailVisits[SLIP_TRACK_DEFERRED_VISIT_CAPACITY];
 	SlipTrackWorldComponentTail componentTail;
-	SlipTrackWorldPrimitiveWalkerVisit primitiveVisits[128];
+	SlipTrackWorldPrimitiveWalkerVisit primitiveVisits[SLIP_TRACK_DEFERRED_VISIT_CAPACITY];
 	SlipTrackWorldPrimitiveWalker primitiveWalker;
 	size_t tailVisitCount = 0;
 
-	if (record == 0 || componentBase == 0 || restoredCursor == 0 || result == 0 || recordBytesRemaining < 0x22u) {
+	if (record == 0 || componentBase == 0 || restoredCursor == 0 || result == 0 ||
+	    recordBytesRemaining < SLIP_TRD_SECTION_BYTES) {
 		return false;
 	}
-	componentOffset = SlipBytes_ReadLE16(record + 0x02u);
-	if ((size_t)componentOffset > componentBaseBytes || componentBaseBytes - (size_t)componentOffset < 0x18u) {
+	componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if ((size_t)componentOffset > componentBaseBytes ||
+	    componentBaseBytes - (size_t)componentOffset < SLIP_TRC_COMPONENT_FLAGS_END) {
 		return false;
 	}
 	component = componentBase + componentOffset;
@@ -11051,10 +11367,10 @@ bool SlipTrackWorld_DeferredItemDirect(
 	result->viewX = x;
 	result->viewY = y;
 	result->viewZ = z;
-	result->recordDepthFadeThreshold = SlipBytes_ReadLE16(record + 0x20u);
+	result->recordDepthFadeThreshold = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_SHADE_OFFSET);
 	result->componentOffset = componentOffset;
 	result->componentAddress = componentBaseAddress + (uint32_t)componentOffset;
-	result->componentDrawMask = SlipBytes_ReadLE16(component + 0x16u);
+	result->componentDrawMask = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_FLAGS_OFFSET);
 	result->restoredMaximumDepth = savedMaximumDepth;
 	result->callDraw3DSetMaximumDepth = true;
 	result->restoredFadeStart = savedFadeStart;
@@ -11063,20 +11379,18 @@ bool SlipTrackWorld_DeferredItemDirect(
 	result->callRestoreDepthFade = true;
 	result->restoredCursor = restoredCursor;
 	result->restoredRemainingCount = restoredRemainingCount;
-	result->nextCursor = restoredCursor + 4u;
+	result->nextCursor = restoredCursor + SLIP_TRACK_DEFERRED_REFERENCE_BYTES;
 	result->remainingCount = restoredRemainingCount - 1u;
 	result->branch = SLIP_TRACK_WORLD_DEFERRED_ITEM_DIRECT_BRANCH_CONTINUE;
-	if ((int16_t)result->recordDepthFadeThreshold <= 0x1000) {
+	if ((int16_t)result->recordDepthFadeThreshold <= SLIP_TRACK_DEPTH_FADE_THRESHOLD) {
 		result->disabledFadeStart = 0;
 		result->callDisableDepthFade = true;
 	}
 	result->enabledComponentDrawMask = (uint16_t)(result->componentDrawMask & renderContextIndex);
 	if (result->enabledComponentDrawMask != 0) {
 
-		enum { REGISTER_UPPER_WORD_MASK = 0xffff0000u };
-
 		uint32_t incomingValue = result->callDisableDepthFade ? 0 : x;
-		incomingValue = (incomingValue & REGISTER_UPPER_WORD_MASK) | result->enabledComponentDrawMask;
+		incomingValue = (incomingValue & SLIP_TRACK_REGISTER_UPPER_WORD_MASK) | result->enabledComponentDrawMask;
 		if (!SlipTrackWorld_ComponentSetup(record, recordBytesRemaining, incomingValue, z, drawFlags, textureMode,
 		                                   shading, componentDistance, shadingSecondary, componentRadius, specialRecord,
 		                                   globalAfter, randomState, shadows, processedComponentCount, drawStateIndex,
@@ -11149,17 +11463,18 @@ bool SlipTrackWorld_DeferredItemDirect(
 				result->callTrackWorldDirectCallbackLoop = true;
 				result->directCallbackChildOffset = primitiveWalker.childOffset;
 				result->directCallbackCount = SlipBytes_ReadLE16(componentBase + directListOffset);
-				result->directCallbackFirstRecordOffset = directListOffset + 2u;
+				result->directCallbackFirstRecordOffset = directListOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 				if (callbackFunction != 0) {
 					SlipTrackWorldDirectCallbackLoop directLoop;
 					SlipTrackWorldDirectCallbackEnvironment directEnvironment = {
 					    &componentSetup, &componentTail, &primitiveWalker, {(int32_t)x, (int32_t)y, (int32_t)z}};
 
 					{
-						const size_t loopListOffset = (size_t)SlipBytes_ReadLE16(component + 0x04u);
+						const size_t loopListOffset =
+						    (size_t)SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 
 						directVisitCapacity = 0;
-						if (loopListOffset + 2u <= componentBaseBytes) {
+						if (loopListOffset + SLIP_TRC_TABLE_COUNT_BYTES <= componentBaseBytes) {
 							directVisitCapacity = (size_t)SlipBytes_ReadLE16(componentBase + loopListOffset);
 						}
 					}
@@ -11344,13 +11659,13 @@ bool SlipTrackWorld_DeferredListDirectExecute(
 		SlipTrackWorldDeferredListDirectExecuteVisit *visit;
 
 		if (visitCount >= visitCapacity || cursor < deferredList || (size_t)(cursor - deferredList) > listBytes ||
-		    listBytes - (size_t)(cursor - deferredList) < 4u) {
+		    listBytes - (size_t)(cursor - deferredList) < SLIP_TRACK_DEFERRED_REFERENCE_BYTES) {
 			return false;
 		}
 		visit = &visits[visitCount];
 		entryAddress = SlipBytes_ReadLE32(cursor);
 		entryMapped = SlipTrackWorld_FindHostPointerByDosAddress(entryMap, entryMapCount, entryAddress);
-		if (entryMapped == 0 || entryMapped->host == 0 || entryMapped->bytes < 0x2cu) {
+		if (entryMapped == 0 || entryMapped->host == 0 || entryMapped->bytes < SLIP_TRACK_VISIBILITY_ENTRY_BYTES) {
 			return false;
 		}
 		if (!SlipTrackWorld_DeferredItemPrologue(remainingCount, cursor, listBytes - (size_t)(cursor - deferredList),
@@ -11366,7 +11681,7 @@ bool SlipTrackWorld_DeferredListDirectExecute(
 			return false;
 		}
 		recordMapped = SlipTrackWorld_FindHostPointerByDosAddress(recordMap, recordMapCount, visit->recordAddress);
-		if (recordMapped == 0 || recordMapped->host == 0 || recordMapped->bytes < 0x22u) {
+		if (recordMapped == 0 || recordMapped->host == 0 || recordMapped->bytes < SLIP_TRD_SECTION_BYTES) {
 			return false;
 		}
 		visit->callTestRecordVisibility = false;
@@ -11447,7 +11762,7 @@ bool SlipTrackWorld_DeferredListDirectExecute(
 					                                     true,
 					                                     cursor,
 					                                     remainingCount,
-					                                     cursor + 4u,
+					                                     cursor + SLIP_TRACK_DEFERRED_REFERENCE_BYTES,
 					                                     remainingCount - 1u,
 					                                     false,
 					                                     SLIP_TRACK_WORLD_DEFERRED_ITEM_DIRECT_BRANCH_CONTINUE};
@@ -11478,8 +11793,9 @@ bool SlipTrackWorld_DeferredListDirectExecute(
 				                                       visit->transformSetup.branch == SLIP_TRACK_WORLD_RECORD_MATRIX
 				                                           ? visit->facingTransform.facingModeFlag
 				                                           : visit->matrixTransform.facingModeFlag,
-				                                       renderContextIndex == 0x10u ? (liveDrawFlags & 0xfffffffdu)
-				                                                                   : liveDrawFlags,
+				                                       renderContextIndex == SLIP_TRACK_SPECIAL_RENDER_MODE
+				                                           ? (liveDrawFlags & ~SLIP_RENDER_FLAT_SHADING)
+				                                           : liveDrawFlags,
 				                                       frameRenderFlags, &visit->drawDispatch)) {
 					return false;
 				}
@@ -11499,7 +11815,9 @@ bool SlipTrackWorld_DeferredListDirectExecute(
 					               (SlipView3DVec32){(int32_t)visit->scaledCenter.drawSetup.rotationX,
 					                                 (int32_t)visit->scaledCenter.drawSetup.rotationY,
 					                                 (int32_t)visit->scaledCenter.drawSetup.rotationZ},
-					               renderContextIndex == 0x10u ? (liveDrawFlags & 0xfffffffdu) : liveDrawFlags,
+					               renderContextIndex == SLIP_TRACK_SPECIAL_RENDER_MODE
+					                   ? (liveDrawFlags & ~SLIP_RENDER_FLAT_SHADING)
+					                   : liveDrawFlags,
 					               shapeDrawUserData)) {
 						return false;
 					}
@@ -11518,7 +11836,7 @@ bool SlipTrackWorld_DeferredListDirectExecute(
 				                                               true,
 				                                               cursor,
 				                                               remainingCount,
-				                                               cursor + 4u,
+				                                               cursor + SLIP_TRACK_DEFERRED_REFERENCE_BYTES,
 				                                               remainingCount - 1u,
 				                                               false,
 				                                               SLIP_TRACK_WORLD_DEFERRED_ITEM_DIRECT_BRANCH_CONTINUE};
@@ -11545,7 +11863,7 @@ bool SlipTrackWorld_DeferredListDirectExecute(
 			                                               true,
 			                                               cursor,
 			                                               remainingCount,
-			                                               cursor + 4u,
+			                                               cursor + SLIP_TRACK_DEFERRED_REFERENCE_BYTES,
 			                                               remainingCount - 1u,
 			                                               false,
 			                                               SLIP_TRACK_WORLD_DEFERRED_ITEM_DIRECT_BRANCH_CONTINUE};
@@ -11606,12 +11924,13 @@ bool SlipTrackWorld_DeferredMembership(const uint8_t *deferredList, size_t listB
 	uint32_t count;
 	uint32_t i;
 
-	if (deferredList == 0 || result == 0 || listBytes < 4u) {
+	if (deferredList == 0 || result == 0 || listBytes < SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES) {
 		return false;
 	}
 	count = *(const uint32_t *)(const void *)deferredList;
 	if (count != 0) {
-		if (scanBase == 0 || count > (uint32_t)(SIZE_MAX / 4u) || scanBytes < (size_t)count * 4u) {
+		if (scanBase == 0 || count > (uint32_t)(SIZE_MAX / SLIP_TRACK_DEFERRED_REFERENCE_BYTES) ||
+		    scanBytes < (size_t)count * SLIP_TRACK_DEFERRED_REFERENCE_BYTES) {
 			return false;
 		}
 	}
@@ -11644,37 +11963,41 @@ bool SlipTrackWorld_DeferredCallbackGate(const uint8_t *record, size_t recordByt
 	uint32_t count;
 	uint32_t i;
 
-	if (record == 0 || objectList == 0 || result == 0 || recordBytesRemaining < 4u || objectListBytes < 4u) {
+	if (record == 0 || objectList == 0 || result == 0 || recordBytesRemaining < SLIP_TRD_SECTION_COMPONENT_END ||
+	    objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) {
 		return false;
 	}
 	count = *(const uint32_t *)(const void *)objectList;
-	if (count > (uint32_t)((SIZE_MAX - 4u) / 0x2cu) || objectListBytes - 4u < (size_t)count * 0x2cu) {
+	if (count > (uint32_t)((SIZE_MAX - SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) / SLIP_TRACK_VISIBILITY_ENTRY_BYTES) ||
+	    objectListBytes - SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES < (size_t)count * SLIP_TRACK_VISIBILITY_ENTRY_BYTES) {
 		return false;
 	}
-	*result = (SlipTrackWorldDeferredCallbackGate){SlipBytes_ReadLE16(record),
-	                                               true,
-	                                               after,
-	                                               objectList,
-	                                               count,
-	                                               count == 0,
-	                                               count == 0 ? 0 : objectList + 4u,
-	                                               0,
-	                                               false,
-	                                               0,
-	                                               0,
-	                                               0,
-	                                               0,
-	                                               0,
-	                                               0,
-	                                               0,
-	                                               0,
-	                                               renderContextCount,
-	                                               SLIP_TRACK_WORLD_DEFERRED_CALLBACK_GATE_BRANCH_SKIPPED};
+	*result =
+	    (SlipTrackWorldDeferredCallbackGate){SlipBytes_ReadLE16(record),
+	                                         true,
+	                                         after,
+	                                         objectList,
+	                                         count,
+	                                         count == 0,
+	                                         count == 0 ? 0 : objectList + SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES,
+	                                         0,
+	                                         false,
+	                                         0,
+	                                         0,
+	                                         0,
+	                                         0,
+	                                         0,
+	                                         0,
+	                                         0,
+	                                         0,
+	                                         renderContextCount,
+	                                         SLIP_TRACK_WORLD_DEFERRED_CALLBACK_GATE_BRANCH_SKIPPED};
 	if (result->zeroCount) {
 		return true;
 	}
 	for (i = 0; i < count; ++i) {
-		const uint8_t *const entry = objectList + 4u + (size_t)i * 0x2cu;
+		const uint8_t *const entry =
+		    objectList + SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES + (size_t)i * SLIP_TRACK_VISIBILITY_ENTRY_BYTES;
 
 		result->scannedEntries = i + 1u;
 		const SlipTrackVisibilityEntry *const visibility = (const SlipTrackVisibilityEntry *)(const void *)entry;
@@ -11697,7 +12020,7 @@ bool SlipTrackWorld_DeferredCallbackGate(const uint8_t *record, size_t recordByt
 	if (defaultTraversalGate != 0) {
 		return true;
 	}
-	result->specialModeBits = (uint16_t)(renderContextIndex & 0x18u);
+	result->specialModeBits = (uint16_t)(renderContextIndex & SLIP_TRACK_SPECIAL_RENDER_MASK);
 	if (result->specialModeBits == 0) {
 		uint16_t componentOffset;
 		const uint8_t *component;
@@ -11705,14 +12028,16 @@ bool SlipTrackWorld_DeferredCallbackGate(const uint8_t *record, size_t recordByt
 		if (componentBase == 0) {
 			return false;
 		}
-		componentOffset = SlipBytes_ReadLE16(record + 0x02u);
-		if ((size_t)componentOffset > componentBaseBytes || componentBaseBytes - (size_t)componentOffset < 0x18u) {
+		componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+		if ((size_t)componentOffset > componentBaseBytes ||
+		    componentBaseBytes - (size_t)componentOffset < SLIP_TRC_COMPONENT_FLAGS_END) {
 			return false;
 		}
 		component = componentBase + componentOffset;
 		result->componentOffset = componentOffset;
 		result->componentAddress = componentBaseAddress + (uint32_t)componentOffset;
-		result->componentSpecialModeBits = (uint16_t)(SlipBytes_ReadLE16(component + 0x16u) & 0x18u);
+		result->componentSpecialModeBits = (uint16_t)(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_FLAGS_OFFSET) &
+		                                              SLIP_TRACK_SPECIAL_RENDER_MASK);
 		if (result->componentSpecialModeBits != 0) {
 			return true;
 		}
@@ -11728,11 +12053,11 @@ bool SlipTrackWorld_DeferredContinuationGate(uint16_t renderContextIndex, const 
                                              size_t objectListBytes, uint32_t primaryLeft, uint32_t primaryTop,
                                              uint32_t primaryRight, uint32_t primaryBottom,
                                              SlipTrackWorldDeferredContinuationGate *result) {
-	if (objectList == 0 || result == 0 || objectListBytes < 4u) {
+	if (objectList == 0 || result == 0 || objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) {
 		return false;
 	}
 	*result = (SlipTrackWorldDeferredContinuationGate){renderContextIndex,
-	                                                   renderContextIndex == 0x10u,
+	                                                   renderContextIndex == SLIP_TRACK_SPECIAL_RENDER_MODE,
 	                                                   0,
 	                                                   0,
 	                                                   false,
@@ -11747,7 +12072,7 @@ bool SlipTrackWorld_DeferredContinuationGate(uint16_t renderContextIndex, const 
 	}
 	result->objectList = objectList;
 	result->objectListCount = *(const uint32_t *)(const void *)objectList;
-	result->objectListFull = result->objectListCount == 0x300u;
+	result->objectListFull = result->objectListCount == SLIP_TRACK_VISIBILITY_ENTRY_CAPACITY;
 	if (result->objectListFull) {
 		return true;
 	}
@@ -11767,10 +12092,11 @@ bool SlipTrackWorld_DeferredCullGate(const uint8_t *record, size_t recordBytesRe
                                      SlipTrackWorldDeferredCullGate *result) {
 	uint16_t componentOffset;
 
-	if (record == 0 || componentBase == 0 || savedEntry == 0 || result == 0 || recordBytesRemaining < 4u) {
+	if (record == 0 || componentBase == 0 || savedEntry == 0 || result == 0 ||
+	    recordBytesRemaining < SLIP_TRD_SECTION_COMPONENT_END) {
 		return false;
 	}
-	componentOffset = SlipBytes_ReadLE16(record + 0x02u);
+	componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 	if ((size_t)componentOffset > componentBaseBytes) {
 		return false;
 	}
@@ -11783,7 +12109,7 @@ bool SlipTrackWorld_DeferredCullGate(const uint8_t *record, size_t recordBytesRe
 	                                           true,
 	                                           trackWorldCullBoundsCarry,
 	                                           savedEntry,
-	                                           0x7fffffffu,
+	                                           INT32_MAX,
 	                                           true,
 	                                           true,
 	                                           true,
@@ -11806,7 +12132,8 @@ bool SlipTrackWorld_DeferredEntryWrite(uint8_t *entryBytes, size_t entryBytesRem
                                        uint32_t objectListCursor, SlipTrackWorldDeferredEntryWrite *result) {
 	uint32_t countBefore;
 
-	if (entryBytes == 0 || objectList == 0 || result == 0 || entryBytesRemaining < 0x2cu || objectListBytes < 4u) {
+	if (entryBytes == 0 || objectList == 0 || result == 0 || entryBytesRemaining < SLIP_TRACK_VISIBILITY_ENTRY_BYTES ||
+	    objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) {
 		return false;
 	}
 	uint32_t *const objectCount = (uint32_t *)(void *)objectList;
@@ -11821,7 +12148,7 @@ bool SlipTrackWorld_DeferredEntryWrite(uint8_t *entryBytes, size_t entryBytesRem
 	entry->minY = primaryTop;
 	entry->maxX = primaryRight;
 	entry->maxY = primaryBottom;
-	entry->useClipBounds = 0xffffffffu;
+	entry->useClipBounds = UINT32_MAX;
 	entry->resetMaximumDepth = 0;
 	*objectCount = countBefore + 1u;
 	*result = (SlipTrackWorldDeferredEntryWrite){componentViewX,   componentViewY,
@@ -11832,8 +12159,8 @@ bool SlipTrackWorld_DeferredEntryWrite(uint8_t *entryBytes, size_t entryBytesRem
 	                                             primaryRight,     primaryBottom,
 	                                             primaryLeft,      primaryTop,
 	                                             primaryRight,     primaryBottom,
-	                                             0xffffffffu,      0,
-	                                             objectListCursor, objectListCursor + 0x2cu,
+	                                             UINT32_MAX,       0,
+	                                             objectListCursor, objectListCursor + SLIP_TRACK_VISIBILITY_ENTRY_BYTES,
 	                                             objectList,       countBefore,
 	                                             countBefore + 1u, true};
 	return true;
@@ -11845,17 +12172,18 @@ bool SlipTrackWorld_DeferredAppendTail(uint8_t *deferredList, size_t listBytes, 
 	uint32_t countBefore;
 	uint32_t offset;
 
-	if (deferredList == 0 || scanBase == 0 || result == 0 || listBytes < 4u) {
+	if (deferredList == 0 || scanBase == 0 || result == 0 || listBytes < SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES) {
 		return false;
 	}
 	countBefore = *(const uint32_t *)(const void *)deferredList;
-	offset = countBefore << 2;
-	if (listBytes - 4u < (size_t)offset + 4u || scanBytes < (size_t)offset + 4u) {
+	offset = countBefore << SLIP_TRACK_DEFERRED_REFERENCE_SHIFT;
+	if (listBytes - SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES < (size_t)offset + SLIP_TRACK_DEFERRED_REFERENCE_BYTES ||
+	    scanBytes < (size_t)offset + SLIP_TRACK_DEFERRED_REFERENCE_BYTES) {
 		return false;
 	}
 	*(uint32_t *)(void *)deferredList = countBefore + 1u;
-	((uint32_t *)(void *)deferredList)[1u + offset / 4u] = storedEntryAddress;
-	((uint32_t *)(void *)scanBase)[offset / 4u] = storedRecordAddress;
+	((uint32_t *)(void *)deferredList)[1u + offset / SLIP_TRACK_DEFERRED_REFERENCE_BYTES] = storedEntryAddress;
+	((uint32_t *)(void *)scanBase)[offset / SLIP_TRACK_DEFERRED_REFERENCE_BYTES] = storedRecordAddress;
 	*result = (SlipTrackWorldDeferredAppendTail){
 	    deferredList,        countBefore, countBefore + 1u, offset, storedEntryAddress, scanBaseAddress + offset,
 	    storedRecordAddress, true};
@@ -11872,16 +12200,16 @@ bool SlipTrackWorld_DeferredExistingEntry(bool enter, uint8_t *savedEntry, size_
                                           uint32_t viewportMaxY, SlipTrackWorldDeferredExistingEntry *result) {
 	uint32_t entryUseClipBounds;
 
-	if (savedEntry == 0 || result == 0 || entryBytesRemaining < 0x28u) {
+	if (savedEntry == 0 || result == 0 || entryBytesRemaining < SLIP_TRACK_VISIBILITY_CLIP_BOUNDS_END) {
 		return false;
 	}
-	if (enter && (objectList == 0 || objectListBytes < 4u)) {
+	if (enter && (objectList == 0 || objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES)) {
 		return false;
 	}
 	SlipTrackVisibilityEntry *const entry = (SlipTrackVisibilityEntry *)(void *)savedEntry;
 	entryUseClipBounds = entry->useClipBounds;
 	*result = (SlipTrackWorldDeferredExistingEntry){enter,
-	                                                enter ? 0xffffffffu : 0,
+	                                                enter ? UINT32_MAX : 0,
 	                                                enter ? objectList : 0,
 	                                                enter ? *(const uint32_t *)(const void *)objectList : 0,
 	                                                enter ? *(const uint32_t *)(const void *)objectList : 0,
@@ -11913,12 +12241,12 @@ bool SlipTrackWorld_DeferredExistingEntry(bool enter, uint8_t *savedEntry, size_
 	}
 	result->renderContextCount = renderContextCount;
 	if (renderContextCount == 0) {
-		entry->useClipBounds = 0xffffffffu;
-		result->storedUseClipBounds = 0xffffffffu;
+		entry->useClipBounds = UINT32_MAX;
+		result->storedUseClipBounds = UINT32_MAX;
 		result->branch = SLIP_TRACK_WORLD_DEFERRED_EXISTING_ENTRY_BRANCH_UNCLIPPED;
 		return true;
 	}
-	if (record == 0 || componentBase == 0 || recordBytesRemaining < 4u) {
+	if (record == 0 || componentBase == 0 || recordBytesRemaining < SLIP_TRD_SECTION_COMPONENT_END) {
 		return false;
 	}
 	result->cullClipMinX = primaryLeft;
@@ -11927,7 +12255,7 @@ bool SlipTrackWorld_DeferredExistingEntry(bool enter, uint8_t *savedEntry, size_
 	result->cullClipMaxY = primaryBottom;
 	result->callStoreCullClipBounds = true;
 	result->savedEntry = savedEntry;
-	result->componentOffset = SlipBytes_ReadLE16(record + 0x02u);
+	result->componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
 	if ((size_t)result->componentOffset > componentBaseBytes) {
 		return false;
 	}
@@ -11944,8 +12272,8 @@ bool SlipTrackWorld_DeferredExistingEntry(bool enter, uint8_t *savedEntry, size_
 	result->callRestoreClipBounds = true;
 	result->restoredCullFlags = true;
 	if (trackWorldCullBoundsCarry) {
-		entry->useClipBounds = 0xffffffffu;
-		result->storedUseClipBounds = 0xffffffffu;
+		entry->useClipBounds = UINT32_MAX;
+		result->storedUseClipBounds = UINT32_MAX;
 		result->branch = SLIP_TRACK_WORLD_DEFERRED_EXISTING_ENTRY_BRANCH_UNCLIPPED;
 	}
 	return true;
@@ -11980,7 +12308,7 @@ bool SlipTrackWorld_DeferredCallbackHeader(uint32_t deferredEntryActive, uint32_
 	if (renderContextCount == 0) {
 		return true;
 	}
-	if (objectList == 0 || objectListBytes < 4u) {
+	if (objectList == 0 || objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES) {
 		return false;
 	}
 	result->viewX = viewX;
@@ -11988,7 +12316,7 @@ bool SlipTrackWorld_DeferredCallbackHeader(uint32_t deferredEntryActive, uint32_
 	result->viewZ = viewZ;
 	result->objectList = objectList;
 	result->objectListCount = *(const uint32_t *)(const void *)objectList;
-	result->objectListFull = result->objectListCount == 0x300u;
+	result->objectListFull = result->objectListCount == SLIP_TRACK_VISIBILITY_ENTRY_CAPACITY;
 	if (result->objectListFull) {
 		return true;
 	}
@@ -12006,7 +12334,7 @@ bool SlipTrackWorld_DeferredCallbackCull(const uint8_t *record, size_t recordByt
                                          bool trackWorldIndirectCullCarry, uint32_t viewportMinX, uint32_t viewportMinY,
                                          uint32_t viewportMaxX, uint32_t viewportMaxY,
                                          SlipTrackWorldDeferredCallbackCull *result) {
-	if (record == 0 || result == 0 || recordBytesRemaining < 0x20u) {
+	if (record == 0 || result == 0 || recordBytesRemaining < SLIP_TRACK_CALLBACK_CULL_RADIUS_END) {
 		return false;
 	}
 	*result = (SlipTrackWorldDeferredCallbackCull){savedMaximumDepth,
@@ -12014,10 +12342,10 @@ bool SlipTrackWorld_DeferredCallbackCull(const uint8_t *record, size_t recordByt
 	                                               viewX,
 	                                               viewY,
 	                                               viewZ,
-	                                               SlipBytes_ReadLE32(record + 0x1cu),
+	                                               SlipBytes_ReadLE32(record + SLIP_TRACK_CALLBACK_CULL_RADIUS_OFFSET),
 	                                               true,
 	                                               trackWorldIndirectCullCarry,
-	                                               0x7fffffffu,
+	                                               INT32_MAX,
 	                                               true,
 	                                               true,
 	                                               true,
@@ -12045,15 +12373,18 @@ bool SlipTrackWorld_DeferredCallbackWrite(uint8_t *inputEntry, size_t entryBytes
 	uint32_t listOffset;
 
 	if (inputEntry == 0 || objectList == 0 || inputDeferredList == 0 || scanBase == 0 || result == 0 ||
-	    entryBytesRemaining < 0x2cu || objectListBytes < 4u || listBytes < 4u) {
+	    entryBytesRemaining < SLIP_TRACK_VISIBILITY_ENTRY_BYTES ||
+	    objectListBytes < SLIP_TRACK_VISIBILITY_LIST_HEADER_BYTES ||
+	    listBytes < SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES) {
 		return false;
 	}
 	uint32_t *const objectCount = (uint32_t *)(void *)objectList;
 	uint32_t *const deferredList = (uint32_t *)(void *)inputDeferredList;
 	uint32_t *const recordReferences = (uint32_t *)(void *)scanBase;
 	listCountBefore = deferredList[0];
-	listOffset = listCountBefore << 2;
-	if (listBytes - 4u < (size_t)listOffset + 4u || scanBytes < (size_t)listOffset + 4u) {
+	listOffset = listCountBefore << SLIP_TRACK_DEFERRED_REFERENCE_SHIFT;
+	if (listBytes - SLIP_TRACK_DEFERRED_LIST_HEADER_BYTES < (size_t)listOffset + SLIP_TRACK_DEFERRED_REFERENCE_BYTES ||
+	    scanBytes < (size_t)listOffset + SLIP_TRACK_DEFERRED_REFERENCE_BYTES) {
 		return false;
 	}
 	objectCountBefore = *objectCount;
@@ -12062,12 +12393,12 @@ bool SlipTrackWorld_DeferredCallbackWrite(uint8_t *inputEntry, size_t entryBytes
 	entry->viewPosition.y = (int32_t)y;
 	entry->viewPosition.z = (int32_t)z;
 	entry->recordAddress = recordAddress;
-	entry->callbackFlag = 0xffffffffu;
+	entry->callbackFlag = UINT32_MAX;
 	entry->minX = primaryLeft;
 	entry->minY = primaryTop;
 	entry->maxX = primaryRight;
 	entry->maxY = primaryBottom;
-	entry->useClipBounds = 0xffffffffu;
+	entry->useClipBounds = UINT32_MAX;
 	entry->resetMaximumDepth = 0;
 	*objectCount = objectCountBefore + 1u;
 	deferredList[0] = listCountBefore + 1u;
@@ -12082,7 +12413,7 @@ bool SlipTrackWorld_DeferredCallbackWrite(uint8_t *inputEntry, size_t entryBytes
 	                                                y,
 	                                                z,
 	                                                recordAddress,
-	                                                0xffffffffu,
+	                                                UINT32_MAX,
 	                                                primaryLeft,
 	                                                primaryTop,
 	                                                primaryRight,
@@ -12091,13 +12422,13 @@ bool SlipTrackWorld_DeferredCallbackWrite(uint8_t *inputEntry, size_t entryBytes
 	                                                primaryTop,
 	                                                primaryRight,
 	                                                primaryBottom,
-	                                                0xffffffffu,
+	                                                UINT32_MAX,
 	                                                0,
 	                                                objectList,
 	                                                objectCountBefore,
 	                                                objectCountBefore + 1u,
 	                                                objectListCursor,
-	                                                objectListCursor + 0x2cu,
+	                                                objectListCursor + SLIP_TRACK_VISIBILITY_ENTRY_BYTES,
 	                                                inputDeferredList,
 	                                                listCountBefore,
 	                                                listCountBefore + 1u,
@@ -12109,6 +12440,34 @@ bool SlipTrackWorld_DeferredCallbackWrite(uint8_t *inputEntry, size_t entryBytes
 	return true;
 }
 
+enum {
+	SLIP_TRACK_CELL_COUNT_X = 12,
+	SLIP_TRACK_CELL_COUNT_Y = 4,
+	SLIP_TRACK_CELL_COUNT_Z = 20,
+	SLIP_TRACK_CELL_ROW_STRIDE = SLIP_TRACK_CELL_COUNT_X,
+	SLIP_TRACK_CELL_PLANE_STRIDE = SLIP_TRACK_CELL_COUNT_X * SLIP_TRACK_CELL_COUNT_Y,
+	SLIP_TRACK_CELL_REFERENCE_BYTES = sizeof(uint32_t),
+	SLIP_TRACK_CELL_REFERENCE_SHIFT = 2,
+	SLIP_TRACK_CELL_TABLE_CLEAR_WORDS = SLIP_TRACK_WORLD_CELL_TABLE_BYTES / sizeof(uint16_t),
+	SLIP_TRACK_CELL_SOURCE_LIST_HEADER_BYTES = sizeof(uint16_t),
+	SLIP_TRACK_CELL_SOURCE_RECORD_BYTES = 24,
+	SLIP_TRACK_CELL_SOURCE_TABLE_VALUE_OFFSET = 6,
+	SLIP_TRACK_CELL_SOURCE_COORDINATE_OFFSET = 8,
+	SLIP_TRACK_CELL_COORDINATE_BYTES = 6,
+	SLIP_TRACK_CELL_COORDINATE_Y_OFFSET = 2,
+	SLIP_TRACK_CELL_COORDINATE_Z_OFFSET = 4,
+	SLIP_TRACK_CELL_COORDINATE_DIVISOR = 12,
+	SLIP_TRACK_CELL_COORDINATE_Y_BIAS = 12,
+	SLIP_TRACK_CELL_COORDINATE_Z_BIAS = 18,
+	SLIP_TRACK_CELL_WORLD_SHIFT = 20,
+	SLIP_TRACK_CELL_INDEX_UPPER_WORD_MASK = SLIP_TRACK_REGISTER_UPPER_WORD_MASK,
+	SLIP_TRACK_SPECIAL_AMBIENT_Q14 = SLIP_Q14_ONE / 4,
+	SLIP_TRACK_SPECIAL_TRAVERSAL_DOS_TOKEN = 0x3bf72,
+	SLIP_TRACK_SPECIAL_FADE_START = 244000,
+	SLIP_TRACK_SPECIAL_FADE_END = 585600,
+	SLIP_TRACK_SPECIAL_MAXIMUM_DEPTH = 976000
+};
+
 bool SlipTrackWorld_CellTableBuild(uint8_t *table, size_t tableBytes, const uint8_t *trkBase, size_t trkSize,
                                    uint32_t savedVectorParameter, uint32_t tableValueBase,
                                    SlipTrackWorldCellTableVisit *visits, size_t visitCapacity,
@@ -12118,24 +12477,32 @@ bool SlipTrackWorld_CellTableBuild(uint8_t *table, size_t tableBytes, const uint
 	size_t recordsOffset;
 	uint16_t i;
 
-	if (table == 0 || tableBytes < 0x0f00u || result == 0) {
+	if (table == 0 || tableBytes < SLIP_TRACK_WORLD_CELL_TABLE_BYTES || result == 0) {
 		return false;
 	}
-	for (i = 0; i < 0x0780u; ++i) {
-		table[(size_t)i * 2u] = 0;
-		table[(size_t)i * 2u + 1u] = 0;
+	for (i = 0; i < SLIP_TRACK_CELL_TABLE_CLEAR_WORDS; ++i) {
+		table[(size_t)i * sizeof(uint16_t)] = 0;
+		table[(size_t)i * sizeof(uint16_t) + 1u] = 0;
 	}
-	*result = (SlipTrackWorldCellTableBuild){
-	    table, 0x0780u, 0, trkBase, 0, 0, 0, 0, SLIP_TRACK_WORLD_CELL_TABLE_BUILD_BRANCH_EMPTY, true};
-	if (trkBase == 0 || trkSize < 0x0eu) {
+	*result = (SlipTrackWorldCellTableBuild){table,
+	                                         SLIP_TRACK_CELL_TABLE_CLEAR_WORDS,
+	                                         0,
+	                                         trkBase,
+	                                         0,
+	                                         0,
+	                                         0,
+	                                         0,
+	                                         SLIP_TRACK_WORLD_CELL_TABLE_BUILD_BRANCH_EMPTY,
+	                                         true};
+	if (trkBase == 0 || trkSize < SLIP_TRK_ROOT_LIST_END) {
 		return false;
 	}
-	listOffset = SlipBytes_ReadLE16(trkBase + 0x0cu);
+	listOffset = SlipBytes_ReadLE16(trkBase + SLIP_TRK_ROOT_LIST_OFFSET);
 	result->recordListOffset = listOffset;
 	if (listOffset == 0) {
 		return true;
 	}
-	if ((size_t)listOffset + 2u > trkSize) {
+	if ((size_t)listOffset + SLIP_TRACK_CELL_SOURCE_LIST_HEADER_BYTES > trkSize) {
 		return false;
 	}
 	result->recordList = trkBase + listOffset;
@@ -12145,31 +12512,32 @@ bool SlipTrackWorld_CellTableBuild(uint8_t *table, size_t tableBytes, const uint
 	if (recordCount == 0 || visits == 0 || visitCapacity < recordCount) {
 		return false;
 	}
-	recordsOffset = (size_t)listOffset + 2u;
-	if ((size_t)recordCount > (SIZE_MAX - recordsOffset) / 0x18u ||
-	    recordsOffset + (size_t)recordCount * 0x18u > trkSize) {
+	recordsOffset = (size_t)listOffset + SLIP_TRACK_CELL_SOURCE_LIST_HEADER_BYTES;
+	if ((size_t)recordCount > (SIZE_MAX - recordsOffset) / SLIP_TRACK_CELL_SOURCE_RECORD_BYTES ||
+	    recordsOffset + (size_t)recordCount * SLIP_TRACK_CELL_SOURCE_RECORD_BYTES > trkSize) {
 		return false;
 	}
 	for (i = 0; i < recordCount; ++i) {
-		const uint8_t *const record = trkBase + recordsOffset + (size_t)i * 0x18u;
-		const uint16_t tableValueOffset = SlipBytes_ReadLE16(record + 0x06u);
+		const uint8_t *const record = trkBase + recordsOffset + (size_t)i * SLIP_TRACK_CELL_SOURCE_RECORD_BYTES;
+		const uint16_t tableValueOffset = SlipBytes_ReadLE16(record + SLIP_TRACK_CELL_SOURCE_TABLE_VALUE_OFFSET);
 		SlipTrackWorldCellTableVisit *const visit = &visits[i];
 
-		*visit = (SlipTrackWorldCellTableVisit){record,
-		                                        (uint32_t)(recordsOffset + (size_t)i * 0x18u),
-		                                        (uint16_t)(recordCount - i),
-		                                        tableValueOffset,
-		                                        tableValueOffset == 0,
-		                                        0,
-		                                        {0},
-		                                        0,
-		                                        0,
-		                                        0,
-		                                        0,
-		                                        0,
-		                                        {0}};
+		*visit =
+		    (SlipTrackWorldCellTableVisit){record,
+		                                   (uint32_t)(recordsOffset + (size_t)i * SLIP_TRACK_CELL_SOURCE_RECORD_BYTES),
+		                                   (uint16_t)(recordCount - i),
+		                                   tableValueOffset,
+		                                   tableValueOffset == 0,
+		                                   0,
+		                                   {0},
+		                                   0,
+		                                   0,
+		                                   0,
+		                                   0,
+		                                   0,
+		                                   {0}};
 		if (tableValueOffset != 0) {
-			const uint16_t coordinateOffset = SlipBytes_ReadLE16(record + 0x08u);
+			const uint16_t coordinateOffset = SlipBytes_ReadLE16(record + SLIP_TRACK_CELL_SOURCE_COORDINATE_OFFSET);
 			uint32_t cellX;
 			uint32_t cellY;
 			uint32_t cellZ;
@@ -12231,7 +12599,7 @@ bool SlipTrackWorld_FrameDispatch(uint32_t renderContext, uint32_t primaryLeft, 
 	                                       traversalContext->storeClipBoundsUserData))
 		return false;
 	result->mode = renderMode;
-	if (renderMode == 0x0010u) {
+	if (renderMode == SLIP_TRACK_SPECIAL_RENDER_MODE) {
 		bool traversalSucceeded = true;
 
 		result->fillClipLeft = primaryLeft;
@@ -12244,30 +12612,30 @@ bool SlipTrackWorld_FrameDispatch(uint32_t renderContext, uint32_t primaryLeft, 
 		                       (int16_t)primaryBottom);
 		result->lightDirectionX = 0;
 		result->lightDirectionZ = 0;
-		result->lightDirectionY = 0xffffc000u;
-		result->directLightScaleQ14 = 0x00004000u;
+		result->lightDirectionY = -SLIP_Q14_ONE;
+		result->directLightScaleQ14 = SLIP_Q14_ONE;
 		result->callDraw3DSetLightVector = true;
-		SlipDraw3D_SetLightVector(0, -0x4000, 0, 0x4000u);
-		result->ambientLightScaleQ14 = 0x00001000u;
+		SlipDraw3D_SetLightVector(0, -SLIP_Q14_ONE, 0, SLIP_Q14_ONE);
+		result->ambientLightScaleQ14 = SLIP_TRACK_SPECIAL_AMBIENT_Q14;
 		result->callDraw3DSetAmbientLight = true;
-		SlipDraw3D_SetAmbientLight(0x1000u);
+		SlipDraw3D_SetAmbientLight(SLIP_TRACK_SPECIAL_AMBIENT_Q14);
 		result->savedCallback = traversalCallback;
-		result->specialTraversalCallbackAddress = 0x0003bf72u;
+		result->specialTraversalCallbackAddress = SLIP_TRACK_SPECIAL_TRAVERSAL_DOS_TOKEN;
 		result->specialFadeColour = 0;
-		result->specialFadeStart = 0x0003b920u;
-		result->specialFadeEnd = 0x0008ef80u;
+		result->specialFadeStart = SLIP_TRACK_SPECIAL_FADE_START;
+		result->specialFadeEnd = SLIP_TRACK_SPECIAL_FADE_END;
 		result->callDisableDepthFade = true;
-		SlipDraw3D_SetDepthFade(0x0003b920u, 0x0008ef80u, 0);
-		result->specialMaximumDepth = 0x000ee480u;
+		SlipDraw3D_SetDepthFade(SLIP_TRACK_SPECIAL_FADE_START, SLIP_TRACK_SPECIAL_FADE_END, 0);
+		result->specialMaximumDepth = SLIP_TRACK_SPECIAL_MAXIMUM_DEPTH;
 		result->callSetSpecialMaximumDepth = true;
-		SlipDraw3D_SetMaximumDepth(0x000ee480u);
+		SlipDraw3D_SetMaximumDepth(SLIP_TRACK_SPECIAL_MAXIMUM_DEPTH);
 
 		if (traversalContext != NULL) {
-			traversalContext->maxZ = (int32_t)0x000ee480u;
+			traversalContext->maxZ = SLIP_TRACK_SPECIAL_MAXIMUM_DEPTH;
 			if (traversalContext->projectState != NULL)
-				traversalContext->projectState->maxZ = (int32_t)0x000ee480u;
+				traversalContext->projectState->maxZ = SLIP_TRACK_SPECIAL_MAXIMUM_DEPTH;
 			if (traversalContext->frustum != NULL)
-				traversalContext->frustum->maxZ = (int32_t)0x000ee480u;
+				traversalContext->frustum->maxZ = SLIP_TRACK_SPECIAL_MAXIMUM_DEPTH;
 		}
 		result->callSpecialTraversal = true;
 		if (trkBase != NULL) {
@@ -12331,24 +12699,18 @@ bool SlipTrackWorld_TableLookup(const uint8_t *table, size_t tableBytes, uint16_
 	if (result == 0) {
 		return false;
 	}
-	*result = (SlipTrackWorldTableLookup){cellX, cellY,
-	                                      cellZ, cellX >= 0x0cu,
-	                                      false, false,
-	                                      0,     0,
-	                                      0,     0,
-	                                      0,     0,
-	                                      0,     0,
-	                                      0,     table,
-	                                      0,     SLIP_TRACK_WORLD_TABLE_LOOKUP_BRANCH_ZERO};
-	if (cellX >= 0x0cu) {
+	*result = (SlipTrackWorldTableLookup){
+	    cellX, cellY, cellZ, cellX >= SLIP_TRACK_CELL_COUNT_X,         false, false, 0, 0, 0, 0, 0, 0, 0, 0,
+	    0,     table, 0,     SLIP_TRACK_WORLD_TABLE_LOOKUP_BRANCH_ZERO};
+	if (cellX >= SLIP_TRACK_CELL_COUNT_X) {
 		return true;
 	}
-	result->yOutsideTable = cellY >= 0x04u;
-	if (cellY >= 0x04u) {
+	result->yOutsideTable = cellY >= SLIP_TRACK_CELL_COUNT_Y;
+	if (cellY >= SLIP_TRACK_CELL_COUNT_Y) {
 		return true;
 	}
-	result->zOutsideTable = cellZ >= 0x14u;
-	if (cellZ >= 0x14u) {
+	result->zOutsideTable = cellZ >= SLIP_TRACK_CELL_COUNT_Z;
+	if (cellZ >= SLIP_TRACK_CELL_COUNT_Z) {
 		return true;
 	}
 	if (table == 0) {
@@ -12356,23 +12718,23 @@ bool SlipTrackWorld_TableLookup(const uint8_t *table, size_t tableBytes, uint16_
 	}
 	xIndex = cellX;
 	result->xIndex = xIndex;
-	yStride = 0x000cu;
+	yStride = SLIP_TRACK_CELL_ROW_STRIDE;
 	result->yStride = yStride;
 	yStride = (uint16_t)(yStride * cellY);
 	result->yIndex = yStride;
 	xIndex = (uint16_t)(xIndex + yStride);
 	result->xyIndex = xIndex;
-	yStride = 0x0030u;
+	yStride = SLIP_TRACK_CELL_PLANE_STRIDE;
 	result->zStride = yStride;
 	yStride = (uint16_t)(yStride * cellZ);
 	result->zIndex = yStride;
 	xIndex = (uint16_t)(xIndex + yStride);
 	result->cellIndex = xIndex;
-	xIndex = (uint16_t)(xIndex << 2);
+	xIndex = (uint16_t)(xIndex << SLIP_TRACK_CELL_REFERENCE_SHIFT);
 	result->cellByteOffsetWord = xIndex;
 	cellByteOffset = (uint32_t)xIndex;
 	result->cellByteOffset = cellByteOffset;
-	if (tableBytes < (size_t)cellByteOffset + 4u) {
+	if (tableBytes < (size_t)cellByteOffset + SLIP_TRACK_CELL_REFERENCE_BYTES) {
 		return false;
 	}
 	result->recordAddress = SlipBytes_ReadLE32(table + cellByteOffset);
@@ -12405,6 +12767,12 @@ bool SlipTrackWorld_RemoveObjectSlot(uint32_t objectToken, uint16_t objectOffset
 	                                        slotListBase + slotOffset);
 }
 
+enum {
+	SLIP_TRACK_SLOT_RADIUS_PADDING = 200,
+	SLIP_TRACK_SLOT_MAXIMUM_RADIUS = 8784,
+	SLIP_TRACK_SLOT_ALLOCATION_ERROR = 7
+};
+
 bool SlipTrackWorld_FreeSlotListEntry(uint16_t trackHandle, uint8_t *slotDrawBase, size_t slotDrawBytes,
                                       uint32_t slotDrawBaseAddress, uint32_t slotDrawFreeListAddress, uint8_t *trdBase,
                                       size_t trackDataSize, uint32_t trdBaseAddress, uint8_t *slotListBase,
@@ -12426,7 +12794,7 @@ bool SlipTrackWorld_FreeSlotListEntry(uint16_t trackHandle, uint8_t *slotDrawBas
 	SlipTrackSlotRecord *freeNext;
 
 	if (slotListBase == NULL || inputSlot == NULL || inputSlot < slotListBase ||
-	    (size_t)(inputSlot - slotListBase) + 0xacu > slotListBytes ||
+	    (size_t)(inputSlot - slotListBase) + SLIP_TRACK_SLOT_LINKS_END > slotListBytes ||
 	    !SlipTrackWorld_ClearOwnerDrawLinks(trackHandle, slotDrawBase, slotDrawBytes, slotDrawBaseAddress,
 	                                        slotDrawFreeListAddress, trdBase, trackDataSize, trdBaseAddress, inputSlot,
 	                                        slotListBytes - (size_t)(inputSlot - slotListBase), &clear)) {
@@ -12466,7 +12834,7 @@ static bool SlipTrackWorld_RecordFromDosAddress(const uint8_t *trdBase, size_t t
 	if (recordAddress < trdBaseAddress)
 		return false;
 	offset = recordAddress - trdBaseAddress;
-	if ((size_t)offset + 0x12u > trackDataSize)
+	if ((size_t)offset + SLIP_TRD_SECTION_DRAW_LIST_END > trackDataSize)
 		return false;
 	*record = trdBase + offset;
 	return true;
@@ -12518,7 +12886,7 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 	bool pairedRecords = false;
 
 	if (inputSlot == NULL || slotListBase == NULL || inputSlot < slotListBase ||
-	    (size_t)(inputSlot - slotListBase) + 0xd8u > slotListBytes ||
+	    (size_t)(inputSlot - slotListBase) + SLIP_TRACK_SLOT_OWNER_END > slotListBytes ||
 	    !SlipTrackWorld_ClearOwnerDrawLinks(trackHandle, slotDrawBase, slotDrawBytes, slotDrawBaseAddress,
 	                                        slotDrawFreeListAddress, trdBase, trackDataSize, trdBaseAddress, inputSlot,
 	                                        slotListBytes - (size_t)(inputSlot - slotListBase), &clear)) {
@@ -12526,10 +12894,11 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 	}
 	if (slot->doorAddress != 0) {
 
-		const uint32_t doorOffset = slot->doorAddress - 0x339a6u;
-		if (doorOffset % 0x64u != 0 || doorOffset / 0x64u >= 8u)
+		const uint32_t doorOffset = slot->doorAddress - SLIP_TRACK_DOOR_TABLE_DOS_TOKEN;
+		if (doorOffset % SLIP_TRACK_DOOR_RECORD_BYTES != 0 ||
+		    doorOffset / SLIP_TRACK_DOOR_RECORD_BYTES >= SLIP_TRACK_DOOR_CAPACITY)
 			return false;
-		const SlipTrackDoorRecord *const door = &SlipTrackWorld_doors[doorOffset / 0x64u];
+		const SlipTrackDoorRecord *const door = &SlipTrackWorld_doors[doorOffset / SLIP_TRACK_DOOR_RECORD_BYTES];
 		secondRecord = door->secondTrackRecord;
 		firstRecord = door->firstTrackRecord;
 		if (!SlipTrackWorld_AllocRecordLink(slotDrawBase, slotDrawBytes, slotDrawBaseAddress, slotDrawFreeListAddress,
@@ -12547,10 +12916,10 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 		slot->firstDrawAddress = firstDrawAddress;
 		second->objectOffset = slot->ownerObjectOffset;
 		first->objectOffset = slot->ownerObjectOffset;
-		second->callbackAddress = 0x3c22a;
-		first->callbackAddress = 0x3c2ea;
-		const size_t firstIndex = (firstDrawAddress - slotDrawBaseAddress) / 0x38u;
-		const size_t secondIndex = (secondDrawAddress - slotDrawBaseAddress) / 0x38u;
+		second->callbackAddress = SLIP_TRACK_DOOR_DRAW_DOS_TOKEN;
+		first->callbackAddress = SLIP_TRACK_DOOR_DRAW_REVERSE_DOS_TOKEN;
+		const size_t firstIndex = (firstDrawAddress - slotDrawBaseAddress) / sizeof(SlipTrackDrawRecord);
+		const size_t secondIndex = (secondDrawAddress - slotDrawBaseAddress) / sizeof(SlipTrackDrawRecord);
 		if (slotDrawCallbacks == NULL || firstIndex >= slotDrawCallbackCount || secondIndex >= slotDrawCallbackCount)
 			return false;
 		slotDrawCallbacks[secondIndex] = TrackView_DrawDoor;
@@ -12558,13 +12927,13 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 		return true;
 	}
 	do {
-		if (slot->flags == 2u) {
+		if (slot->flags == SLIP_TRACK_SLOT_POINT_COLLISION) {
 
 			firstRecord = slot->currentTrackRecordAddress;
 			break;
 		}
 
-		for (i = 0; i < 8u; ++i) {
+		for (i = 0; i < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++i) {
 			const uint32_t record = slot->cornerTrackRecords[i];
 
 			if (record == firstRecord)
@@ -12589,9 +12958,12 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 			                                         &currentSecondRecord)) {
 				return false;
 			}
-			for (i = 0; i < 3u; ++i) {
-				if (trdBaseAddress + SlipBytes_ReadLE16(currentFirstRecord + 0x04u + i * 4u) == secondRecord) {
-					firstEdge = SlipBytes_ReadLE16(currentFirstRecord + 0x06u + i * 4u);
+			for (i = 0; i < SLIP_TRD_SECTION_EXIT_COUNT; ++i) {
+				if (trdBaseAddress + SlipBytes_ReadLE16(currentFirstRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET +
+				                                        i * SLIP_TRD_SECTION_EXIT_BYTES) ==
+				    secondRecord) {
+					firstEdge = SlipBytes_ReadLE16(currentFirstRecord + SLIP_TRD_SECTION_FIRST_EXIT_PLANE_OFFSET +
+					                               i * SLIP_TRD_SECTION_EXIT_BYTES);
 					adjacent = true;
 					break;
 				}
@@ -12604,9 +12976,12 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 				                                    firstRecord, firstEdge, &firstDraw, &firstDrawAddress)) {
 					return false;
 				}
-				for (i = 0; i < 3u; ++i) {
-					if (trdBaseAddress + SlipBytes_ReadLE16(currentSecondRecord + 0x04u + i * 4u) == firstRecord) {
-						secondEdge = SlipBytes_ReadLE16(currentSecondRecord + 0x06u + i * 4u);
+				for (i = 0; i < SLIP_TRD_SECTION_EXIT_COUNT; ++i) {
+					if (trdBaseAddress + SlipBytes_ReadLE16(currentSecondRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET +
+					                                        i * SLIP_TRD_SECTION_EXIT_BYTES) ==
+					    firstRecord) {
+						secondEdge = SlipBytes_ReadLE16(currentSecondRecord + SLIP_TRD_SECTION_FIRST_EXIT_PLANE_OFFSET +
+						                                i * SLIP_TRD_SECTION_EXIT_BYTES);
 						reverseAdjacent = true;
 						break;
 					}
@@ -12634,9 +13009,10 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 			return false;
 		}
 		const uint32_t slotAddress = slotListBaseAddress + (uint32_t)(inputSlot - slotListBase);
-		SlipObject_Free((uint16_t)slot->ownerObjectOffset, slot->flags == 2 ? entryRegisters->currentRecordOrFlags : 0,
+		SlipObject_Free((uint16_t)slot->ownerObjectOffset,
+		                slot->flags == SLIP_TRACK_SLOT_POINT_COLLISION ? entryRegisters->currentRecordOrFlags : 0,
 		                entryRegisters->preservedObjectFreeValue,
-		                slot->flags == 2 ? entryRegisters->remainingCornerCount : 0,
+		                slot->flags == SLIP_TRACK_SLOT_POINT_COLLISION ? entryRegisters->remainingCornerCount : 0,
 		                entryRegisters->secondRecordOrOffset, slotAddress, entryRegisters->firstRecordAddress);
 		return true;
 	}
@@ -12660,17 +13036,20 @@ bool SlipTrackWorld_RegisterSlot(uint16_t trackHandle, uint8_t *slotDrawBase, si
 		return false;
 	}
 	if (slotDrawCallbacks == NULL || firstDrawAddress < slotDrawBaseAddress ||
-	    (firstDrawAddress - slotDrawBaseAddress) % 0x38u != 0 ||
-	    (firstDrawAddress - slotDrawBaseAddress) / 0x38u >= slotDrawCallbackCount) {
+	    (firstDrawAddress - slotDrawBaseAddress) % sizeof(SlipTrackDrawRecord) != 0 ||
+	    (firstDrawAddress - slotDrawBaseAddress) / sizeof(SlipTrackDrawRecord) >= slotDrawCallbackCount) {
 		return false;
 	}
-	slotDrawCallbacks[(firstDrawAddress - slotDrawBaseAddress) / 0x38u] = callback.slotDrawCallback;
+	slotDrawCallbacks[(firstDrawAddress - slotDrawBaseAddress) / sizeof(SlipTrackDrawRecord)] =
+	    callback.slotDrawCallback;
 	if (pairedRecords) {
-		if (secondDrawAddress < slotDrawBaseAddress || (secondDrawAddress - slotDrawBaseAddress) % 0x38u != 0 ||
-		    (secondDrawAddress - slotDrawBaseAddress) / 0x38u >= slotDrawCallbackCount) {
+		if (secondDrawAddress < slotDrawBaseAddress ||
+		    (secondDrawAddress - slotDrawBaseAddress) % sizeof(SlipTrackDrawRecord) != 0 ||
+		    (secondDrawAddress - slotDrawBaseAddress) / sizeof(SlipTrackDrawRecord) >= slotDrawCallbackCount) {
 			return false;
 		}
-		slotDrawCallbacks[(secondDrawAddress - slotDrawBaseAddress) / 0x38u] = callback.slotDrawCallback;
+		slotDrawCallbacks[(secondDrawAddress - slotDrawBaseAddress) / sizeof(SlipTrackDrawRecord)] =
+		    callback.slotDrawCallback;
 	}
 	return true;
 }
@@ -12697,7 +13076,7 @@ bool SlipTrackWorld_AddSlot(uint16_t objectOffset, uint32_t flags, uint16_t trac
 		return false;
 	}
 	if (allocate.carry) {
-		SlipRuntime_error = 7;
+		SlipRuntime_error = SLIP_TRACK_SLOT_ALLOCATION_ERROR;
 		*result = (SlipTrackWorldAddSlot){NULL, 0, true};
 		return true;
 	}
@@ -12709,14 +13088,14 @@ bool SlipTrackWorld_AddSlot(uint16_t objectOffset, uint32_t flags, uint16_t trac
 	if (!SlipObject_SetTrackSlot(objectTable, objectTableBytes, objectOffset, (uint16_t)(currentSlot - slotListBase))) {
 		return false;
 	}
-	if ((flags & 2u) != 0) {
+	if ((flags & SLIP_TRACK_SLOT_POINT_COLLISION) != 0) {
 		slot->flags = flags;
 	} else {
-		if ((flags & 1u) == 0) {
+		if ((flags & SLIP_TRACK_SLOT_BOX_COLLISION) == 0) {
 			SlipRuntime_Fatal("TrackSlotAdd - sphere types not yet supported");
 		}
 		slot->flags = flags;
-		if ((flags & 4u) != 0) {
+		if ((flags & SLIP_TRACK_SLOT_ARTICULATED_BOUNDS) != 0) {
 			SlipArticSlotMainBounds mainPartBounds;
 			int32_t extent;
 
@@ -12724,17 +13103,17 @@ bool SlipTrackWorld_AddSlot(uint16_t objectOffset, uint32_t flags, uint16_t trac
 			                                 articSlotPoolBytes, articSlotPoolAddress, &mainPartBounds)) {
 				return false;
 			}
-			slot->boundsAndCorners[0] = (int32_t)(0u - (uint32_t)mainPartBounds.maxX);
-			slot->boundsAndCorners[1] = (int32_t)((uint32_t)mainPartBounds.minY);
-			slot->boundsAndCorners[2] = (int32_t)((uint32_t)mainPartBounds.minZ);
-			slot->boundsAndCorners[3] = (int32_t)((uint32_t)mainPartBounds.maxX);
-			slot->boundsAndCorners[4] = (int32_t)((uint32_t)mainPartBounds.maxY);
-			slot->boundsAndCorners[5] = (int32_t)((uint32_t)mainPartBounds.maxZ);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MIN_X] = (int32_t)(0u - (uint32_t)mainPartBounds.maxX);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MIN_Y] = (int32_t)((uint32_t)mainPartBounds.minY);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MIN_Z] = (int32_t)((uint32_t)mainPartBounds.minZ);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MAX_X] = (int32_t)((uint32_t)mainPartBounds.maxX);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MAX_Y] = (int32_t)((uint32_t)mainPartBounds.maxY);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MAX_Z] = (int32_t)((uint32_t)mainPartBounds.maxZ);
 			if (!SlipArticSlot_GetExtent(objectOffset, objectTable, objectTableBytes, articSlotPool, articSlotPoolBytes,
 			                             articSlotPoolAddress, &extent)) {
 				return false;
 			}
-			boundingRadius = (uint32_t)extent + 0xc8u;
+			boundingRadius = (uint32_t)extent + SLIP_TRACK_SLOT_RADIUS_PADDING;
 		} else {
 			SlipRaceCollisionBodyBounds objectBounds;
 
@@ -12743,17 +13122,17 @@ bool SlipTrackWorld_AddSlot(uint16_t objectOffset, uint32_t flags, uint16_t trac
 				    "TrackSlotAdd - a track collision type slot MUST already be a collision slot (via CollideSlotAdd)");
 			}
 			objectBounds = SlipRaceCollision_GetBodyBounds(objectOffset);
-			slot->boundsAndCorners[0] = (int32_t)(0u - (uint32_t)objectBounds.maxX);
-			slot->boundsAndCorners[1] = (int32_t)((uint32_t)objectBounds.minY);
-			slot->boundsAndCorners[2] = (int32_t)((uint32_t)objectBounds.minZ);
-			slot->boundsAndCorners[3] = (int32_t)((uint32_t)objectBounds.maxX);
-			slot->boundsAndCorners[4] = (int32_t)((uint32_t)objectBounds.maxY);
-			slot->boundsAndCorners[5] = (int32_t)((uint32_t)objectBounds.maxZ);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MIN_X] = (int32_t)(0u - (uint32_t)objectBounds.maxX);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MIN_Y] = (int32_t)((uint32_t)objectBounds.minY);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MIN_Z] = (int32_t)((uint32_t)objectBounds.minZ);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MAX_X] = (int32_t)((uint32_t)objectBounds.maxX);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MAX_Y] = (int32_t)((uint32_t)objectBounds.maxY);
+			slot->boundsAndCorners[SLIP_VIEW_BOX_MAX_Z] = (int32_t)((uint32_t)objectBounds.maxZ);
 			boundingRadius = SlipView3D_BoxRadius(objectBounds.minX, objectBounds.minY, objectBounds.minZ,
 			                                      objectBounds.maxX, objectBounds.maxY, objectBounds.maxZ) +
-			                 0xc8u;
+			                 SLIP_TRACK_SLOT_RADIUS_PADDING;
 		}
-		if ((int32_t)boundingRadius > 0x2250) {
+		if ((int32_t)boundingRadius > SLIP_TRACK_SLOT_MAXIMUM_RADIUS) {
 			SlipRuntime_Fatal("TrackSlotAdd - the extent of the collision type slot is too large");
 		}
 		slot->boundingRadius = boundingRadius;
@@ -12774,7 +13153,7 @@ bool SlipTrackWorld_AddSlot(uint16_t objectOffset, uint32_t flags, uint16_t trac
 	if (SlipTrackWorld_QuerySlotCollision(currentSlot, objectTable, objectTableBytes, trdBase, trackDataSize,
 	                                      trdBaseAddress, componentBase, componentBaseBytes, componentBaseAddress,
 	                                      table, tableBytes, NULL)) {
-		SlipRuntime_error = 7;
+		SlipRuntime_error = SLIP_TRACK_SLOT_ALLOCATION_ERROR;
 		if (!SlipTrackWorld_FreeSlotListEntry(trackHandle, slotDrawBase, slotDrawBytes, slotDrawBaseAddress,
 		                                      slotDrawFreeListAddress, trdBase, trackDataSize, trdBaseAddress,
 		                                      slotListBase, slotListBytes, slotListBaseAddress, slotListFreeAddress,
@@ -12796,6 +13175,11 @@ bool SlipTrackWorld_AddSlot(uint16_t objectOffset, uint32_t flags, uint16_t trac
 
 static uint32_t SlipTrackWorld_orientedFaceAddress;
 
+enum {
+	SLIP_TRACK_ORIENTED_COLLISION_TOLERANCE = 512,
+	SLIP_TRACK_POSITIVE_COLLISION_SKIP_MASK = SLIP_TRC_PRIMITIVE_TRENCH | SLIP_TRC_PRIMITIVE_RANGE_PLANE
+};
+
 bool SlipTrackWorld_OrientedComponentTest(const uint8_t *componentBase, size_t componentBaseBytes,
                                           uint32_t componentBaseAddress, uint16_t componentOffset, int32_t relativeX,
                                           int32_t relativeY, int32_t relativeZ,
@@ -12808,51 +13192,59 @@ bool SlipTrackWorld_OrientedComponentTest(const uint8_t *componentBase, size_t c
 	bool carry = true;
 	bool rejectedByFace = false;
 
-	if (componentBase == NULL || result == NULL || (size_t)componentOffset + 0x14u > componentBaseBytes) {
+	if (componentBase == NULL || result == NULL ||
+	    (size_t)componentOffset + SLIP_TRC_COMPONENT_BOUNDS_END > componentBaseBytes) {
 		return false;
 	}
 	component = componentBase + componentOffset;
-	if (SlipBytes_ReadLE16(component + 0x04u) == 0) {
+	if (SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET) == 0) {
 		*result = (SlipTrackWorldOrientedComponentTest){closestDistance, SlipTrackWorld_orientedFaceAddress, carry};
 		return true;
 	}
-	if (relativeX < SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x08u)) ||
-	    relativeX > SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x0au)) ||
-	    relativeY < SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x0cu)) ||
-	    relativeY > SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x0eu)) ||
-	    relativeZ < SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x10u)) ||
-	    relativeZ > SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x12u))) {
+	if (relativeX <
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MINIMUM_X_OFFSET)) ||
+	    relativeX >
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MAXIMUM_X_OFFSET)) ||
+	    relativeY <
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MINIMUM_Y_OFFSET)) ||
+	    relativeY >
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MAXIMUM_Y_OFFSET)) ||
+	    relativeZ <
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MINIMUM_Z_OFFSET)) ||
+	    relativeZ >
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MAXIMUM_Z_OFFSET))) {
 		*result = (SlipTrackWorldOrientedComponentTest){closestDistance, SlipTrackWorld_orientedFaceAddress, carry};
 		return true;
 	}
-	faceOffset = SlipBytes_ReadLE16(component + 0x04u);
-	if (faceOffset + 2u > componentBaseBytes) {
+	faceOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
+	if (faceOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 		return false;
 	}
 	face = componentBase + faceOffset;
 	faceCount = SlipBytes_ReadLE16(face);
-	face += 2u;
-	faceOffset += 2u;
+	face += SLIP_TRC_TABLE_COUNT_BYTES;
+	faceOffset += SLIP_TRC_TABLE_COUNT_BYTES;
 	do {
 		uint16_t descriptor;
 		size_t faceBytes;
 
-		if (faceOffset + 0x0eu > componentBaseBytes) {
+		if (faceOffset + SLIP_TRC_PRIMITIVE_FIRST_INDEX_END > componentBaseBytes) {
 			return false;
 		}
-		if ((face[0x08u] & 0x40u) == 0) {
+		if ((face[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_TRENCH) == 0) {
 			SlipTrackWorldPointLookup point;
 			SlipTrackWorldRangePlane plane;
 			uint32_t dotRounded;
 			int32_t distance;
 
 			if (!SlipTrackWorld_PointLookup(component, componentBase, componentBaseBytes,
-			                                SlipBytes_ReadLE16(face + 0x0cu), (uint32_t)relativeX, (uint32_t)relativeY,
-			                                (uint32_t)relativeZ, &point) ||
-			    !SlipTrackWorld_StoreRangePlane(point.pointXOrInput, point.pointYOrInput,
-			                                    point.pointZOrCountMergedWithInput, SlipBytes_ReadLE16(face + 0x02u),
-			                                    SlipBytes_ReadLE16(face + 0x04u), SlipBytes_ReadLE16(face + 0x06u),
-			                                    &plane)) {
+			                                SlipBytes_ReadLE16(face + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
+			                                (uint32_t)relativeX, (uint32_t)relativeY, (uint32_t)relativeZ, &point) ||
+			    !SlipTrackWorld_StoreRangePlane(
+			        point.pointXOrInput, point.pointYOrInput, point.pointZOrCountMergedWithInput,
+			        SlipBytes_ReadLE16(face + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+			        SlipBytes_ReadLE16(face + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+			        SlipBytes_ReadLE16(face + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET), &plane)) {
 				return false;
 			}
 			dotRounded = SlipTrackWorld_RoundedDotProductShift14(
@@ -12860,7 +13252,7 @@ bool SlipTrackWorld_OrientedComponentTest(const uint8_t *componentBase, size_t c
 			    (uint32_t)relativeZ - (uint32_t)plane.origin.z, (uint32_t)plane.normal.x, (uint32_t)plane.normal.y,
 			    (uint32_t)plane.normal.z);
 			distance = (int32_t)dotRounded;
-			if (distance < -0x200) {
+			if (distance < -SLIP_TRACK_ORIENTED_COLLISION_TOLERANCE) {
 				rejectedByFace = true;
 				break;
 			}
@@ -12870,10 +13262,11 @@ bool SlipTrackWorld_OrientedComponentTest(const uint8_t *componentBase, size_t c
 			}
 		}
 		descriptor = SlipBytes_ReadLE16(face);
-		if ((descriptor & 0x8000u) == 0) {
-			faceBytes = (size_t)descriptor * 2u + 0x0cu;
+		if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) == 0) {
+			faceBytes = (size_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		} else {
-			faceBytes = (size_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+			faceBytes = (size_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+			            SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		}
 		if (faceBytes > componentBaseBytes - faceOffset) {
 			return false;
@@ -12898,15 +13291,16 @@ bool SlipTrackWorld_OrientedRecordTest(const uint8_t *trdBase, size_t trackDataS
 
 	if (trdBase == NULL ||
 	    !SlipTrackWorld_DosAddressToOffset(recordAddress, trdBaseAddress, trackDataSize, &recordOffset) ||
-	    (size_t)recordOffset + 0x1eu > trackDataSize) {
+	    (size_t)recordOffset + SLIP_TRD_SECTION_ORIGIN_END > trackDataSize) {
 		return false;
 	}
 	record = trdBase + recordOffset;
 	return SlipTrackWorld_OrientedComponentTest(
-	    componentBase, componentBaseBytes, componentBaseAddress, SlipBytes_ReadLE16(record + 0x02u),
-	    (int32_t)((uint32_t)positionX - SlipBytes_ReadLE32(record + 0x12u)),
-	    (int32_t)((uint32_t)positionY - SlipBytes_ReadLE32(record + 0x16u)),
-	    (int32_t)((uint32_t)positionZ - SlipBytes_ReadLE32(record + 0x1au)), result);
+	    componentBase, componentBaseBytes, componentBaseAddress,
+	    SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET),
+	    (int32_t)((uint32_t)positionX - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+	    (int32_t)((uint32_t)positionY - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+	    (int32_t)((uint32_t)positionZ - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)), result);
 }
 
 bool SlipTrackWorld_OrientedRecordSearch(const uint8_t *trdBase, size_t trackDataSize, uint32_t trdBaseAddress,
@@ -12939,11 +13333,11 @@ bool SlipTrackWorld_OrientedRecordSearch(const uint8_t *trdBase, size_t trackDat
 			return true;
 		}
 		if (!SlipTrackWorld_DosAddressToOffset(currentRecordAddress, trdBaseAddress, trackDataSize, &recordOffset) ||
-		    (size_t)recordOffset + 0x0eu > trackDataSize) {
+		    (size_t)recordOffset + SLIP_TRD_SECTION_EXIT_LINKS_END > trackDataSize) {
 			return false;
 		}
 		record = trdBase + recordOffset;
-		linkOffset = SlipBytes_ReadLE16(record + 0x04u);
+		linkOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
 		if (linkOffset != 0) {
 			if (!SlipTrackWorld_OrientedRecordTest(
 			        trdBase, trackDataSize, trdBaseAddress, componentBase, componentBaseBytes, componentBaseAddress,
@@ -12958,7 +13352,7 @@ bool SlipTrackWorld_OrientedRecordSearch(const uint8_t *trdBase, size_t trackDat
 				return true;
 			}
 		}
-		linkOffset = SlipBytes_ReadLE16(record + 0x08u);
+		linkOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET);
 		if (linkOffset != 0) {
 			if (!SlipTrackWorld_OrientedRecordTest(
 			        trdBase, trackDataSize, trdBaseAddress, componentBase, componentBaseBytes, componentBaseAddress,
@@ -12973,7 +13367,7 @@ bool SlipTrackWorld_OrientedRecordSearch(const uint8_t *trdBase, size_t trackDat
 				return true;
 			}
 		}
-		linkOffset = SlipBytes_ReadLE16(record + 0x0cu);
+		linkOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET);
 		if (linkOffset != 0) {
 			if (!SlipTrackWorld_OrientedRecordTest(
 			        trdBase, trackDataSize, trdBaseAddress, componentBase, componentBaseBytes, componentBaseAddress,
@@ -13011,33 +13405,36 @@ bool SlipTrackWorld_OrientedRecordSearch(const uint8_t *trdBase, size_t trackDat
 			return true;
 		}
 		if (!SlipTrackWorld_DosAddressToOffset(cellAddress, trdBaseAddress, trackDataSize, &cellOffset) ||
-		    (size_t)cellOffset + 0x06u > trackDataSize) {
+		    (size_t)cellOffset + SLIP_TRACK_LINKED_HEADER_BYTES > trackDataSize) {
 			return false;
 		}
 		cell = trdBase + cellOffset;
-		listOffset = SlipBytes_ReadLE16(cell + 0x04u);
-		if (listOffset == 0 || (size_t)listOffset + 2u > trackDataSize) {
+		listOffset = SlipBytes_ReadLE16(cell + SLIP_TRACK_LINKED_OFFSET);
+		if (listOffset == 0 || (size_t)listOffset + SLIP_TRD_TABLE_COUNT_BYTES > trackDataSize) {
 			if (listOffset != 0)
 				return false;
 			*result = (SlipTrackWorldOrientedRecordSearch){distance, faceAddress, 0};
 			return true;
 		}
 		entryCount = SlipBytes_ReadLE16(trdBase + listOffset);
-		entryOffset = listOffset + 2u;
+		entryOffset = listOffset + SLIP_TRD_TABLE_COUNT_BYTES;
 		do {
 			const uint8_t *entry;
 
-			if ((size_t)entryOffset + 0x1eu > trackDataSize) {
+			if ((size_t)entryOffset + SLIP_TRD_SECTION_ORIGIN_END > trackDataSize) {
 				return false;
 			}
 			entry = trdBase + entryOffset;
-			if ((SlipBytes_ReadLE16(entry + 0x04u) | SlipBytes_ReadLE16(entry + 0x08u) |
-			     SlipBytes_ReadLE16(entry + 0x0cu)) != 0) {
+			if ((SlipBytes_ReadLE16(entry + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET) |
+			     SlipBytes_ReadLE16(entry + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET) |
+			     SlipBytes_ReadLE16(entry + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET)) != 0) {
 				if (!SlipTrackWorld_OrientedComponentTest(
-				        componentBase, componentBaseBytes, componentBaseAddress, SlipBytes_ReadLE16(entry + 0x02u),
-				        (int32_t)((uint32_t)positionX - SlipBytes_ReadLE32(entry + 0x12u)),
-				        (int32_t)((uint32_t)positionY - SlipBytes_ReadLE32(entry + 0x16u)),
-				        (int32_t)((uint32_t)positionZ - SlipBytes_ReadLE32(entry + 0x1au)), &test)) {
+				        componentBase, componentBaseBytes, componentBaseAddress,
+				        SlipBytes_ReadLE16(entry + SLIP_TRD_SECTION_COMPONENT_OFFSET),
+				        (int32_t)((uint32_t)positionX - SlipBytes_ReadLE32(entry + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+				        (int32_t)((uint32_t)positionY - SlipBytes_ReadLE32(entry + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+				        (int32_t)((uint32_t)positionZ - SlipBytes_ReadLE32(entry + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)),
+				        &test)) {
 					return false;
 				}
 				distance = test.distance;
@@ -13047,7 +13444,7 @@ bool SlipTrackWorld_OrientedRecordSearch(const uint8_t *trdBase, size_t trackDat
 					return true;
 				}
 			}
-			entryOffset += 0x22u;
+			entryOffset += SLIP_TRD_SECTION_BYTES;
 		} while (--entryCount != 0);
 	}
 
@@ -13070,55 +13467,62 @@ static bool SlipTrackWorld_PositiveComponentTest(const uint8_t *componentBase, s
 	bool rejectedByFace = false;
 
 	if (componentBase == NULL || distance == NULL || faceAddress == NULL || carryOutOrOr == NULL ||
-	    (size_t)componentOffset + 0x14u > componentBaseBytes) {
+	    (size_t)componentOffset + SLIP_TRC_COMPONENT_BOUNDS_END > componentBaseBytes) {
 		return false;
 	}
 	component = componentBase + componentOffset;
-	if (SlipBytes_ReadLE16(component + 0x04u) == 0) {
+	if (SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET) == 0) {
 		*distance = closestDistance;
 		*faceAddress = SlipTrackWorld_positiveFaceAddress;
 		*carryOutOrOr = carry;
 		return true;
 	}
-	if (relativeX < SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x08u)) ||
-	    relativeX > SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x0au)) ||
-	    relativeY < SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x0cu)) ||
-	    relativeY > SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x0eu)) ||
-	    relativeZ < SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x10u)) ||
-	    relativeZ > SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + 0x12u))) {
+	if (relativeX <
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MINIMUM_X_OFFSET)) ||
+	    relativeX >
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MAXIMUM_X_OFFSET)) ||
+	    relativeY <
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MINIMUM_Y_OFFSET)) ||
+	    relativeY >
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MAXIMUM_Y_OFFSET)) ||
+	    relativeZ <
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MINIMUM_Z_OFFSET)) ||
+	    relativeZ >
+	        SlipTrackWorld_ScaleSignedWordBy64(SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_MAXIMUM_Z_OFFSET))) {
 		*distance = closestDistance;
 		*faceAddress = SlipTrackWorld_positiveFaceAddress;
 		*carryOutOrOr = carry;
 		return true;
 	}
-	faceOffset = SlipBytes_ReadLE16(component + 0x04u);
-	if (faceOffset + 2u > componentBaseBytes) {
+	faceOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
+	if (faceOffset + SLIP_TRC_TABLE_COUNT_BYTES > componentBaseBytes) {
 		return false;
 	}
 	face = componentBase + faceOffset;
 	faceCount = SlipBytes_ReadLE16(face);
-	face += 2u;
-	faceOffset += 2u;
+	face += SLIP_TRC_TABLE_COUNT_BYTES;
+	faceOffset += SLIP_TRC_TABLE_COUNT_BYTES;
 	do {
 		uint16_t descriptor;
 		size_t faceBytes;
 
-		if (faceOffset + 0x0eu > componentBaseBytes) {
+		if (faceOffset + SLIP_TRC_PRIMITIVE_FIRST_INDEX_END > componentBaseBytes) {
 			return false;
 		}
-		if ((face[0x08u] & 0x41u) == 0) {
+		if ((face[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRACK_POSITIVE_COLLISION_SKIP_MASK) == 0) {
 			SlipTrackWorldPointLookup point;
 			SlipTrackWorldRangePlane plane;
 			uint32_t dotRounded;
 			int32_t currentDistance;
 
 			if (!SlipTrackWorld_PointLookup(component, componentBase, componentBaseBytes,
-			                                SlipBytes_ReadLE16(face + 0x0cu), (uint32_t)relativeX, (uint32_t)relativeY,
-			                                (uint32_t)relativeZ, &point) ||
-			    !SlipTrackWorld_StoreRangePlane(point.pointXOrInput, point.pointYOrInput,
-			                                    point.pointZOrCountMergedWithInput, SlipBytes_ReadLE16(face + 0x02u),
-			                                    SlipBytes_ReadLE16(face + 0x04u), SlipBytes_ReadLE16(face + 0x06u),
-			                                    &plane)) {
+			                                SlipBytes_ReadLE16(face + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET),
+			                                (uint32_t)relativeX, (uint32_t)relativeY, (uint32_t)relativeZ, &point) ||
+			    !SlipTrackWorld_StoreRangePlane(
+			        point.pointXOrInput, point.pointYOrInput, point.pointZOrCountMergedWithInput,
+			        SlipBytes_ReadLE16(face + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET),
+			        SlipBytes_ReadLE16(face + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET),
+			        SlipBytes_ReadLE16(face + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET), &plane)) {
 				return false;
 			}
 			dotRounded = SlipTrackWorld_RoundedDotProductShift14(
@@ -13136,10 +13540,11 @@ static bool SlipTrackWorld_PositiveComponentTest(const uint8_t *componentBase, s
 			}
 		}
 		descriptor = SlipBytes_ReadLE16(face);
-		if ((descriptor & 0x8000u) == 0) {
-			faceBytes = (size_t)descriptor * 2u + 0x0cu;
+		if ((descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) == 0) {
+			faceBytes = (size_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		} else {
-			faceBytes = (size_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+			faceBytes = (size_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+			            SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		}
 		if (faceBytes > componentBaseBytes - faceOffset) {
 			return false;
@@ -13166,15 +13571,17 @@ static bool SlipTrackWorld_PositiveRecordTest(const uint8_t *trdBase, size_t tra
 
 	if (trdBase == NULL ||
 	    !SlipTrackWorld_DosAddressToOffset(recordAddress, trdBaseAddress, trackDataSize, &recordOffset) ||
-	    (size_t)recordOffset + 0x1eu > trackDataSize) {
+	    (size_t)recordOffset + SLIP_TRD_SECTION_ORIGIN_END > trackDataSize) {
 		return false;
 	}
 	record = trdBase + recordOffset;
 	return SlipTrackWorld_PositiveComponentTest(
-	    componentBase, componentBaseBytes, componentBaseAddress, SlipBytes_ReadLE16(record + 0x02u),
-	    (int32_t)((uint32_t)positionX - SlipBytes_ReadLE32(record + 0x12u)),
-	    (int32_t)((uint32_t)positionY - SlipBytes_ReadLE32(record + 0x16u)),
-	    (int32_t)((uint32_t)positionZ - SlipBytes_ReadLE32(record + 0x1au)), distance, faceAddress, carryOut);
+	    componentBase, componentBaseBytes, componentBaseAddress,
+	    SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET),
+	    (int32_t)((uint32_t)positionX - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+	    (int32_t)((uint32_t)positionY - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+	    (int32_t)((uint32_t)positionZ - SlipBytes_ReadLE32(record + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)), distance,
+	    faceAddress, carryOut);
 }
 
 bool SlipTrackWorld_PositiveRecordSearch(const uint8_t *trdBase, size_t trackDataSize, uint32_t trdBaseAddress,
@@ -13205,11 +13612,11 @@ bool SlipTrackWorld_PositiveRecordSearch(const uint8_t *trdBase, size_t trackDat
 			return true;
 		}
 		if (!SlipTrackWorld_DosAddressToOffset(currentRecordAddress, trdBaseAddress, trackDataSize, &recordOffset) ||
-		    (size_t)recordOffset + 0x0eu > trackDataSize) {
+		    (size_t)recordOffset + SLIP_TRD_SECTION_EXIT_LINKS_END > trackDataSize) {
 			return false;
 		}
 		record = trdBase + recordOffset;
-		linkOffset = SlipBytes_ReadLE16(record + 0x04u);
+		linkOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET);
 		if (linkOffset != 0) {
 			if (!SlipTrackWorld_PositiveRecordTest(
 			        trdBase, trackDataSize, trdBaseAddress, componentBase, componentBaseBytes, componentBaseAddress,
@@ -13222,7 +13629,7 @@ bool SlipTrackWorld_PositiveRecordSearch(const uint8_t *trdBase, size_t trackDat
 				return true;
 			}
 		}
-		linkOffset = SlipBytes_ReadLE16(record + 0x08u);
+		linkOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET);
 		if (linkOffset != 0) {
 			if (!SlipTrackWorld_PositiveRecordTest(
 			        trdBase, trackDataSize, trdBaseAddress, componentBase, componentBaseBytes, componentBaseAddress,
@@ -13235,7 +13642,7 @@ bool SlipTrackWorld_PositiveRecordSearch(const uint8_t *trdBase, size_t trackDat
 				return true;
 			}
 		}
-		linkOffset = SlipBytes_ReadLE16(record + 0x0cu);
+		linkOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET);
 		if (linkOffset != 0) {
 			if (!SlipTrackWorld_PositiveRecordTest(
 			        trdBase, trackDataSize, trdBaseAddress, componentBase, componentBaseBytes, componentBaseAddress,
@@ -13271,34 +13678,36 @@ bool SlipTrackWorld_PositiveRecordSearch(const uint8_t *trdBase, size_t trackDat
 			return true;
 		}
 		if (!SlipTrackWorld_DosAddressToOffset(cellAddress, trdBaseAddress, trackDataSize, &cellOffset) ||
-		    (size_t)cellOffset + 0x06u > trackDataSize) {
+		    (size_t)cellOffset + SLIP_TRACK_LINKED_HEADER_BYTES > trackDataSize) {
 			return false;
 		}
 		cell = trdBase + cellOffset;
-		listOffset = SlipBytes_ReadLE16(cell + 0x04u);
-		if (listOffset == 0 || (size_t)listOffset + 2u > trackDataSize) {
+		listOffset = SlipBytes_ReadLE16(cell + SLIP_TRACK_LINKED_OFFSET);
+		if (listOffset == 0 || (size_t)listOffset + SLIP_TRD_TABLE_COUNT_BYTES > trackDataSize) {
 			if (listOffset != 0)
 				return false;
 			*result = (SlipTrackWorldPositiveRecordSearch){distance, faceAddress, 0};
 			return true;
 		}
 		entryCount = SlipBytes_ReadLE16(trdBase + listOffset);
-		entryOffset = listOffset + 2u;
+		entryOffset = listOffset + SLIP_TRD_TABLE_COUNT_BYTES;
 		do {
 			const uint8_t *entry;
 
-			if ((size_t)entryOffset + 0x1eu > trackDataSize) {
+			if ((size_t)entryOffset + SLIP_TRD_SECTION_ORIGIN_END > trackDataSize) {
 				return false;
 			}
 			entry = trdBase + entryOffset;
-			if ((SlipBytes_ReadLE16(entry + 0x04u) | SlipBytes_ReadLE16(entry + 0x08u) |
-			     SlipBytes_ReadLE16(entry + 0x0cu)) != 0) {
+			if ((SlipBytes_ReadLE16(entry + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET) |
+			     SlipBytes_ReadLE16(entry + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET) |
+			     SlipBytes_ReadLE16(entry + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET)) != 0) {
 				if (!SlipTrackWorld_PositiveComponentTest(
-				        componentBase, componentBaseBytes, componentBaseAddress, SlipBytes_ReadLE16(entry + 0x02u),
-				        (int32_t)((uint32_t)positionX - SlipBytes_ReadLE32(entry + 0x12u)),
-				        (int32_t)((uint32_t)positionY - SlipBytes_ReadLE32(entry + 0x16u)),
-				        (int32_t)((uint32_t)positionZ - SlipBytes_ReadLE32(entry + 0x1au)), &distance, &faceAddress,
-				        &carry)) {
+				        componentBase, componentBaseBytes, componentBaseAddress,
+				        SlipBytes_ReadLE16(entry + SLIP_TRD_SECTION_COMPONENT_OFFSET),
+				        (int32_t)((uint32_t)positionX - SlipBytes_ReadLE32(entry + SLIP_TRD_SECTION_ORIGIN_X_OFFSET)),
+				        (int32_t)((uint32_t)positionY - SlipBytes_ReadLE32(entry + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET)),
+				        (int32_t)((uint32_t)positionZ - SlipBytes_ReadLE32(entry + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)),
+				        &distance, &faceAddress, &carry)) {
 					return false;
 				}
 				if (!carry) {
@@ -13306,7 +13715,7 @@ bool SlipTrackWorld_PositiveRecordSearch(const uint8_t *trdBase, size_t trackDat
 					return true;
 				}
 			}
-			entryOffset += 0x22u;
+			entryOffset += SLIP_TRD_SECTION_BYTES;
 		} while (--entryCount != 0);
 	}
 
@@ -13321,7 +13730,7 @@ bool SlipTrackWorld_UpdateSlotRecord(uint8_t *inputSlot, const SlipObject *objec
 	SlipTrackSlotRecord *const slot = (SlipTrackSlotRecord *)(void *)inputSlot;
 	const uint32_t object = slot->ownerObjectOffset;
 
-	if ((slot->flags & 1u) == 0) {
+	if ((slot->flags & SLIP_TRACK_SLOT_BOX_COLLISION) == 0) {
 		SlipObjectPosition currentObjectPosition;
 		SlipTrackWorldRecordSearch recordSearch;
 
@@ -13384,7 +13793,7 @@ bool SlipTrackWorld_UpdateSlotRecord(uint8_t *inputSlot, const SlipObject *objec
 		if (currentRecord != 0 && recordSearch.distance > (int32_t)slot->boundingRadius) {
 			boundsAndCorners = slot->boundsAndCorners;
 			SlipView3D_BuildBoxCornersThunk(&slot->cachedObjectMatrix, boundsAndCorners, position);
-			for (i = 0; i < 8u; ++i) {
+			for (i = 0; i < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++i) {
 				slot->cornerTrackRecords[i] = currentRecord;
 			}
 			return true;
@@ -13392,9 +13801,10 @@ bool SlipTrackWorld_UpdateSlotRecord(uint8_t *inputSlot, const SlipObject *objec
 		boundsAndCorners = slot->boundsAndCorners;
 		SlipView3D_BuildBoxCornersThunk(&slot->cachedObjectMatrix, boundsAndCorners, position);
 		SlipTrackWorld_lastRecord = 0;
-		for (i = 0; i < 8u; ++i) {
+		for (i = 0; i < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++i) {
 			SlipTrackWorldRecordSearch cornerSearch;
-			const int32_t *const corner = &slot->boundsAndCorners[6u + i * 3u];
+			const int32_t *const corner =
+			    &slot->boundsAndCorners[SLIP_TRACK_BOUND_COORDINATE_COUNT + i * SLIP_TRACK_CORNER_COORDINATE_COUNT];
 
 			if (!SlipTrackWorld_RecordSearch(trdBase, trackDataSize, componentBase, componentBaseBytes, table,
 			                                 tableBytes, trdBaseAddress, slot->cornerTrackRecords[i], corner[0],
@@ -13458,16 +13868,16 @@ bool SlipTrackWorld_QuerySlotCollision(uint8_t *inputSlot, const SlipObject *obj
 
 	SlipTrackWorld_UpdateSlotRecord(inputSlot, objectTable, objectTableBytes, trdBase, trackDataSize, trdBaseAddress,
 	                                componentBase, componentBaseBytes, componentBaseAddress, table, tableBytes);
-	if ((slotFlags & 1u) == 0) {
+	if ((slotFlags & SLIP_TRACK_SLOT_BOX_COLLISION) == 0) {
 		return slot->currentTrackRecordAddress == 0;
 	}
 
 	registers->cornerCursorAddress = registers->slotAddress;
 	registers->firstRecordAddress = 0;
 	registers->secondRecordOrOffset = 0;
-	registers->remainingCornerCount = 8;
+	registers->remainingCornerCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 
-	for (cornerIndex = 0; cornerIndex < 8u; ++cornerIndex) {
+	for (cornerIndex = 0; cornerIndex < SLIP_TRACK_BOUNDING_CORNER_COUNT; ++cornerIndex) {
 		const uint32_t cornerRecordAddress = slot->cornerTrackRecords[cornerIndex];
 		registers->currentRecordOrFlags = cornerRecordAddress;
 
@@ -13483,7 +13893,7 @@ bool SlipTrackWorld_QuerySlotCollision(uint8_t *inputSlot, const SlipObject *obj
 			registers->secondRecordOrOffset = secondRecordAddress;
 		}
 
-		registers->cornerCursorAddress += 4;
+		registers->cornerCursorAddress += sizeof(slot->cornerTrackRecords[0]);
 		--registers->remainingCornerCount;
 	}
 
@@ -13492,9 +13902,9 @@ bool SlipTrackWorld_QuerySlotCollision(uint8_t *inputSlot, const SlipObject *obj
 		const uint16_t secondOffset = (uint16_t)(secondRecordAddress - trdBaseAddress);
 		registers->secondRecordOrOffset = secondRecordAddress - trdBaseAddress;
 
-		if (secondOffset == SlipBytes_ReadLE16(firstRecord + 0x04u) ||
-		    secondOffset == SlipBytes_ReadLE16(firstRecord + 0x08u) ||
-		    secondOffset == SlipBytes_ReadLE16(firstRecord + 0x0cu)) {
+		if (secondOffset == SlipBytes_ReadLE16(firstRecord + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET) ||
+		    secondOffset == SlipBytes_ReadLE16(firstRecord + SLIP_TRD_SECTION_SECOND_EXIT_OFFSET) ||
+		    secondOffset == SlipBytes_ReadLE16(firstRecord + SLIP_TRD_SECTION_THIRD_EXIT_OFFSET)) {
 			return false;
 		}
 		return true;
@@ -13539,24 +13949,24 @@ bool SlipTrackWorld_TableStore(uint8_t *table, size_t tableBytes, uint32_t initi
 	}
 	cellIndex = initialCellIndex;
 	xyIndex = (uint16_t)cellIndex;
-	yIndex = 0x000cu;
+	yIndex = SLIP_TRACK_CELL_ROW_STRIDE;
 	yIndex = (uint16_t)(yIndex * cellY);
 	xyIndex = (uint16_t)(xyIndex + yIndex);
 	*result = (SlipTrackWorldTableStore){
-	    tableValue, initialCellIndex, 0x000cu, yIndex, xyIndex, 0, 0, 0, 0, 0, 0, table, 0, false};
-	yIndex = 0x0030u;
+	    tableValue, initialCellIndex, SLIP_TRACK_CELL_ROW_STRIDE, yIndex, xyIndex, 0, 0, 0, 0, 0, 0, table, 0, false};
+	yIndex = SLIP_TRACK_CELL_PLANE_STRIDE;
 	result->zStride = yIndex;
 	yIndex = (uint16_t)(yIndex * cellZ);
 	result->zIndex = yIndex;
 	xyIndex = (uint16_t)(xyIndex + yIndex);
 	result->cellIndexWord = xyIndex;
-	cellIndex = (cellIndex & 0xffff0000u) | (uint32_t)xyIndex;
+	cellIndex = (cellIndex & SLIP_TRACK_CELL_INDEX_UPPER_WORD_MASK) | (uint32_t)xyIndex;
 	result->cellIndex = cellIndex;
-	cellIndex <<= 2;
+	cellIndex <<= SLIP_TRACK_CELL_REFERENCE_SHIFT;
 	result->cellByteOffsetFull = cellIndex;
 	cellIndex = (uint32_t)(uint16_t)cellIndex;
 	result->cellByteOffset = cellIndex;
-	if (tableBytes < (size_t)cellIndex + 4u) {
+	if (tableBytes < (size_t)cellIndex + SLIP_TRACK_CELL_REFERENCE_BYTES) {
 		return false;
 	}
 	SlipTrackWorld_WriteLE32(table + cellIndex, tableValue);
@@ -13575,49 +13985,53 @@ bool SlipTrackWorld_RecordVector(const uint8_t *trkBase, size_t trkSize, uint16_
 	uint32_t scaledY;
 	uint32_t scaledZ;
 
-	if (trkBase == 0 || result == 0 || (size_t)coordinateOffset + 6u > trkSize) {
+	if (trkBase == 0 || result == 0 || (size_t)coordinateOffset + SLIP_TRACK_CELL_COORDINATE_BYTES > trkSize) {
 		return false;
 	}
 	coordinateData = trkBase + coordinateOffset;
 	cellX = SlipBytes_ReadLE16(coordinateData);
-	cellX = (uint16_t)(cellX / 0x000cu);
+	cellX = (uint16_t)(cellX / SLIP_TRACK_CELL_COORDINATE_DIVISOR);
 	scaledX = (uint32_t)(int32_t)(int16_t)cellX;
-	scaledX <<= 20;
-	cellY = SlipBytes_ReadLE16(coordinateData + 0x02u);
-	cellY = (uint16_t)(cellY / 0x000cu);
-	cellY = (uint16_t)(cellY - 0x000cu);
+	scaledX <<= SLIP_TRACK_CELL_WORLD_SHIFT;
+	cellY = SlipBytes_ReadLE16(coordinateData + SLIP_TRACK_CELL_COORDINATE_Y_OFFSET);
+	cellY = (uint16_t)(cellY / SLIP_TRACK_CELL_COORDINATE_DIVISOR);
+	cellY = (uint16_t)(cellY - SLIP_TRACK_CELL_COORDINATE_Y_BIAS);
 	cellY = (uint16_t)(cellY - 1u);
 	scaledY = (uint32_t)(int32_t)(int16_t)cellY;
-	scaledY <<= 20;
-	cellZ = SlipBytes_ReadLE16(coordinateData + 0x04u);
-	cellZ = (uint16_t)(cellZ / 0x000cu);
-	cellZ = (uint16_t)(cellZ - 0x0012u);
+	scaledY <<= SLIP_TRACK_CELL_WORLD_SHIFT;
+	cellZ = SlipBytes_ReadLE16(coordinateData + SLIP_TRACK_CELL_COORDINATE_Z_OFFSET);
+	cellZ = (uint16_t)(cellZ / SLIP_TRACK_CELL_COORDINATE_DIVISOR);
+	cellZ = (uint16_t)(cellZ - SLIP_TRACK_CELL_COORDINATE_Z_BIAS);
 	scaledZ = (uint32_t)(int32_t)(int16_t)cellZ;
-	scaledZ <<= 20;
+	scaledZ <<= SLIP_TRACK_CELL_WORLD_SHIFT;
 	*result = (SlipTrackWorldRecordVector){
 	    savedParameter,
 	    (uint32_t)coordinateOffset,
 	    coordinateData,
 	    SlipBytes_ReadLE16(coordinateData),
 	    0,
-	    0x000cu,
-	    (uint16_t)(SlipBytes_ReadLE16(coordinateData) / 0x000cu),
-	    (uint32_t)(int32_t)(int16_t)(SlipBytes_ReadLE16(coordinateData) / 0x000cu),
+	    SLIP_TRACK_CELL_COORDINATE_DIVISOR,
+	    (uint16_t)(SlipBytes_ReadLE16(coordinateData) / SLIP_TRACK_CELL_COORDINATE_DIVISOR),
+	    (uint32_t)(int32_t)(int16_t)(SlipBytes_ReadLE16(coordinateData) / SLIP_TRACK_CELL_COORDINATE_DIVISOR),
 	    scaledX,
 	    scaledX,
-	    SlipBytes_ReadLE16(coordinateData + 0x02u),
+	    SlipBytes_ReadLE16(coordinateData + SLIP_TRACK_CELL_COORDINATE_Y_OFFSET),
 	    0,
-	    0x000cu,
-	    (uint16_t)(SlipBytes_ReadLE16(coordinateData + 0x02u) / 0x000cu),
-	    (uint16_t)((uint16_t)(SlipBytes_ReadLE16(coordinateData + 0x02u) / 0x000cu) - 0x000cu),
+	    SLIP_TRACK_CELL_COORDINATE_DIVISOR,
+	    (uint16_t)(SlipBytes_ReadLE16(coordinateData + SLIP_TRACK_CELL_COORDINATE_Y_OFFSET) /
+	               SLIP_TRACK_CELL_COORDINATE_DIVISOR),
+	    (uint16_t)((uint16_t)(SlipBytes_ReadLE16(coordinateData + SLIP_TRACK_CELL_COORDINATE_Y_OFFSET) /
+	                          SLIP_TRACK_CELL_COORDINATE_DIVISOR) -
+	               SLIP_TRACK_CELL_COORDINATE_Y_BIAS),
 	    cellY,
 	    (uint32_t)(int32_t)(int16_t)cellY,
 	    scaledY,
 	    scaledY,
-	    SlipBytes_ReadLE16(coordinateData + 0x04u),
+	    SlipBytes_ReadLE16(coordinateData + SLIP_TRACK_CELL_COORDINATE_Z_OFFSET),
 	    0,
-	    0x000cu,
-	    (uint16_t)(SlipBytes_ReadLE16(coordinateData + 0x04u) / 0x000cu),
+	    SLIP_TRACK_CELL_COORDINATE_DIVISOR,
+	    (uint16_t)(SlipBytes_ReadLE16(coordinateData + SLIP_TRACK_CELL_COORDINATE_Z_OFFSET) /
+	               SLIP_TRACK_CELL_COORDINATE_DIVISOR),
 	    cellZ,
 	    (uint32_t)(int32_t)(int16_t)cellZ,
 	    scaledZ,
@@ -13629,6 +14043,14 @@ bool SlipTrackWorld_RecordVector(const uint8_t *trkBase, size_t trkSize, uint16_
 	return true;
 }
 
+enum {
+	SLIP_DOOR_VERTICAL_NORMAL_THRESHOLD_Q14 = SLIP_Q14_ONE * 3 / 4,
+	SLIP_DOOR_OPEN_GAP_SHIFT = 4,
+	SLIP_DOOR_DEFAULT_SPEED = 14300,
+	SLIP_DOOR_CONTACT_EVENT_SPEED = 28600,
+	SLIP_DOOR_CONTACT_SLOT_MASK = 4
+};
+
 bool SlipTrackWorld_InitRefuel(uint32_t *initialized, uint32_t *refuelOffset, uint16_t trackHandle, uint8_t *trd,
                                size_t trdBytes, uint32_t trdAddress, const uint8_t *trc, size_t trcBytes,
                                const uint8_t *materials, size_t materialBytes) {
@@ -13638,51 +14060,55 @@ bool SlipTrackWorld_InitRefuel(uint32_t *initialized, uint32_t *refuelOffset, ui
 	*refuelOffset = 0;
 	if (trackHandle == 0)
 		return true;
-	if (trdBytes < 10)
+	if (trdBytes < SLIP_TRD_ROUTE_HEADER_BYTES)
 		return false;
-	uint32_t group = SlipBytes_ReadLE16(trd + 2);
+	uint32_t group = SlipBytes_ReadLE16(trd + SLIP_TRD_GROUP_TABLE_OFFSET);
 	if (group == 0)
 		return true;
-	if (group + 2 > trdBytes)
+	if (group + SLIP_TRD_TABLE_COUNT_BYTES > trdBytes)
 		return false;
 	const uint16_t groups = SlipBytes_ReadLE16(trd + group);
-	group += 2;
+	group += SLIP_TRD_TABLE_COUNT_BYTES;
 	if (groups == 0)
 		return true;
 	for (uint16_t g = 0; g < groups; ++g) {
-		if (group + 6 > trdBytes)
+		if (group + SLIP_TRACK_LINKED_HEADER_BYTES > trdBytes)
 			return false;
-		const uint32_t list = SlipBytes_ReadLE16(trd + group + 4);
+		const uint32_t list = SlipBytes_ReadLE16(trd + group + SLIP_TRACK_LINKED_OFFSET);
 		if (list != 0) {
-			if (list + 2 > trdBytes)
+			if (list + SLIP_TRD_TABLE_COUNT_BYTES > trdBytes)
 				return false;
 			const uint16_t records = SlipBytes_ReadLE16(trd + list);
-			uint32_t record = list + 2;
-			for (uint16_t r = 0; r < records; ++r, record += 0x22) {
-				if (record + 0x22 > trdBytes)
+			uint32_t record = list + SLIP_TRD_TABLE_COUNT_BYTES;
+			for (uint16_t r = 0; r < records; ++r, record += SLIP_TRD_SECTION_BYTES) {
+				if (record + SLIP_TRD_SECTION_BYTES > trdBytes)
 					return false;
-				const uint32_t component = SlipBytes_ReadLE16(trd + record + 2);
-				if (component + 6 > trcBytes)
+				const uint32_t component = SlipBytes_ReadLE16(trd + record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+				if (component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_END > trcBytes)
 					return false;
-				uint32_t polygon = SlipBytes_ReadLE16(trc + component + 4);
+				uint32_t polygon = SlipBytes_ReadLE16(trc + component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 				if (polygon == 0)
 					continue;
-				if (polygon + 2 > trcBytes)
+				if (polygon + SLIP_TRC_TABLE_COUNT_BYTES > trcBytes)
 					return false;
 				const uint16_t polygons = SlipBytes_ReadLE16(trc + polygon);
-				polygon += 2;
+				polygon += SLIP_TRC_TABLE_COUNT_BYTES;
 				for (uint16_t f = 0; f < polygons; ++f) {
-					if (polygon + 12 > trcBytes)
+					if (polygon + SLIP_TRC_PRIMITIVE_HEADER_BYTES > trcBytes)
 						return false;
-					const uint8_t *const name =
-					    SlipDraw3D_GetMaterialName(materials, materialBytes, SlipBytes_ReadLE16(trc + polygon + 10));
+					const uint8_t *const name = SlipDraw3D_GetMaterialName(
+					    materials, materialBytes,
+					    SlipBytes_ReadLE16(trc + polygon + SLIP_TRC_PRIMITIVE_MATERIAL_OFFSET));
 					if (name == NULL)
 						return false;
 
 					if (memcmp(name, "REFUEL 3", 8) == 0)
 						*refuelOffset = trdAddress + record;
 					const uint16_t count = SlipBytes_ReadLE16(trc + polygon);
-					polygon += 12 + (count & 0x8000 ? (count & 0x7fff) * 6u : count * 2u);
+					polygon += SLIP_TRC_PRIMITIVE_HEADER_BYTES +
+					           (count & SLIP_TRC_PRIMITIVE_TEXTURED
+					                ? (count & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES
+					                : count * SLIP_TRC_VERTEX_INDEX_BYTES);
 				}
 			}
 		}
@@ -13691,36 +14117,36 @@ bool SlipTrackWorld_InitRefuel(uint32_t *initialized, uint32_t *refuelOffset, ui
 	if (*refuelOffset == 0)
 		return true;
 	const uint32_t refuel = *refuelOffset - trdAddress;
-	const uint32_t target = SlipBytes_ReadLE16(trd + refuel + 0x1e);
-	uint32_t segment = SlipBytes_ReadLE16(trd + 8);
+	const uint32_t target = SlipBytes_ReadLE16(trd + refuel + SLIP_TRD_SECTION_ROUTE_OFFSET);
+	uint32_t segment = SlipBytes_ReadLE16(trd + SLIP_TRD_ROUTE_TABLE_OFFSET);
 	if (segment == 0)
 		return true;
-	if (segment + 2 > trdBytes)
+	if (segment + SLIP_TRD_TABLE_COUNT_BYTES > trdBytes)
 		return false;
 	const uint16_t segments = SlipBytes_ReadLE16(trd + segment);
-	segment += 2;
-	for (uint16_t s = 0; s < segments; ++s, segment += 0x32) {
-		if (segment + 0x32 > trdBytes)
+	segment += SLIP_TRD_TABLE_COUNT_BYTES;
+	for (uint16_t s = 0; s < segments; ++s, segment += SLIP_TRD_ROUTE_RECORD_BYTES) {
+		if (segment + SLIP_TRD_ROUTE_RECORD_BYTES > trdBytes)
 			return false;
-		SlipTrackWorld_WriteLE16(trd + segment + 0x28, 0);
+		SlipTrackWorld_WriteLE16(trd + segment + SLIP_TRD_ROUTE_REFUEL_REACHABLE_OFFSET, 0);
 		if (segment == target)
 			continue;
 		uint32_t cursor = segment;
 
 		for (;;) {
-			if (cursor + 8 > trdBytes)
+			if (cursor + SLIP_TRD_ROUTE_REFUEL_BRANCH_END > trdBytes)
 				return false;
-			const uint32_t branch = SlipBytes_ReadLE16(trd + cursor + 4);
+			const uint32_t branch = SlipBytes_ReadLE16(trd + cursor + SLIP_TRD_ROUTE_SECOND_LINK_OFFSET);
 			if (branch != 0) {
 				cursor = branch;
 
 				for (;;) {
-					if (cursor + 8 > trdBytes)
+					if (cursor + SLIP_TRD_ROUTE_REFUEL_BRANCH_END > trdBytes)
 						return false;
-					if (SlipBytes_ReadLE16(trd + cursor + 6) != 0)
+					if (SlipBytes_ReadLE16(trd + cursor + SLIP_TRD_ROUTE_REFUEL_BOUNDARY_OFFSET) != 0)
 						break;
 					if (cursor == target) {
-						SlipTrackWorld_WriteLE16(trd + segment + 0x28, UINT16_MAX);
+						SlipTrackWorld_WriteLE16(trd + segment + SLIP_TRD_ROUTE_REFUEL_REACHABLE_OFFSET, UINT16_MAX);
 						break;
 					}
 					if (cursor == segment)
@@ -13743,60 +14169,65 @@ bool SlipTrackWorld_FindDoors(uint16_t trackHandle, const uint8_t *trd, size_t t
 	SlipTrackWorld_doorCount = 0;
 	if (trackHandle == 0)
 		return true;
-	if (trdBytes < 4)
+	if (trdBytes < SLIP_TRD_GROUP_TABLE_END)
 		return false;
-	uint32_t group = SlipBytes_ReadLE16(trd + 2);
+	uint32_t group = SlipBytes_ReadLE16(trd + SLIP_TRD_GROUP_TABLE_OFFSET);
 	if (group == 0)
 		return true;
-	if (group + 2 > trdBytes)
+	if (group + SLIP_TRD_TABLE_COUNT_BYTES > trdBytes)
 		return false;
 	const uint16_t groups = SlipBytes_ReadLE16(trd + group);
-	group += 2;
+	group += SLIP_TRD_TABLE_COUNT_BYTES;
 	for (uint16_t g = 0; g < groups; ++g) {
-		if (group + 6 > trdBytes)
+		if (group + SLIP_TRACK_LINKED_HEADER_BYTES > trdBytes)
 			return false;
-		const uint32_t list = SlipBytes_ReadLE16(trd + group + 4);
+		const uint32_t list = SlipBytes_ReadLE16(trd + group + SLIP_TRACK_LINKED_OFFSET);
 		if (list != 0) {
-			if (list + 2 > trdBytes)
+			if (list + SLIP_TRD_TABLE_COUNT_BYTES > trdBytes)
 				return false;
 			const uint16_t records = SlipBytes_ReadLE16(trd + list);
-			uint32_t record = list + 2;
-			for (uint16_t r = 0; r < records; ++r, record += 0x22) {
-				if (record + 0x22 > trdBytes)
+			uint32_t record = list + SLIP_TRD_TABLE_COUNT_BYTES;
+			for (uint16_t r = 0; r < records; ++r, record += SLIP_TRD_SECTION_BYTES) {
+				if (record + SLIP_TRD_SECTION_BYTES > trdBytes)
 					return false;
-				SlipView3DVec32 translation = {(int32_t)SlipBytes_ReadLE32(trd + record + 0x12),
-				                               (int32_t)SlipBytes_ReadLE32(trd + record + 0x16),
-				                               (int32_t)SlipBytes_ReadLE32(trd + record + 0x1a)};
-				const uint32_t component = SlipBytes_ReadLE16(trd + record + 2);
-				if (component + 6 > trcBytes)
+				SlipView3DVec32 translation = {
+				    (int32_t)SlipBytes_ReadLE32(trd + record + SLIP_TRD_SECTION_ORIGIN_X_OFFSET),
+				    (int32_t)SlipBytes_ReadLE32(trd + record + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET),
+				    (int32_t)SlipBytes_ReadLE32(trd + record + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET)};
+				const uint32_t component = SlipBytes_ReadLE16(trd + record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+				if (component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_END > trcBytes)
 					return false;
-				uint32_t polygon = SlipBytes_ReadLE16(trc + component + 4);
+				uint32_t polygon = SlipBytes_ReadLE16(trc + component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 				if (polygon == 0)
 					continue;
-				if (polygon + 2 > trcBytes)
+				if (polygon + SLIP_TRC_TABLE_COUNT_BYTES > trcBytes)
 					return false;
 				const uint16_t polygons = SlipBytes_ReadLE16(trc + polygon);
-				polygon += 2;
+				polygon += SLIP_TRC_TABLE_COUNT_BYTES;
 				for (uint16_t f = 0; f < polygons; ++f) {
-					if (polygon + 12 > trcBytes)
+					if (polygon + SLIP_TRC_PRIMITIVE_HEADER_BYTES > trcBytes)
 						return false;
-					if ((trc[polygon + 8] & 0x20u) != 0) {
+					if ((trc[polygon + SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_DOOR) != 0) {
 						SlipView3DNormalizeLength3D normalized;
 						SlipView3DNormalizeVector3D direction;
 						SlipView3DMatrix matrix;
 						SlipTrackWorldPointLookup first, second;
 
-						if (!SlipView3D_NormalizeLength3D(SlipBytes_ReadLE16(trc + polygon + 2), 0,
-						                                  SlipBytes_ReadLE16(trc + polygon + 6), &normalized) ||
+						if (!SlipView3D_NormalizeLength3D(
+						        SlipBytes_ReadLE16(trc + polygon + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET), 0,
+						        SlipBytes_ReadLE16(trc + polygon + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET), &normalized) ||
 						    !SlipView3D_BuildMatrixFromVector(&matrix, (int16_t)normalized.unitXQ14,
 						                                      (int16_t)normalized.unitYQ14,
 						                                      (int16_t)normalized.unitZQ14))
 							return false;
-						if (polygon + 20 > trcBytes)
+						if (polygon + SLIP_TRC_PRIMITIVE_HEADER_BYTES +
+						        SLIP_POLYGON_RECTANGLE_VERTICES * SLIP_TRC_VERTEX_INDEX_BYTES >
+						    trcBytes)
 							return false;
-						uint16_t indices[4];
-						for (unsigned i = 0; i < 4; ++i)
-							indices[i] = SlipBytes_ReadLE16(trc + polygon + 12 + i * 2);
+						uint16_t indices[SLIP_POLYGON_RECTANGLE_VERTICES];
+						for (unsigned i = 0; i < SLIP_POLYGON_RECTANGLE_VERTICES; ++i)
+							indices[i] = SlipBytes_ReadLE16(trc + polygon + SLIP_TRC_PRIMITIVE_HEADER_BYTES +
+							                                i * SLIP_TRC_VERTEX_INDEX_BYTES);
 
 						if (!SlipTrackWorld_PointLookup(trc + component, trc, trcBytes, indices[3], 0, 0, 0, &first) ||
 						    !SlipTrackWorld_PointLookup(trc + component, trc, trcBytes, indices[0], 0, 0, 0, &second) ||
@@ -13808,13 +14239,13 @@ bool SlipTrackWorld_FindDoors(uint16_t trackHandle, const uint8_t *trd, size_t t
 						int16_t ny = (int16_t)direction.unitYQ14;
 						int16_t nz = (int16_t)direction.unitZQ14;
 
-						if (ny >= 0x3000) {
+						if (ny >= SLIP_DOOR_VERTICAL_NORMAL_THRESHOLD_Q14) {
 							nx = 0;
-							ny = 0x4000;
+							ny = SLIP_Q14_ONE;
 							nz = 0;
-						} else if (ny <= -0x3000) {
+						} else if (ny <= -SLIP_DOOR_VERTICAL_NORMAL_THRESHOLD_Q14) {
 							nx = 0;
-							ny = -0x4000;
+							ny = -SLIP_Q14_ONE;
 							nz = 0;
 						} else {
 							if (!SlipView3D_NormalizeLength3D((uint16_t)nx, 0, (uint16_t)nz, &normalized))
@@ -13855,7 +14286,7 @@ bool SlipTrackWorld_FindDoors(uint16_t trackHandle, const uint8_t *trd, size_t t
 						                         1) +
 						              (uint32_t)translation.z)};
 
-						if (SlipTrackWorld_doorCount != 8) {
+						if (SlipTrackWorld_doorCount != SLIP_TRACK_DOOR_CAPACITY) {
 							SlipTrackDoorRecord *const door = &SlipTrackWorld_doors[SlipTrackWorld_doorCount++];
 							door->object = 0;
 							door->shapeHandle = 0;
@@ -13873,9 +14304,9 @@ bool SlipTrackWorld_FindDoors(uint16_t trackHandle, const uint8_t *trd, size_t t
 							door->planeOrigin = (SlipView3DVec32){(int32_t)((uint32_t)offset.x + (uint32_t)center.x),
 							                                      (int32_t)((uint32_t)offset.y + (uint32_t)center.y),
 							                                      (int32_t)((uint32_t)offset.z + (uint32_t)center.z)};
-							offset =
-							    SlipView3D_ScaleVector(door->directionX, door->directionY, door->directionZ,
-							                           (int32_t)(((uint32_t)height << 1) - (uint32_t)(height >> 4)));
+							offset = SlipView3D_ScaleVector(
+							    door->directionX, door->directionY, door->directionZ,
+							    (int32_t)(((uint32_t)height << 1) - (uint32_t)(height >> SLIP_DOOR_OPEN_GAP_SHIFT)));
 							door->openEndpoint = (SlipView3DVec32){(int32_t)((uint32_t)offset.x + (uint32_t)center.x),
 							                                       (int32_t)((uint32_t)offset.y + (uint32_t)center.y),
 							                                       (int32_t)((uint32_t)offset.z + (uint32_t)center.z)};
@@ -13886,15 +14317,22 @@ bool SlipTrackWorld_FindDoors(uint16_t trackHandle, const uint8_t *trd, size_t t
 							door->firstTrackRecord = trdAddress + record;
 
 							unsigned edge = 0;
-							while (edge < 3 && SlipBytes_ReadLE16(trd + record + 6 + edge * 4) != (uint16_t)polygon)
+							while (edge < SLIP_TRD_SECTION_EXIT_COUNT &&
+							       SlipBytes_ReadLE16(trd + record + SLIP_TRD_SECTION_FIRST_EXIT_PLANE_OFFSET +
+							                          edge * SLIP_TRD_SECTION_EXIT_BYTES) != (uint16_t)polygon)
 								++edge;
-							if (edge == 3)
+							if (edge == SLIP_TRD_SECTION_EXIT_COUNT)
 								SlipRuntime_Fatal("FindDoors - no link!");
-							door->secondTrackRecord = trdAddress + SlipBytes_ReadLE16(trd + record + 4 + edge * 4);
+							door->secondTrackRecord =
+							    trdAddress + SlipBytes_ReadLE16(trd + record + SLIP_TRD_SECTION_FIRST_EXIT_OFFSET +
+							                                    edge * SLIP_TRD_SECTION_EXIT_BYTES);
 						}
 					}
 					const uint16_t count = SlipBytes_ReadLE16(trc + polygon);
-					polygon += 12 + ((count & 0x8000u) != 0 ? (count & 0x7fffu) * 6u : count * 2u);
+					polygon += SLIP_TRC_PRIMITIVE_HEADER_BYTES +
+					           ((count & SLIP_TRC_PRIMITIVE_TEXTURED) != 0
+					                ? (count & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES
+					                : count * SLIP_TRC_VERTEX_INDEX_BYTES);
 				}
 			}
 		}
@@ -13926,7 +14364,7 @@ bool SlipTrackWorld_MoveDoor(SlipTrackDoorRecord *door, uint16_t objectOffset, S
 		                            oldPosition.positionZ, &position))
 			return false;
 		door->direction = 0;
-		door->speed = 0x37dc;
+		door->speed = SLIP_DOOR_DEFAULT_SPEED;
 		door->endpointDelay = 0;
 		door->endpointDelayRemaining = 0;
 	}
@@ -13945,7 +14383,7 @@ uint32_t SlipTrackWorld_DoorEvent(uint32_t eventCode, uint16_t objectOffset, uin
 		}
 		return 0;
 	case SLIP_OBJECT_EVENT_COLLISION_BOUNCE:
-		return eventCode & 0xffff0000u;
+		return eventCode & SLIP_OBJECT_EVENT_UPPER_WORD_MASK;
 	case SLIP_OBJECT_EVENT_COLLISION_STOP: {
 		SlipTrackWorldSlotListSelect selected;
 		if (!SlipTrackWorld_SelectSlotListEntry(eventCode, slotAddress, objects, objectBytes, otherObject, &selected))
@@ -13954,9 +14392,9 @@ uint32_t SlipTrackWorld_DoorEvent(uint32_t eventCode, uint16_t objectOffset, uin
 			if (slots == NULL || (size_t)selected.slotOffset + sizeof(*slots) > slotBytes)
 				return UINT32_MAX;
 			const SlipTrackSlotRecord *const other = &slots[selected.slotOffset / sizeof(*slots)];
-			if ((other->flags & 4u) != 0) {
+			if ((other->flags & SLIP_DOOR_CONTACT_SLOT_MASK) != 0) {
 				door->direction = 0;
-				door->speed = 0x6fb8;
+				door->speed = SLIP_DOOR_CONTACT_EVENT_SPEED;
 			}
 		}
 		return 0;
@@ -13964,14 +14402,14 @@ uint32_t SlipTrackWorld_DoorEvent(uint32_t eventCode, uint16_t objectOffset, uin
 	case SLIP_OBJECT_EVENT_UPDATE: {
 
 		if (SlipRaceCollision_Query(objectOffset)) {
-			door->speed = 0x37dc;
+			door->speed = SLIP_DOOR_DEFAULT_SPEED;
 			door->direction = 0;
 			door->endpointDelayRemaining = 0;
 			door->endpointDelay = 0;
 		}
 		SlipTrackWorld_DoorDirection(door);
 
-		const uint32_t distance = (uint32_t)(((uint64_t)door->speed * SlipFrameTimer_Step()) >> 14);
+		const uint32_t distance = (uint32_t)(((uint64_t)door->speed * SlipFrameTimer_Step()) >> SLIP_Q14_FRACTION_BITS);
 		SlipView3DVec32 displacement =
 		    SlipView3D_ScaleVector(SlipTrackWorld_doorDirection.x, SlipTrackWorld_doorDirection.y,
 		                           SlipTrackWorld_doorDirection.z, (int32_t)distance);
@@ -14001,7 +14439,7 @@ uint32_t SlipTrackWorld_DoorEvent(uint32_t eventCode, uint16_t objectOffset, uin
 		if (reached) {
 
 			door->direction ^= UINT32_MAX;
-			door->speed = 0x37dc;
+			door->speed = SLIP_DOOR_DEFAULT_SPEED;
 			door->endpointDelayRemaining = door->endpointDelay;
 		}
 		return 0;

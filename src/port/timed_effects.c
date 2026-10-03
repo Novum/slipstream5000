@@ -1,5 +1,8 @@
 #include "timed_effects.h"
 
+/* Form a Q32 quotient, retain its low word pair, then extract the Q16 fraction. */
+enum { SLIP_TIMED_EFFECT_PHASE_NUMERATOR_SHIFT = 2 * SLIP_TIMED_EFFECT_FRACTION_BITS };
+
 SlipTimedEffect *SlipTimedEffects_active;
 SlipTimedEffect *SlipTimedEffects_free;
 uint16_t SlipTimedEffects_count;
@@ -118,35 +121,41 @@ void SlipTimedEffects_Phase(SlipTimedEffectObjectState *state, uint32_t elapsed,
 	const uint32_t age = state->age + (uint32_t)step;
 	state->age = age;
 	*result = (SlipTimedEffectPhase){.step = step, .age = age};
-	if (state->phase == 0) {
+	if (state->phase == SLIP_TIMED_EFFECT_GROWTH_PHASE) {
 		if (age < descriptor->growthDuration) {
-			const uint32_t fraction = (uint32_t)(((uint64_t)age << 32) / descriptor->growthDuration) >> 16;
+			const uint32_t fraction =
+			    (uint32_t)(((uint64_t)age << SLIP_TIMED_EFFECT_PHASE_NUMERATOR_SHIFT) / descriptor->growthDuration) >>
+			    SLIP_TIMED_EFFECT_FRACTION_BITS;
 			const int32_t difference = (int32_t)((uint32_t)state->holdExtent - (uint32_t)state->initialExtent);
-			const uint32_t scaled = (uint32_t)((uint64_t)((int64_t)(int32_t)fraction * difference) >> 16);
+			const uint32_t scaled =
+			    (uint32_t)((uint64_t)((int64_t)(int32_t)fraction * difference) >> SLIP_TIMED_EFFECT_FRACTION_BITS);
 			result->extent = scaled + (uint32_t)state->initialExtent;
 		} else {
 			state->age = descriptor->growthDuration;
 			result->extent = (uint32_t)state->holdExtent;
-			state->phase = 1;
+			state->phase = SLIP_TIMED_EFFECT_HOLD_PHASE;
 		}
 		result->writeExtent = true;
 		result->callbackValue = result->extent;
-	} else if (state->phase == 1) {
+	} else if (state->phase == SLIP_TIMED_EFFECT_HOLD_PHASE) {
 		result->callbackValue = age;
 		if (age >= descriptor->holdDuration + descriptor->growthDuration) {
-			state->phase = 2;
+			state->phase = SLIP_TIMED_EFFECT_FINAL_PHASE;
 			SlipTimedEffects_fraction = 0;
 		}
 	} else {
 		const uint32_t elapsed = age - descriptor->holdDuration - descriptor->growthDuration;
 		if (elapsed >= descriptor->finalDuration) {
 			result->freeObject = true;
-			result->callbackValue = (age & 0xffff0000u) | state->phase;
+			result->callbackValue = (age & SLIP_TIMED_EFFECT_VALUE_UPPER_WORD_MASK) | state->phase;
 		} else {
-			const uint32_t fraction = (uint32_t)(((uint64_t)elapsed << 32) / descriptor->finalDuration) >> 16;
+			const uint32_t fraction = (uint32_t)(((uint64_t)elapsed << SLIP_TIMED_EFFECT_PHASE_NUMERATOR_SHIFT) /
+			                                     descriptor->finalDuration) >>
+			                          SLIP_TIMED_EFFECT_FRACTION_BITS;
 			SlipTimedEffects_fraction = fraction;
 			const int32_t difference = (int32_t)((uint32_t)descriptor->finalExtent - (uint32_t)state->holdExtent);
-			const uint32_t scaled = (uint32_t)((uint64_t)((int64_t)(int32_t)fraction * difference) >> 16);
+			const uint32_t scaled =
+			    (uint32_t)((uint64_t)((int64_t)(int32_t)fraction * difference) >> SLIP_TIMED_EFFECT_FRACTION_BITS);
 			result->extent = scaled + (uint32_t)state->holdExtent;
 			result->writeExtent = true;
 			result->callbackValue = result->extent;

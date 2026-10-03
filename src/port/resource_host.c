@@ -1,5 +1,6 @@
 #include "resource_host.h"
 #include "host_file.h"
+#include "renderer_lifecycle.h"
 #include "resource_anonymous.h"
 #include "resource_load.h"
 #include "resource_platform.h"
@@ -24,7 +25,15 @@
 #define HOST_READ_FLAGS O_RDONLY
 #endif
 
-static SlipResourceStorage regions[16];
+enum {
+	SLIP_RESOURCE_HOST_REGION_CAPACITY = 16,
+	SLIP_RESOURCE_HOST_HANDLE_COUNT = 4000,
+	SLIP_RESOURCE_HOST_RESERVED_CONVENTIONAL_BYTES = 15000,
+	SLIP_RESOURCE_HOST_CONVENTIONAL_INSUFFICIENT_MEMORY = 8,
+	SLIP_RESOURCE_HOST_CONVENTIONAL_INVALID_SELECTOR = 9
+};
+
+static SlipResourceStorage regions[SLIP_RESOURCE_HOST_REGION_CAPACITY];
 static uint32_t availableBytes;
 static const SlipResourceMemoryServices *memoryServicesOverride;
 
@@ -155,9 +164,9 @@ static SlipResourceAccessCalls SlipResourceHost_AccessCalls(void) {
 
 bool SlipResourceHost_Load(void *context, const char *name, uint16_t *handle) {
 	(void)context;
-	char source[13] = {0};
+	char source[SLIP_RESOURCE_NAME_BUFFER_BYTES] = {0};
 
-	for (unsigned index = 0; index < 12 && name[index] != 0; ++index)
+	for (unsigned index = 0; index < SLIP_RESOURCE_NAME_BYTES && name[index] != 0; ++index)
 		source[index] = name[index];
 	SlipResourceAccessCalls access = SlipResourceHost_AccessCalls();
 	return SlipResource_LoadNamedHandle(source, handle, &nameCalls, &access);
@@ -165,11 +174,11 @@ bool SlipResourceHost_Load(void *context, const char *name, uint16_t *handle) {
 
 bool SlipResourceHost_LoadSequence(void *context, const char *pattern, uint32_t first, uint16_t count,
                                    uint16_t *resources) {
-	char filename[14];
+	char filename[SLIP_RESOURCE_WILDCARD_BUFFER_BYTES];
 	unsigned length = 0;
 	while (*pattern != '*') {
 		filename[length++] = *pattern++;
-		if (length == 13)
+		if (length == SLIP_RESOURCE_NAME_BUFFER_BYTES)
 			SlipRuntime_Fatal("RsrcFindIDs - could not find * character in search string");
 	}
 	const unsigned wildcard = length;
@@ -210,9 +219,9 @@ void SlipResourceHost_ReleaseSequence(void *context, const uint16_t *resources, 
 
 bool SlipResourceHost_Find(void *context, const char *name, uint16_t *handle) {
 	(void)context;
-	char source[13] = {0};
+	char source[SLIP_RESOURCE_NAME_BUFFER_BYTES] = {0};
 
-	for (unsigned index = 0; index < 12 && name[index] != 0; ++index)
+	for (unsigned index = 0; index < SLIP_RESOURCE_NAME_BYTES && name[index] != 0; ++index)
 		source[index] = name[index];
 	return SlipResource_FindOrCreateName(source, handle, &nameCalls);
 }
@@ -244,42 +253,43 @@ union SlipDraw3DVertexRecord *SlipResourceHost_LockVertices(void *context, uint1
 	(void)context;
 	SlipResourceAccessCalls access = SlipResourceHost_AccessCalls();
 	SlipResourceBlock *const block = SlipResource_Lock(resource, &access);
-	return SlipResourceStorage_Vertices(block, block->requestedBytes / 64u);
+	return SlipResourceStorage_Vertices(block, block->requestedBytes / SLIP_DRAW3D_VERTEX_RECORD_SIZE);
 }
 
 uint16_t *SlipResourceHost_LockSpecular(void *context, uint16_t resource) {
 	(void)context;
 	SlipResourceAccessCalls access = SlipResourceHost_AccessCalls();
 	SlipResourceBlock *const block = SlipResource_Lock(resource, &access);
-	return SlipResourceStorage_Specular(block, block->requestedBytes / 2u);
+	return SlipResourceStorage_Specular(block, block->requestedBytes / sizeof(uint16_t));
 }
 
 struct SlipRendererPolygon *SlipResourceHost_LockPolygons(void *context, uint16_t resource) {
 	(void)context;
 	SlipResourceAccessCalls access = SlipResourceHost_AccessCalls();
 	SlipResourceBlock *const block = SlipResource_Lock(resource, &access);
-	return SlipResourceStorage_Polygons(block, block->requestedBytes / 60u);
+	return SlipResourceStorage_Polygons(block, block->requestedBytes / SLIP_DRAW3D_LINKED_DRAW_RECORD_SIZE);
 }
 
 struct SlipRendererDrawState *SlipResourceHost_LockDrawStates(void *context, uint16_t resource) {
 	(void)context;
 	SlipResourceAccessCalls access = SlipResourceHost_AccessCalls();
 	SlipResourceBlock *const block = SlipResource_Lock(resource, &access);
-	return SlipResourceStorage_DrawStates(block, block->requestedBytes / 56u);
+	return SlipResourceStorage_DrawStates(block, block->requestedBytes / SLIP_RENDERER_DRAW_STATE_DOS_BYTES);
 }
 
 struct SlipDraw3DMaterialTable *SlipResourceHost_LockMaterials(void *context, uint16_t resource) {
 	(void)context;
 	SlipResourceAccessCalls access = SlipResourceHost_AccessCalls();
 	SlipResourceBlock *const block = SlipResource_Lock(resource, &access);
-	return SlipResourceStorage_Materials(block, (block->requestedBytes - 4u) / 84u);
+	return SlipResourceStorage_Materials(block, (block->requestedBytes - SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES) /
+	                                                SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE);
 }
 
 struct RasterTexturedPoint *SlipResourceHost_LockPoints(void *context, uint16_t resource) {
 	(void)context;
 	SlipResourceAccessCalls access = SlipResourceHost_AccessCalls();
 	SlipResourceBlock *const block = SlipResource_Lock(resource, &access);
-	return SlipResourceStorage_Points(block, block->requestedBytes / 32u);
+	return SlipResourceStorage_Points(block, block->requestedBytes / sizeof(RasterTexturedPoint));
 }
 
 SlipResourceBlock *SlipResourceHost_LockReserved(void *context, uint16_t resource) {
@@ -417,7 +427,7 @@ static bool SlipResourceHost_MemoryAllocate(void *context, uint32_t bytes, SlipR
 	(void)context;
 	if (bytes > availableBytes)
 		return false;
-	for (unsigned index = 0; index < 16; ++index) {
+	for (unsigned index = 0; index < SLIP_RESOURCE_HOST_REGION_CAPACITY; ++index) {
 		if (regions[index].bytes == NULL) {
 			uint8_t *const data = malloc(bytes);
 			if (data == NULL)
@@ -446,13 +456,14 @@ static SlipResourceConventionalAllocation SlipResourceHost_ConventionalAllocate(
 	(void)context;
 	(void)paragraphs;
 	/* The native process has no conventional-memory arena. */
-	return (SlipResourceConventionalAllocation){.failed = true, .errorCode = 8, .availableParagraphs = 0};
+	return (SlipResourceConventionalAllocation){
+	    .failed = true, .errorCode = SLIP_RESOURCE_HOST_CONVENTIONAL_INSUFFICIENT_MEMORY, .availableParagraphs = 0};
 }
 
 static uint16_t SlipResourceHost_ConventionalRelease(void *context, uint16_t selector) {
 	(void)context;
 	(void)selector;
-	return 9; /* No conventional allocation selectors exist in this host. */
+	return SLIP_RESOURCE_HOST_CONVENTIONAL_INVALID_SELECTOR; /* No conventional allocation selectors exist. */
 }
 
 static const SlipResourceMemoryServices memoryServices = {.queryLargestExtendedBlock = SlipResourceHost_MemoryAvailable,
@@ -478,7 +489,7 @@ void SlipResourceHost_Initialize(uint32_t regionBytes) {
 	                                .releasePlatform = SlipResource_FreePlatform,
 	                                .releaseContext = (void *)services};
 
-	SlipResource_Initialize(4000, 15000, 0, 0);
+	SlipResource_Initialize(SLIP_RESOURCE_HOST_HANDLE_COUNT, SLIP_RESOURCE_HOST_RESERVED_CONVENTIONAL_BYTES, 0, 0);
 }
 
 void SlipResourceHost_OpenArchives(const char *primary, const char *secondary) {

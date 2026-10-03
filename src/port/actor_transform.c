@@ -1,4 +1,5 @@
 #include "actor_transform.h"
+#include "actor_format.h"
 #include <stddef.h>
 
 static void SlipActor_NoRotation(const SlipView3DMaths *maths, int16_t angle, SlipView3DMatrix *matrix) {
@@ -8,8 +9,8 @@ static void SlipActor_NoRotation(const SlipView3DMaths *maths, int16_t angle, Sl
 }
 
 typedef void (*SlipActorRotation)(const SlipView3DMaths *, int16_t, SlipView3DMatrix *);
-static const SlipActorRotation rotations[4] = {SlipActor_NoRotation, SlipView3D_ApplyPitchMatrix,
-                                               SlipView3D_ApplyRow0Row1Rotation, SlipView3D_ApplyRow0Row2Rotation};
+static const SlipActorRotation rotations[] = {SlipActor_NoRotation, SlipView3D_ApplyPitchMatrix,
+                                              SlipView3D_ApplyRow0Row1Rotation, SlipView3D_ApplyRow0Row2Rotation};
 
 void SlipActor_RebuildChildren(SlipActorTransformState *state, SlipActorPartRecord *part,
                                const SlipView3DMaths *maths) {
@@ -32,7 +33,8 @@ void SlipActor_RebuildChildren(SlipActorTransformState *state, SlipActorPartReco
 				    (int32_t)((uint32_t)(int32_t)(int16_t)rotated.y + (uint32_t)parent->worldPosition.y);
 				child->worldPosition.z =
 				    (int32_t)((uint32_t)(int32_t)(int16_t)rotated.z + (uint32_t)parent->worldPosition.z);
-				rotations[child->rotationCallbackOffset / 4](maths, (int16_t)child->angle, &child->worldMatrix);
+				rotations[child->rotationCallbackOffset / SLIP_ART_ROTATION_CALLBACK_ENTRY_BYTES](
+				    maths, (int16_t)child->angle, &child->worldMatrix);
 			}
 			SlipActor_RebuildChildren(state, child, maths);
 			child = child->nextSibling;

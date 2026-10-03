@@ -19,7 +19,22 @@
 #include <stdlib.h>
 #include <string.h>
 
-static char configurationPath[1024];
+enum { SLIP_CONFIG_HOST_PATH_BYTES = 1024, SLIP_CONFIG_HOST_RESOURCE_ARENA_BYTES = 16 * 1024 * 1024 };
+
+/* Extra host option in the unused row above the original general settings. */
+enum {
+	SLIP_CONFIG_HIGH_RES_LEFT = 25,
+	SLIP_CONFIG_HIGH_RES_TOP = 43,
+	SLIP_CONFIG_HIGH_RES_RIGHT = 281,
+	SLIP_CONFIG_HIGH_RES_BOTTOM = 59,
+	SLIP_CONFIG_HIGH_RES_LABEL_LEFT = 31,
+	SLIP_CONFIG_HIGH_RES_LABEL_TOP = 46,
+	SLIP_CONFIG_HIGH_RES_LABEL_RIGHT = 200,
+	SLIP_CONFIG_HIGH_RES_VALUE_LEFT = 204,
+	SLIP_CONFIG_HIGH_RES_VALUE_TOP = 47
+};
+
+static char configurationPath[SLIP_CONFIG_HOST_PATH_BYTES];
 static uint16_t boundSprite;
 static RasterSurfaceBinding savedSurface;
 static const SlipStringTableResources strings = {.load = SlipResourceHost_Load,
@@ -129,7 +144,8 @@ static void SlipConfigHost_Language(void *context) {
 	SlipStringTable_SetLanguage(&SlipStringTable_state, (uint8_t)SlipConfig_language);
 }
 
-static bool SlipConfigHost_LoadStrings(void *context, const char name[8], SlipStringTableSlot **slot) {
+static bool SlipConfigHost_LoadStrings(void *context, const char name[SLIP_RESOURCE_BASE_NAME_BYTES],
+                                       SlipStringTableSlot **slot) {
 	(void)context;
 	return SlipStringTable_Load(&SlipStringTable_state, name, &strings, slot);
 }
@@ -168,22 +184,34 @@ static SlipConfigMenuPoint SlipConfigHost_Pointer(void *context) {
 static uint32_t SlipConfigHost_HitTest(void *context, SlipConfigMenuTable table, SlipConfigMenuPoint point) {
 	(void)context;
 
-	static const SlipInputRectangle bindings[10] = {
+	static const SlipInputRectangle bindings[] = {
 	    {55, 69, 187, 77},   {193, 69, 256, 77}, {87, 87, 150, 95},   {55, 99, 118, 107},   {122, 99, 185, 107},
 	    {87, 111, 150, 119}, {193, 87, 256, 95}, {193, 99, 256, 107}, {193, 111, 256, 119}, {122, 131, 185, 139}};
-	static const SlipInputRectangle button = {83, 75, 141, 90};
-	const SlipInputRectangle *const rectangles[9] = {SlipConfigMenu_mainRectangles,
-	                                                 SlipConfigMenu_difficultyRectangles,
-	                                                 SlipConfigMenu_generalRectangles,
-	                                                 SlipConfigMenu_detailRectangles,
-	                                                 SlipConfigMenu_soundRectangles,
-	                                                 SlipConfigMenu_controlsRectangles,
-	                                                 bindings,
-	                                                 &button,
-	                                                 &button};
-	static const uint16_t counts[9] = {7, 4, 7, 8, 6, 7, 10, 1, 1};
-	if (table == SLIP_CONFIG_GENERAL_TABLE && point.x >= 25 && point.x <= 281 && point.y >= 43 && point.y <= 59)
-		return 8;
+	static const SlipInputRectangle button = {SLIP_CONTROL_CONFIRM_BUTTON_LEFT, SLIP_CONTROL_CONFIRM_BUTTON_TOP,
+	                                          SLIP_CONTROL_CONFIRM_BUTTON_RIGHT, SLIP_CONTROL_CONFIRM_BUTTON_BOTTOM};
+	const SlipInputRectangle *const rectangles[SLIP_CONFIG_TABLE_COUNT] = {SlipConfigMenu_mainRectangles,
+	                                                                       SlipConfigMenu_difficultyRectangles,
+	                                                                       SlipConfigMenu_generalRectangles,
+	                                                                       SlipConfigMenu_detailRectangles,
+	                                                                       SlipConfigMenu_soundRectangles,
+	                                                                       SlipConfigMenu_controlsRectangles,
+	                                                                       bindings,
+	                                                                       &button,
+	                                                                       &button};
+	static const uint16_t counts[SLIP_CONFIG_TABLE_COUNT] = {
+	    sizeof(SlipConfigMenu_mainRectangles) / sizeof(SlipConfigMenu_mainRectangles[0]),
+	    sizeof(SlipConfigMenu_difficultyRectangles) / sizeof(SlipConfigMenu_difficultyRectangles[0]),
+	    sizeof(SlipConfigMenu_generalRectangles) / sizeof(SlipConfigMenu_generalRectangles[0]),
+	    sizeof(SlipConfigMenu_detailRectangles) / sizeof(SlipConfigMenu_detailRectangles[0]),
+	    sizeof(SlipConfigMenu_soundRectangles) / sizeof(SlipConfigMenu_soundRectangles[0]),
+	    sizeof(SlipConfigMenu_controlsRectangles) / sizeof(SlipConfigMenu_controlsRectangles[0]),
+	    sizeof(bindings) / sizeof(bindings[0]),
+	    1,
+	    1};
+	if (table == SLIP_CONFIG_GENERAL_TABLE && point.x >= SLIP_CONFIG_HIGH_RES_LEFT &&
+	    point.x <= SLIP_CONFIG_HIGH_RES_RIGHT && point.y >= SLIP_CONFIG_HIGH_RES_TOP &&
+	    point.y <= SLIP_CONFIG_HIGH_RES_BOTTOM)
+		return SLIP_CONFIG_GENERAL_HIGH_RES;
 	return SlipInput_HitTest(rectangles[table], counts[table], point.x, point.y);
 }
 
@@ -433,14 +461,19 @@ static void SlipConfigHost_DrawDifficulty(void *context, SlipConfigMenuState *st
 static void SlipConfigHost_DrawGeneral(void *context, SlipConfigMenuState *state) {
 	(void)context;
 	SlipConfigMenu_DrawGeneral(state, &drawCalls);
-	const SlipConfigMenuRectangle rectangle = {25, 43, 281, 59};
-	SlipMenu_DrawPanel(rectangle, state->generalSelection == 8 ? state->background : state->inactiveBackground,
+	const SlipConfigMenuRectangle rectangle = {SLIP_CONFIG_HIGH_RES_LEFT, SLIP_CONFIG_HIGH_RES_TOP,
+	                                           SLIP_CONFIG_HIGH_RES_RIGHT, SLIP_CONFIG_HIGH_RES_BOTTOM};
+	SlipMenu_DrawPanel(rectangle,
+	                   state->generalSelection == SLIP_CONFIG_GENERAL_HIGH_RES ? state->background
+	                                                                           : state->inactiveBackground,
 	                   state->generalStrings, 0, &drawCalls);
-	SlipText_SetStyle(&SlipText_state, 0, UINT16_MAX, 25, 200);
-	SlipTextPosition label = {31, 46};
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_AT_POSITION, UINT16_MAX, SLIP_CONFIG_HIGH_RES_LEFT,
+	                  SLIP_CONFIG_HIGH_RES_LABEL_RIGHT);
+	SlipTextPosition label = {SLIP_CONFIG_HIGH_RES_LABEL_LEFT, SLIP_CONFIG_HIGH_RES_LABEL_TOP};
 	SlipText_Draw(&SlipText_state, "High Res", NULL, &label);
-	SlipText_SetStyle(&SlipText_state, 2, UINT16_MAX, 204, 281);
-	SlipTextPosition value = {0, 47};
+	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, SLIP_CONFIG_HIGH_RES_VALUE_LEFT,
+	                  SLIP_CONFIG_HIGH_RES_RIGHT);
+	SlipTextPosition value = {0, SLIP_CONFIG_HIGH_RES_VALUE_TOP};
 	SlipText_Draw(&SlipText_state, SlipRaceDisplay_highRes ? "On" : "Off", NULL, &value);
 }
 
@@ -650,10 +683,10 @@ static void SlipConfigHost_SetReclaim(void *context, uint32_t enabled) {
 }
 
 bool SlipConfigHost_Install(const char *resourcePath) {
-	char secondary[512];
-	const char *archives[2];
+	char secondary[SLIP_MENU_ARCHIVE_PATH_BYTES];
+	const char *archives[SLIP_MENU_ARCHIVE_CAPACITY];
 	const size_t count = SlipMenu_BuildArchiveList(resourcePath, secondary, archives);
-	SlipResourceHost_Initialize(16u * 1024u * 1024u);
+	SlipResourceHost_Initialize(SLIP_CONFIG_HOST_RESOURCE_ARENA_BYTES);
 	SlipResourceHost_OpenArchives(archives[0], count > 1 ? archives[1] : NULL);
 
 	SlipScreenHost_Initialize();

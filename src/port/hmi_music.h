@@ -1,6 +1,7 @@
 #ifndef SLIPSTREAM5000_HMI_MUSIC_H
 #define SLIPSTREAM5000_HMI_MUSIC_H
 
+#include "hmi_music_format.h"
 #include "hmi_timer.h"
 #include <stdint.h>
 
@@ -9,7 +10,7 @@ const char *HmiMusic_ErrorString(uint32_t code);
 
 typedef const uint8_t *(*HmiMusicDriverTableQuery)(void *context, uint32_t command, uint16_t dataSelector);
 void HmiMusic_GetDriverFunctions(HmiMusicDriverTableQuery entry, void *context, uint16_t codeSelector,
-                                 uint16_t dataSelector, uint8_t destination[72]);
+                                 uint16_t dataSelector, uint8_t destination[HMI_DRIVER_FUNCTION_TABLE_BYTES]);
 
 typedef struct HmiMusicState HmiMusicState;
 typedef void (*HmiMusicDriverSend)(HmiMusicState *, uint8_t *message, uint32_t length, uint32_t driver);
@@ -34,42 +35,42 @@ struct HmiMusicState {
 	 * No executable loading: the host must map a verified target to C code. */
 	void (*callTriggerFar)(HmiMusicState *, uint32_t offset, uint16_t selector, uint32_t song, uint8_t track,
 	                       uint8_t trigger);
-	uint8_t *songs[8];
-	uint32_t playing[8];
-	uint32_t paused[8];
+	uint8_t *songs[HMI_MUSIC_SONG_COUNT];
+	uint32_t playing[HMI_MUSIC_SONG_COUNT];
+	uint32_t paused[HMI_MUSIC_SONG_COUNT];
 	uint8_t callbackPending;
-	void (*completionCallbacks[8])(HmiMusicState *);
-	uint32_t muted[8];
-	HmiMusicDriverSend driverSend[5];
-	HmiMusicDriverBank driverBank[5];
-	uint32_t (*driverInit[5])(HmiMusicState *, uint32_t driver, uint16_t port);
-	uint32_t (*driverShutdown[5])(HmiMusicState *, uint32_t driver);
-	uint32_t (*driverReset[5])(HmiMusicState *, uint32_t driver);
+	void (*completionCallbacks[HMI_MUSIC_SONG_COUNT])(HmiMusicState *);
+	uint32_t muted[HMI_MUSIC_SONG_COUNT];
+	HmiMusicDriverSend driverSend[HMI_MUSIC_DRIVER_COUNT];
+	HmiMusicDriverBank driverBank[HMI_MUSIC_DRIVER_COUNT];
+	uint32_t (*driverInit[HMI_MUSIC_DRIVER_COUNT])(HmiMusicState *, uint32_t driver, uint16_t port);
+	uint32_t (*driverShutdown[HMI_MUSIC_DRIVER_COUNT])(HmiMusicState *, uint32_t driver);
+	uint32_t (*driverReset[HMI_MUSIC_DRIVER_COUNT])(HmiMusicState *, uint32_t driver);
 
-	void *driverContexts[5];
-	uint32_t driverIds[5];
+	void *driverContexts[HMI_MUSIC_DRIVER_COUNT];
+	uint32_t driverIds[HMI_MUSIC_DRIVER_COUNT];
 	uint32_t instrumentBankEnabled;
 
 	uint8_t **instrumentPointers;
 
-	uint8_t dispatchGlobals[0x86df8 - 0x85e05];
-	uint32_t timerHandles[8];
-	uint32_t fadeMode[8];
-	uint32_t fadeStep[8];
-	uint32_t fadeVolume[8];
-	uint32_t fadeRemaining[8];
-	uint8_t fadeCountdown[8];
-	uint32_t activeTracks[8];
-	uint32_t totalTracks[8];
-	uint32_t elapsed[8][32];
-	uint32_t delta[8][32];
-	const uint8_t *trackHeaders[8][32];
-	const uint8_t *cursors[8][32];
-	const uint32_t *routing[8];
-	HmiMusicBranchRecord *branches[8][32];
-	HmiMusicBranchCallback branchCallbacks[8];
-	HmiMusicLoopCallback loopCallbacks[8];
-	HmiMusicTriggerCallback triggerCallbacks[8][127];
+	uint8_t dispatchGlobals[HMI_DISPATCH_STATE_BYTES];
+	uint32_t timerHandles[HMI_MUSIC_SONG_COUNT];
+	uint32_t fadeMode[HMI_MUSIC_SONG_COUNT];
+	uint32_t fadeStep[HMI_MUSIC_SONG_COUNT];
+	uint32_t fadeVolume[HMI_MUSIC_SONG_COUNT];
+	uint32_t fadeRemaining[HMI_MUSIC_SONG_COUNT];
+	uint8_t fadeCountdown[HMI_MUSIC_SONG_COUNT];
+	uint32_t activeTracks[HMI_MUSIC_SONG_COUNT];
+	uint32_t totalTracks[HMI_MUSIC_SONG_COUNT];
+	uint32_t elapsed[HMI_MUSIC_SONG_COUNT][HMI_MUSIC_TRACK_COUNT];
+	uint32_t delta[HMI_MUSIC_SONG_COUNT][HMI_MUSIC_TRACK_COUNT];
+	const uint8_t *trackHeaders[HMI_MUSIC_SONG_COUNT][HMI_MUSIC_TRACK_COUNT];
+	const uint8_t *cursors[HMI_MUSIC_SONG_COUNT][HMI_MUSIC_TRACK_COUNT];
+	const uint32_t *routing[HMI_MUSIC_SONG_COUNT];
+	HmiMusicBranchRecord *branches[HMI_MUSIC_SONG_COUNT][HMI_MUSIC_TRACK_COUNT];
+	HmiMusicBranchCallback branchCallbacks[HMI_MUSIC_SONG_COUNT];
+	HmiMusicLoopCallback loopCallbacks[HMI_MUSIC_SONG_COUNT];
+	HmiMusicTriggerCallback triggerCallbacks[HMI_MUSIC_SONG_COUNT][HMI_MUSIC_TRIGGER_COUNT];
 };
 
 /* Fresh executable-image globals; not the middleware initialization routine. */
@@ -85,46 +86,46 @@ typedef struct HmiA002State {
 	/* Stored as dwords; port instructions consume only the low word. */
 	uint32_t portBase, portCopy, portArgument;
 	uint32_t initialized;
-	uint8_t portInput[4];
+	uint8_t portInput[HMI_SERIALIZED_DWORD_BYTES];
 	uint8_t busy;       /* Send-entry busy byte; native functions are statically bound. */
 	uint8_t *bankInput; /* Native offset/selector pair at +5fc/+600. */
 	uint32_t bankDriverIndex, bankByteLength;
 
 	union {
-		uint8_t operatorRelease[32];
+		uint8_t operatorRelease[HMI_A002_OPERATOR_CACHE_BYTES];
 
 		struct {
-			uint8_t reserved[16];
-			uint8_t frequencyLow[9], frequencyHigh[9];
+			uint8_t reserved[HMI_MIDI_CHANNEL_COUNT];
+			uint8_t frequencyLow[HMI_A002_VOICE_COUNT], frequencyHigh[HMI_A002_VOICE_COUNT];
 		} frequency;
 	} cache;
 
-	uint8_t activeNotes[9];
-	uint8_t operatorLevels[32];
+	uint8_t activeNotes[HMI_A002_VOICE_COUNT];
+	uint8_t operatorLevels[HMI_A002_OPERATOR_CACHE_BYTES];
 	/* Reset routines clear eleven bytes, ending immediately before active notes. */
-	uint8_t instrumentSet[11];
+	uint8_t instrumentSet[HMI_A002_INSTRUMENT_FLAGS_BYTES];
 	uint8_t rhythm, chipEnabled, mode;
-	uint8_t operatorOffsets[18];
-	uint8_t volumeCurve[128];
-	/* Contiguous pitch tables, including the +30e4/+30e8 views. */
-	uint32_t pitchTables[(0x318c - 0x2f4c) / 4];
-	uint32_t voiceChannels[9];
-	uint32_t sustain[16], deferredCount[16];
-	/* Contiguous dwords retain the +274c/+2770 channel-index alias. */
-	uint32_t controllerGlobals[(0x27b0 - 0x2648) / 4];
-	uint8_t deferred[16][32][3];
+	uint8_t operatorOffsets[HMI_A002_VOICE_COUNT * HMI_A002_OPERATOR_COUNT];
+	uint8_t volumeCurve[HMI_MIDI_NOTE_COUNT];
+	/* Contiguous pitch tables include the lower/upper block views. */
+	uint32_t pitchTables[HMI_A002_PITCH_TABLE_COUNT];
+	uint32_t voiceChannels[HMI_A002_VOICE_COUNT];
+	uint32_t sustain[HMI_MIDI_CHANNEL_COUNT], deferredCount[HMI_MIDI_CHANNEL_COUNT];
+	/* Contiguous dwords preserve overlapping velocity/volume-change entries. */
+	uint32_t controllerGlobals[HMI_A002_CONTROLLER_WORD_COUNT];
+	uint8_t deferred[HMI_MIDI_CHANNEL_COUNT][HMI_A002_DEFERRED_CAPACITY][HMI_A002_OFF_PARAMETER_BYTES];
 	uint32_t bankToggle;
 	uint32_t pitchEnabled;
-	uint32_t noteFrequencies[128];
+	uint32_t noteFrequencies[HMI_MIDI_NOTE_COUNT];
 	uint8_t *melodicBank, *melodicIndex, *melodicData;
 	int32_t melodicCount;
 	uint32_t melodicLoaded;
 	uint8_t *percussionBank, *percussionIndex, *percussionData;
 	uint32_t percussionLoaded;
-	uint32_t programs[16];
-	uint8_t initialProgramMessage[2];
-	uint8_t offMessage[3], programMessage[2];
-	uint8_t controlMessage[3], pitchMessage[2];
+	uint32_t programs[HMI_MIDI_CHANNEL_COUNT];
+	uint8_t initialProgramMessage[HMI_A002_PROGRAM_PARAMETER_BYTES];
+	uint8_t offMessage[HMI_A002_OFF_PARAMETER_BYTES], programMessage[HMI_A002_PROGRAM_PARAMETER_BYTES];
+	uint8_t controlMessage[HMI_A002_CONTROL_PARAMETER_BYTES], pitchMessage[HMI_A002_PITCH_PARAMETER_BYTES];
 	uint8_t *message;
 } HmiA002State;
 

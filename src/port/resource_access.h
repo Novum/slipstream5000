@@ -14,8 +14,8 @@ typedef struct SlipResourceAccessCalls {
 bool SlipResource_EnsureResident(uint16_t handle, const SlipResourceAccessCalls *calls);
 bool SlipResource_IsResident(uint16_t handle);
 void SlipResource_Protect(uint16_t handle);
-bool SlipResource_LoadNamedHandle(const char name[12], uint16_t *handle, const SlipResourceNameCalls *names,
-                                  const SlipResourceAccessCalls *access);
+bool SlipResource_LoadNamedHandle(const char name[SLIP_RESOURCE_NAME_BYTES], uint16_t *handle,
+                                  const SlipResourceNameCalls *names, const SlipResourceAccessCalls *access);
 
 SlipResourceBlock *SlipResource_Lock(uint16_t handle, const SlipResourceAccessCalls *calls);
 bool SlipResource_Size(uint16_t handle, uint32_t *size, const SlipResourceAccessCalls *calls);

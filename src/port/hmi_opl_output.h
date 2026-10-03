@@ -5,6 +5,8 @@
 #include "hmi_music.h"
 #include <SDL3/SDL.h>
 
+enum { HMI_OPL_ADDRESS_PORT = 0x388, HMI_OPL_DATA_PORT = HMI_OPL_ADDRESS_PORT + 1 };
+
 typedef struct HmiOplOutput {
 	Opal chip;
 	SlipGameTimerState *timer;

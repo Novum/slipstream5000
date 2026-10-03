@@ -3,7 +3,18 @@
 
 #include "input_navigation.h"
 #include "resource_modify.h"
+#include "sprite_format.h"
 #include "vehicle_select.h"
+#include "vga_dac.h"
+
+enum {
+	SLIP_SELECTOR_CARD_MODIFY_CONTINUATION = 0x45d71,
+	SLIP_SELECTOR_CARD_MODIFY_OPERAND = 0x465ea,
+	SLIP_SELECTOR_HOVER_MODIFY_CONTINUATION = 0x45dd4,
+	SLIP_SELECTOR_OPTION_COUNT = 3,
+	SLIP_SELECTOR_ACTION_COUNT = SLIP_SELECTOR_OPTION_COUNT + 1,
+	SLIP_SELECTOR_PALETTE_BUFFER_BYTES = SLIP_PALETTE_HEADER_BYTES + SLIP_VGA_DAC_PALETTE_COUNT * SLIP_PALETTE_RGB_BYTES
+};
 
 typedef SlipInputRectangle SlipSelectorRectangle;
 
@@ -25,18 +36,18 @@ typedef struct SlipVehicleSelector {
 	uint16_t playerMarker;
 	const uint16_t *demo;
 	uint16_t demoDelay, demoPhase;
-	uint16_t frames[10][4];
-	SlipSelectorRectangle frameRects[10];
+	uint16_t frames[SLIP_RACE_RACER_COUNT][SLIP_VEHICLE_DOOR_FRAME_COUNT];
+	SlipSelectorRectangle frameRects[SLIP_RACE_RACER_COUNT];
 	uint16_t zones;
 	int16_t fade, fadeTarget;
 	uint8_t confirmed;
-	uint8_t sourcePalette[772], grayPalette[772];
-	uint16_t card, hover[3];
+	uint8_t sourcePalette[SLIP_SELECTOR_PALETTE_BUFFER_BYTES], grayPalette[SLIP_SELECTOR_PALETTE_BUFFER_BYTES];
+	uint16_t card, hover[SLIP_SELECTOR_OPTION_COUNT];
 	uint16_t speech;
 	const uint8_t *speechData;
 	uint32_t voice;
 	SlipSelectorPoint zoomCenter;
-	SlipSelectorRectangle actionRects[4];
+	SlipSelectorRectangle actionRects[SLIP_SELECTOR_ACTION_COUNT];
 } SlipVehicleSelector;
 
 extern SlipVehicleSelector SlipVehicleSelector_state;

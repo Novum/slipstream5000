@@ -14,7 +14,7 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
                       uint16_t playerColor, uint16_t rivalColor, const SlipView3DMaths *maths,
                       SlipDraw3DProjectState *projectState, SlipObject *objectTable, size_t objectTableBytes,
                       const uint8_t *trkData, size_t trkBytes, const uint8_t *trdData, size_t trdBytes,
-                      const SlipTrackSlotRecord *slots, size_t slotCount, uint32_t slotListBaseAddress,
-                      uint32_t activeListAddress);
+                      const SlipTrackSlotRecord *slots, size_t slotCount, uint32_t slotListBaseToken,
+                      uint32_t activeListToken);
 
 #endif

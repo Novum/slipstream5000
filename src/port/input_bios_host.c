@@ -68,7 +68,7 @@ void SlipInputBiosHost_Clear(void *context) {
  * branches. Host events supply make/break and E0 explicitly, without packing
  * native event structures into a guest memory image. */
 static bool SlipInputBiosHost_InterceptKey(SlipInputBiosHostQueue *queue, uint8_t scan, bool down, bool extended,
-                                           bool pressed[256], bool held[256]) {
+                                           bool pressed[SLIP_INPUT_CODE_COUNT], bool held[SLIP_INPUT_CODE_COUNT]) {
 	enum { SCAN_RELEASE = 0x80, SCAN_EXTENDED = 0xe0 };
 
 	const SlipInputBiosQueueCalls bios = {queue, SlipInputBiosHost_Clear};
@@ -101,7 +101,8 @@ static void SlipInputBiosHost_DeliverKey(SlipInputBiosHostQueue *queue, uint8_t 
 }
 
 void SlipInputBiosHost_KeyEvent(SlipInputBiosHostQueue *queue, uint8_t scan, bool down, bool extended,
-                                SlipInputBiosModifiers modifiers, bool pressed[256], bool held[256]) {
+                                SlipInputBiosModifiers modifiers, bool pressed[SLIP_INPUT_CODE_COUNT],
+                                bool held[SLIP_INPUT_CODE_COUNT]) {
 	if (SlipInputBiosHost_InterceptKey(queue, scan, down, extended, pressed, held))
 		SlipInputBiosHost_DeliverKey(queue, scan, down, extended, modifiers);
 }
@@ -111,7 +112,8 @@ static SlipInputBiosModifierState hostModifiers;
 const SlipInputBiosCalls SlipInputBiosHost_calls = {SlipInputBiosHost_Available, SlipInputBiosHost_ReadReady,
                                                     &hostQueue};
 
-void SlipInputBiosHost_ApplyKey(uint8_t scan, bool down, bool extended, bool pressed[256], bool held[256]) {
+void SlipInputBiosHost_ApplyKey(uint8_t scan, bool down, bool extended, bool pressed[SLIP_INPUT_CODE_COUNT],
+                                bool held[SLIP_INPUT_CODE_COUNT]) {
 	if (!SlipInputBiosHost_InterceptKey(&hostQueue, scan, down, extended, pressed, held))
 		return;
 	SlipInputBiosModifiers modifiers = SlipInputBiosHost_UpdateModifiers(&hostModifiers, scan, down, extended);

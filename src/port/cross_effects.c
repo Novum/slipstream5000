@@ -1,8 +1,20 @@
 #include "cross_effects.h"
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "runtime.h"
 #include "track_view_render.h"
 #include "track_world.h"
+
+enum {
+	SLIP_CROSS_VALUE_UPPER_WORD_MASK = 0xffff0000u,
+	SLIP_CROSS_BASE_LIFETIME_MS = 1500,
+	SLIP_CROSS_LIFETIME_VARIATION_SHIFT = 2,
+	SLIP_CROSS_UPDATE_STEP_PRODUCT_SHIFT = 16,
+	SLIP_CROSS_RANDOM_FACTOR_MINIMUM_Q14 = SLIP_Q14_HALF,
+	SLIP_CROSS_RANDOM_FACTOR_MASK = SLIP_Q14_HALF - 1,
+	SLIP_CROSS_INITIAL_ANGLE_XOR = 0x3456,
+	SLIP_CROSS_DIRECTION_JITTER_ANGLE = 0xa00
+};
 
 uint32_t SlipCrossEffects_drawMode;
 SlipCrossEffectAttach SlipCrossEffects_attach;
@@ -26,11 +38,11 @@ void SlipCrossEffects_Cleanup(void) {
 
 bool SlipCrossEffects_Color(SlipObject *objects, size_t objectBytes, uint16_t object, uint32_t *colorPayloadBits) {
 	const uint16_t endpoint = (uint16_t)(SlipCrossEffects_paletteStart + SlipCrossEffects_paletteCount);
-	*colorPayloadBits = ((*colorPayloadBits & 0xffff0000u) | endpoint) - 1u;
+	*colorPayloadBits = ((*colorPayloadBits & SLIP_CROSS_VALUE_UPPER_WORD_MASK) | endpoint) - 1u;
 	SlipObjectSlotDataReadResult current;
 	if (!SlipObject_GetDrawData(objects, objectBytes, object, &current))
 		return false;
-	const uint32_t drawDataWithColor = (current.drawData & 0xffffu) | (*colorPayloadBits << 16);
+	const uint32_t drawDataWithColor = (current.drawData & UINT16_MAX) | (*colorPayloadBits << 16);
 	SlipObjectSlotDataWriteResult write;
 	return SlipObject_SetDrawData(objects, objectBytes, object, drawDataWithColor, &write);
 }
@@ -53,7 +65,8 @@ uint32_t SlipCrossEffects_Event(uint32_t eventCode, uint32_t eventPayload, uint3
 	}
 
 	const int32_t updateStepProduct = (int32_t)(int16_t)timer.stepQ14 * state->updateStepMultiplier;
-	uint32_t colorPayloadBits = (eventFlags & 0xffff0000u) | ((uint32_t)updateStepProduct >> 16);
+	uint32_t colorPayloadBits = (eventFlags & SLIP_CROSS_VALUE_UPPER_WORD_MASK) |
+	                            ((uint32_t)updateStepProduct >> SLIP_CROSS_UPDATE_STEP_PRODUCT_SHIFT);
 
 	const size_t objectBytes = (size_t)SlipObject_count * SLIP_OBJECT_DOS_STRIDE;
 	SlipObjectSlotDataReadResult current;
@@ -100,7 +113,7 @@ void SlipCrossEffects_Create(SlipView3DVec32 position, uint32_t count, const Sli
 	static uint16_t savedMaterial;
 	static SlipCrossEffectUpdate savedUpdate;
 	static SlipView3DMatrix directionMatrix;
-	static const SlipView3DMatrix identity = {{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
+	static const SlipView3DMatrix identity = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
 	savedPosition = position;
 	savedEmission = *emission;
 	savedMaterial = material;
@@ -121,27 +134,35 @@ void SlipCrossEffects_Create(SlipView3DVec32 position, uint32_t count, const Sli
 		}
 		SlipCrossEffectState *const state = SlipObject_CrossEffectState(object);
 		const uint16_t random = (uint16_t)SlipRandom_Next();
-		state->remainingLifetime = (uint16_t)((((uint32_t)(random >> 2) * 1500u) >> 16) + 1500u);
-		const uint32_t radiusFactor = ((uint16_t)SlipRandom_Next() & 0x1fffu) + 0x2000u;
-		const uint32_t radius = (uint32_t)(((uint64_t)radiusFactor * savedEmission.radius) >> 14);
+		state->remainingLifetime =
+		    (uint16_t)((((uint32_t)(random >> SLIP_CROSS_LIFETIME_VARIATION_SHIFT) * SLIP_CROSS_BASE_LIFETIME_MS) >>
+		                SLIP_RANDOM_SAMPLE_BITS) +
+		               SLIP_CROSS_BASE_LIFETIME_MS);
+		const uint32_t radiusFactor =
+		    ((uint16_t)SlipRandom_Next() & SLIP_CROSS_RANDOM_FACTOR_MASK) + SLIP_CROSS_RANDOM_FACTOR_MINIMUM_Q14;
+		const uint32_t radius = (uint32_t)(((uint64_t)radiusFactor * savedEmission.radius) >> SLIP_Q14_FRACTION_BITS);
 		const size_t objectBytes = (size_t)SlipObject_count * SLIP_OBJECT_DOS_STRIDE;
 		SlipObjectExtentWriteResult radiusWrite;
 		(void)SlipObject_SetDrawExtent(SlipObject_table, objectBytes, object, radius, &radiusWrite);
 		state->update = savedUpdate;
-		const uint32_t updateStepFactor = (SlipRandom_Next() & 0x1fffu) + 0x2000u;
+		const uint32_t updateStepFactor =
+		    (SlipRandom_Next() & SLIP_CROSS_RANDOM_FACTOR_MASK) + SLIP_CROSS_RANDOM_FACTOR_MINIMUM_Q14;
 		state->updateStepMultiplier = (int16_t)updateStepFactor;
 		SlipObjectSlotDataReadResult current;
 		SlipObjectSlotDataWriteResult slotWrite;
 		(void)SlipObject_GetDrawData(SlipObject_table, objectBytes, object, &current);
 		(void)SlipObject_SetDrawData(SlipObject_table, objectBytes, object,
-		                             (current.drawData & 0xffff0000u) | (uint16_t)(updateStepFactor ^ 0x3456u),
+		                             (current.drawData & SLIP_CROSS_VALUE_UPPER_WORD_MASK) |
+		                                 (uint16_t)(updateStepFactor ^ SLIP_CROSS_INITIAL_ANGLE_XOR),
 		                             &slotWrite);
 		(void)SlipView3D_BuildMatrixFromVector(&directionMatrix, savedEmission.direction.x, savedEmission.direction.y,
 		                                       savedEmission.direction.z);
-		int32_t rotationJitterProduct = (int32_t)(int16_t)SlipRandom_Next() * 0xa00;
-		SlipView3D_ApplyRow0Row2Rotation(maths, (int16_t)((uint32_t)rotationJitterProduct >> 16), &directionMatrix);
-		rotationJitterProduct = (int32_t)(int16_t)SlipRandom_Next() * 0xa00;
-		SlipView3D_ApplyPitchMatrix(maths, (int16_t)((uint32_t)rotationJitterProduct >> 16), &directionMatrix);
+		int32_t rotationJitterProduct = (int32_t)(int16_t)SlipRandom_Next() * SLIP_CROSS_DIRECTION_JITTER_ANGLE;
+		SlipView3D_ApplyRow0Row2Rotation(maths, (int16_t)((uint32_t)rotationJitterProduct >> SLIP_RANDOM_SAMPLE_BITS),
+		                                 &directionMatrix);
+		rotationJitterProduct = (int32_t)(int16_t)SlipRandom_Next() * SLIP_CROSS_DIRECTION_JITTER_ANGLE;
+		SlipView3D_ApplyPitchMatrix(maths, (int16_t)((uint32_t)rotationJitterProduct >> SLIP_RANDOM_SAMPLE_BITS),
+		                            &directionMatrix);
 		SlipObject_SetDirectionQ14(SlipObject_table, object, (uint16_t)directionMatrix.m[6],
 		                           (uint16_t)directionMatrix.m[7], (uint16_t)directionMatrix.m[8]);
 		SlipObject_SetSpeed(SlipObject_table, object, savedEmission.speed);

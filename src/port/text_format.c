@@ -2,17 +2,29 @@
 #include "runtime.h"
 #include <stddef.h>
 
+enum {
+	SLIP_TEXT_SIGNED_RESULT_BYTES = 18,
+	SLIP_TEXT_UNSIGNED_RESULT_BYTES = 15,
+	SLIP_TEXT_FORMAT_WIDTH_BYTES = 10,
+	SLIP_TEXT_REMAINDER_CAPACITY = UINT16_MAX + 1,
+	SLIP_TEXT_DEFAULT_DECIMAL_DIGITS = 9,
+	SLIP_TEXT_DEFAULT_HEXADECIMAL_DIGITS = 8,
+	SLIP_TEXT_FORMAT_LEFT_ALIGN = 1,
+	SLIP_TEXT_FORMAT_PLUS_SIGN = 2,
+	SLIP_TEXT_FORMAT_SPACE_SIGN = 3
+};
+
 static const char upperDigits[] = "0123456789ABCDEF";
 static const char lowerDigits[] = "0123456789abcdef";
-static char signedResult[18];
-static char unsignedResult[15];
+static char signedResult[SLIP_TEXT_SIGNED_RESULT_BYTES];
+static char unsignedResult[SLIP_TEXT_UNSIGNED_RESULT_BYTES];
 static const char *signedDigits;
 static const char *unsignedDigits;
 static SlipTextExpansion expansion;
 static uint8_t hexadecimalCase;
 static uint8_t formatFlag;
 static uint8_t longArgument;
-static char formatWidth[10];
+static char formatWidth[SLIP_TEXT_FORMAT_WIDTH_BYTES];
 
 char *SlipText_FormatSigned(int32_t value, uint8_t padding, uint8_t signAndCase, uint16_t digits, uint16_t radix,
                             char *destination) {
@@ -31,7 +43,7 @@ char *SlipText_FormatSigned(int32_t value, uint8_t padding, uint8_t signAndCase,
 		--digits;
 	}
 
-	uint16_t remainders[65536];
+	uint16_t remainders[SLIP_TEXT_REMAINDER_CAPACITY];
 	uint32_t count = digits;
 	uint32_t pushed = 0;
 	do {
@@ -64,7 +76,7 @@ char *SlipText_FormatUnsigned(uint32_t value, uint8_t padding, uint8_t letterCas
 	if (destination == NULL)
 		destination = unsignedResult;
 	char *const start = destination;
-	uint16_t remainders[65536];
+	uint16_t remainders[SLIP_TEXT_REMAINDER_CAPACITY];
 	uint32_t count = digits;
 	uint32_t pushed = 0;
 	do {
@@ -108,18 +120,18 @@ const SlipTextExpansion *SlipText_EvaluateControl(const char *format, const Slip
 	for (;;) {
 		conversion = *format++;
 		if (conversion == '-')
-			formatFlag = 1;
+			formatFlag = SLIP_TEXT_FORMAT_LEFT_ALIGN;
 		else if (conversion == '+')
-			formatFlag = 2;
+			formatFlag = SLIP_TEXT_FORMAT_PLUS_SIGN;
 		else if (conversion == ' ')
-			formatFlag = 3;
+			formatFlag = SLIP_TEXT_FORMAT_SPACE_SIGN;
 		else
 			break;
 	}
 	if (conversion != 0) {
 		while (conversion == '.' || (conversion >= '0' && conversion <= '9')) {
 			*width++ = conversion;
-			if (width == formatWidth + 9)
+			if (width == formatWidth + SLIP_TEXT_FORMAT_WIDTH_BYTES - 1)
 				SlipRuntime_Fatal("TextEvalControl: Buffer overflow.");
 			conversion = *format++;
 			if (conversion == 0)
@@ -150,12 +162,14 @@ const SlipTextExpansion *SlipText_EvaluateControl(const char *format, const Slip
 		break;
 	case 'd':
 	case 'i':
-		SlipText_FormatSigned((int32_t)SlipText_ReadArgument(arguments), 0, 0, 9, 10, destination);
+		SlipText_FormatSigned((int32_t)SlipText_ReadArgument(arguments), 0, 0, SLIP_TEXT_DEFAULT_DECIMAL_DIGITS, 10,
+		                      destination);
 		while (*destination++ != 0) {
 		}
 		break;
 	case 'u':
-		SlipText_FormatUnsigned(SlipText_ReadArgument(arguments), '0', 0, 9, 10, destination);
+		SlipText_FormatUnsigned(SlipText_ReadArgument(arguments), '0', 0, SLIP_TEXT_DEFAULT_DECIMAL_DIGITS, 10,
+		                        destination);
 		while (*destination++ != 0) {
 		}
 		break;
@@ -164,7 +178,7 @@ const SlipTextExpansion *SlipText_EvaluateControl(const char *format, const Slip
 		hexadecimalCase = conversion == 'x' ? SLIP_TEXT_LOWERCASE_DIGITS : 0;
 		const uint32_t value = SlipText_ReadArgument(arguments);
 		uint8_t padding = 0;
-		uint16_t digits = 8;
+		uint16_t digits = SLIP_TEXT_DEFAULT_HEXADECIMAL_DIGITS;
 		const char *specifier = formatWidth;
 		if (*specifier != 0) {
 			if (*specifier == '0')
@@ -192,7 +206,7 @@ const SlipTextExpansion *SlipText_EvaluateControl(const char *format, const Slip
 	}
 	expansion.continuation = format;
 	expansion.byteCount = (uint32_t)(destination - expansion.text);
-	if (expansion.byteCount > 99)
+	if (expansion.byteCount > SLIP_TEXT_EXPANSION_BUFFER_BYTES - 1)
 		SlipRuntime_Fatal("TextEvalControl: Buffer overflow.");
 	return &expansion;
 }

@@ -2,6 +2,8 @@
 #include "raster/raster.h"
 #include "runtime.h"
 
+enum { SLIP_TEXT_SPACE_FRACTION_BITS = 8, SLIP_TEXT_ADVANCE_UPPER_BYTE_MASK = UINT16_MAX ^ UINT8_MAX };
+
 SlipTextLayout SlipText_state;
 
 static uint16_t SlipText_CharacterWidth(SlipTextLayout *state, uint8_t character) {
@@ -27,7 +29,7 @@ void SlipText_BakeSprite(SlipTextLayout *state, const SlipSprite *sprite, const 
 	SlipText_SetColor(state, color);
 	RasterSurfaceBinding saved;
 	Raster_BindSprite((uint8_t *)sprite->pixels, sprite->width, sprite->height, &saved);
-	SlipText_SetStyle(state, 2, UINT16_MAX, 0, (int16_t)(sprite->width - 1));
+	SlipText_SetStyle(state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, (int16_t)(sprite->width - 1));
 	SlipTextPosition position = {0, y};
 	SlipText_Draw(state, text, NULL, &position);
 	Raster_RestoreScreen(&saved);
@@ -84,14 +86,14 @@ void SlipText_SetStyle(SlipTextLayout *state, uint16_t mode, uint16_t spacing, i
 
 void SlipText_FlushLine(SlipTextLayout *state, SlipTextPosition position) {
 	state->line[state->length] = 0;
-	if (state->mode == 0) {
+	if (state->mode == SLIP_TEXT_AT_POSITION) {
 
-	} else if (state->mode == 2) {
+	} else if (state->mode == SLIP_TEXT_CENTERED) {
 		const int16_t remaining = (int16_t)(state->right - state->left + 1 - state->width);
 		position.x = (int16_t)((remaining >> 1) + state->left);
-	} else if (state->mode == 3) {
+	} else if (state->mode == SLIP_TEXT_RIGHT_ALIGNED) {
 		position.x = (int16_t)(state->right - state->width);
-	} else if (state->mode != 1) {
+	} else if (state->mode != SLIP_TEXT_JUSTIFIED) {
 		SlipRuntime_Fatal("TextFlushBuffer: Format mode not implemented yet!");
 	}
 	if (!state->measuring) {
@@ -139,13 +141,13 @@ void SlipText_JustifyLine(SlipTextLayout *state, SlipTextPosition position) {
 				++spaces;
 			++text;
 		} while (*text != 0);
-		state->spaceStep = (uint16_t)(((uint32_t)remaining << 8) / spaces);
+		state->spaceStep = (uint16_t)(((uint32_t)remaining << SLIP_TEXT_SPACE_FRACTION_BITS) / spaces);
 		state->spaceFraction = 0;
 		uint16_t advance = state->spaceStep;
 		text = state->line;
 		for (;;) {
 			const uint8_t character = (uint8_t)*text;
-			advance = (uint16_t)((advance & 0xff00u) | character);
+			advance = (uint16_t)((advance & SLIP_TEXT_ADVANCE_UPPER_BYTE_MASK) | character);
 			if (character == 0)
 				break;
 			if (!state->measuring) {
@@ -164,9 +166,9 @@ void SlipText_JustifyLine(SlipTextLayout *state, SlipTextPosition position) {
 			position.x = (int16_t)(position.x + advance);
 			if (*text == ' ') {
 				state->spaceFraction = (uint16_t)(state->spaceFraction + state->spaceStep);
-				advance = state->spaceFraction >> 8;
+				advance = state->spaceFraction >> SLIP_TEXT_SPACE_FRACTION_BITS;
 				position.x = (int16_t)(position.x + advance);
-				state->spaceFraction &= 0xffu;
+				state->spaceFraction &= UINT8_MAX;
 			}
 			++text;
 		}
@@ -198,7 +200,7 @@ static void SlipText_AppendLockedCharacter(SlipTextLayout *state, uint8_t charac
 	SlipFont_CharacterMetrics(&state->font, character, &advance, &height);
 	if ((int16_t)(position->x + state->width + advance) >= state->right) {
 		uint32_t trailing = 0;
-		if (state->mode != 0 && state->length != 0) {
+		if (state->mode != SLIP_TEXT_AT_POSITION && state->length != 0) {
 			for (uint32_t i = 0; i < state->length; ++i) {
 				if (state->line[i] == ' ')
 					trailing = 1;
@@ -209,7 +211,7 @@ static void SlipText_AppendLockedCharacter(SlipTextLayout *state, uint8_t charac
 			SlipText_MeasureBuffer(state);
 		}
 		const uint32_t flushedLength = state->length;
-		if (state->mode == 1)
+		if (state->mode == SLIP_TEXT_JUSTIFIED)
 			SlipText_JustifyLine(state, *position);
 		else
 			SlipText_FlushLine(state, *position);
@@ -232,7 +234,7 @@ static void SlipText_AppendLockedCharacter(SlipTextLayout *state, uint8_t charac
 }
 
 void SlipText_AppendCharacter(SlipTextLayout *state, uint8_t character, SlipTextPosition *position) {
-	if ((int16_t)state->length >= 160)
+	if ((int16_t)state->length >= SLIP_TEXT_LINE_CHARACTERS)
 		SlipRuntime_Fatal("TextDoCharacter: Text line buffer full.");
 	if (state->fontResources)
 		state->font = state->fontResources->lock(state->fontResources->context, state->fontResource);
@@ -243,10 +245,10 @@ void SlipText_AppendCharacter(SlipTextLayout *state, uint8_t character, SlipText
 
 void SlipText_Draw(SlipTextLayout *state, const char *text, const SlipTextArgument *arguments,
                    SlipTextPosition *position) {
-	if (state->mode == 1) {
+	if (state->mode == SLIP_TEXT_JUSTIFIED) {
 		if (position->x < state->left)
 			position->x = state->left;
-	} else if (state->mode == 2) {
+	} else if (state->mode == SLIP_TEXT_CENTERED) {
 		position->x = state->left;
 	}
 	state->length = 0;

@@ -1,7 +1,9 @@
 #include "draw3d.h"
 #include "byte_order.h"
+#include "fixed_point.h"
 #include "gpu/clip.h"
 #include "gpu/renderer.h"
+#include "material_format.h"
 #include "raster/raster.h"
 #include "renderer_flags.h"
 #include "shape_format.h"
@@ -13,7 +15,32 @@
 #include <stdlib.h>
 #include <string.h>
 
-static uint8_t standalonePointBuffer[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT * 0x20u];
+enum {
+	SLIP_DRAW3D_WORD_ALIGNED_INDEX_MASK = UINT16_MAX & ~1u,
+	SLIP_DRAW3D_ROOT16_TRIAL_BIT = 1u << 14,
+	SLIP_DRAW3D_ROOT32_TRIAL_BIT = 1u << 30,
+	SLIP_DRAW3D_INTERPOLATION_FRACTION_BITS = 30,
+	SLIP_DRAW3D_INTERPOLATION_TO_Q14_SHIFT = SLIP_DRAW3D_INTERPOLATION_FRACTION_BITS - SLIP_Q14_FRACTION_BITS,
+	SLIP_DRAW3D_SHADE_HIGH_BYTE_MASK = UINT8_MAX << SLIP_SHADE_COLOUR_SHIFT,
+	SLIP_BACKGROUND_FILL_ENABLED = UINT16_MAX,
+	SLIP_BACKGROUND_NO_PREVIOUS_STRIP = UINT16_MAX,
+	SLIP_BACKGROUND_STRIP_CORNER_COUNT = 4,
+	SLIP_BACKGROUND_STRIP_BOUNDARY_PAIR_COUNT = 2,
+	SLIP_BACKGROUND_FIXED_STRIP_RESERVED_ENTRIES = 2,
+	SLIP_BACKGROUND_STRIP_VALUE_FRACTION_BITS = 16,
+	SLIP_BACKGROUND_STRIP_CURVATURE_PRESCALE_BITS = 2,
+	SLIP_BACKGROUND_STRIP_CORNER_POINTER_BYTES = sizeof(uint32_t),
+	SLIP_DRAW3D_POINT_POINTER_BYTES = sizeof(uint32_t),
+	SLIP_DRAW3D_VERTEX_SHADE_CONTROL_BYTES = sizeof(uint16_t),
+	SLIP_DRAW3D_MATERIAL_CALLBACK_CAPACITY = 32,
+	SLIP_DRAW3D_POST_PLANE_SHORT_EDGE_MAXIMUM_LENGTH = 4
+};
+
+static const uint32_t SLIP_DRAW3D_UPPER_WORD_MASK = UINT32_MAX ^ UINT16_MAX;
+static const uint32_t SLIP_DRAW3D_DWORD_SIGN_BIT = UINT32_C(1) << 31;
+static const uint32_t SLIP_DRAW3D_EVEN_SHIFT_COUNT_MASK = UINT32_MAX & ~1u;
+
+static uint8_t standalonePointBuffer[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT * sizeof(RasterTexturedPoint)];
 static uint8_t *boundPointBuffer = standalonePointBuffer;
 
 void SlipDraw3D_BindPointBuffer(uint8_t *points) { boundPointBuffer = points != NULL ? points : standalonePointBuffer; }
@@ -21,29 +48,31 @@ void SlipDraw3D_BindPointBuffer(uint8_t *points) { boundPointBuffer = points != 
 uint8_t *SlipDraw3D_PointBuffer(void) { return boundPointBuffer; }
 
 static void SlipDraw3D_WriteLE16(uint8_t *p, uint16_t v) {
-	p[0] = (uint8_t)(v & 0xffu);
+	p[0] = (uint8_t)(v & UINT8_MAX);
 	p[1] = (uint8_t)(v >> 8);
 }
 
 static void SlipDraw3D_WriteLE32(uint8_t *p, uint32_t v) {
-	p[0] = (uint8_t)(v & 0xffu);
-	p[1] = (uint8_t)((v >> 8) & 0xffu);
-	p[2] = (uint8_t)((v >> 16) & 0xffu);
-	p[3] = (uint8_t)((v >> 24) & 0xffu);
+	p[0] = (uint8_t)(v & UINT8_MAX);
+	p[1] = (uint8_t)((v >> 8) & UINT8_MAX);
+	p[2] = (uint8_t)((v >> 16) & UINT8_MAX);
+	p[3] = (uint8_t)((v >> 24) & UINT8_MAX);
 }
 
 static uint16_t SlipDraw3D_SignedProductShift14LowWord(int32_t product) {
 	const uint16_t productLowWord = (uint16_t)product;
 	const uint16_t productHighWord = (uint16_t)((uint32_t)product >> 16);
 
-	return (uint16_t)((uint16_t)(productLowWord >> 14) | (uint16_t)(productHighWord << 2));
+	return (uint16_t)((uint16_t)(productLowWord >> SLIP_Q14_FRACTION_BITS) |
+	                  (uint16_t)(productHighWord << SLIP_Q14_WORD_HIGH_SHIFT));
 }
 
 static uint16_t SlipDraw3D_UnsignedProductShift14LowWord(uint32_t product) {
 	const uint16_t productLowWord = (uint16_t)product;
 	const uint16_t productHighWord = (uint16_t)(product >> 16);
 
-	return (uint16_t)((uint16_t)(productLowWord >> 14) | (uint16_t)(productHighWord << 2));
+	return (uint16_t)((uint16_t)(productLowWord >> SLIP_Q14_FRACTION_BITS) |
+	                  (uint16_t)(productHighWord << SLIP_Q14_WORD_HIGH_SHIFT));
 }
 
 static uint16_t SlipDraw3D_MultiplySignedWordsShift14WithRoundingBit(uint16_t multiplicand, uint16_t operand,
@@ -53,9 +82,10 @@ static uint16_t SlipDraw3D_MultiplySignedWordsShift14WithRoundingBit(uint16_t mu
 	const uint16_t productHighWord = (uint16_t)((uint32_t)product >> 16);
 
 	if (carryOut != NULL) {
-		*carryOut = ((productLowWord >> 13) & 1u) != 0u;
+		*carryOut = ((productLowWord >> (SLIP_Q14_FRACTION_BITS - 1)) & 1u) != 0u;
 	}
-	return (uint16_t)((uint16_t)(productLowWord >> 14) | (uint16_t)(productHighWord << 2));
+	return (uint16_t)((uint16_t)(productLowWord >> SLIP_Q14_FRACTION_BITS) |
+	                  (uint16_t)(productHighWord << SLIP_Q14_WORD_HIGH_SHIFT));
 }
 
 uint16_t g_spriteScaleX;
@@ -84,7 +114,7 @@ void SlipDraw3D_SetMaximumDepth(uint32_t maximumDepth) { SlipDraw3D_maximumDepth
 void SlipDraw3D_SetDepthFade(uint32_t fadeStart, uint32_t fadeEnd, uint16_t fadeColour) {
 	SlipDraw3D_fadeStart = fadeStart;
 	if (fadeStart != 0) {
-		SlipDraw3D_fadeColour = (SlipDraw3D_fadeColour & 0xffff0000u) | fadeColour;
+		SlipDraw3D_fadeColour = (SlipDraw3D_fadeColour & SLIP_DRAW3D_UPPER_WORD_MASK) | fadeColour;
 		SlipDraw3D_fadeEnd = fadeEnd;
 		SlipDraw3D_fadeRange = fadeEnd - fadeStart;
 	}
@@ -98,13 +128,13 @@ void SlipDraw3D_ResetLighting(void) {
 void SlipDraw3D_NormalizeLighting(void) {
 	const uint32_t totalLight = SlipDraw3D_directLight + SlipDraw3D_ambientLight;
 
-	if ((int32_t)totalLight > 0x4000) {
-		const uint32_t lightNormalizationScale = 0x10000000u / totalLight;
+	if ((int32_t)totalLight > SLIP_Q14_ONE) {
+		const uint32_t lightNormalizationScale = (uint32_t)(SLIP_Q14_ONE * SLIP_Q14_ONE) / totalLight;
 		uint64_t product = (uint64_t)SlipDraw3D_directLight * lightNormalizationScale;
 
-		SlipDraw3D_directLight = (uint32_t)(product >> 14);
+		SlipDraw3D_directLight = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS);
 		product = (uint64_t)SlipDraw3D_ambientLight * lightNormalizationScale;
-		SlipDraw3D_ambientLight = (uint32_t)(product >> 14);
+		SlipDraw3D_ambientLight = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS);
 	}
 }
 
@@ -117,7 +147,7 @@ void SlipDraw3D_SetLightVector(int32_t lightX, int32_t lightY, int32_t lightZ, u
 	SlipDraw3D_lightX = lightX;
 	SlipDraw3D_lightY = lightY;
 	SlipDraw3D_lightZ = lightZ;
-	SlipDraw3D_directLight = (SlipDraw3D_directLight & 0xffff0000u) | directLight;
+	SlipDraw3D_directLight = (SlipDraw3D_directLight & SLIP_DRAW3D_UPPER_WORD_MASK) | directLight;
 	SlipDraw3D_NormalizeLighting();
 }
 
@@ -128,9 +158,10 @@ static uint16_t SlipDraw3D_MultiplySignedWordsShift13WithRoundingBit(uint16_t mu
 	const uint16_t productHighWord = (uint16_t)((uint32_t)product >> 16);
 
 	if (carryOut != NULL) {
-		*carryOut = ((productLowWord >> 12) & 1u) != 0u;
+		*carryOut = ((productLowWord >> (SLIP_Q14_FRACTION_BITS - 2)) & 1u) != 0u;
 	}
-	return (uint16_t)((uint16_t)(productLowWord >> 13) | (uint16_t)(productHighWord << 3));
+	return (uint16_t)((uint16_t)(productLowWord >> (SLIP_Q14_FRACTION_BITS - 1)) |
+	                  (uint16_t)(productHighWord << (SLIP_Q14_WORD_HIGH_SHIFT + 1)));
 }
 
 static int SlipDraw3D_LinkedRecordOffsetValid(size_t recordBytes, uint32_t offset) {
@@ -170,7 +201,7 @@ static void SlipDraw3D_SetRecordPrev(uint8_t *recordBase, uint32_t recordOffset,
 
 static uint8_t SlipDraw3D_UppercaseAscii(uint8_t character) {
 	if (character >= (uint8_t)'a' && character <= (uint8_t)'z') {
-		character = (uint8_t)(character - 0x20u);
+		character = (uint8_t)(character - ('a' - 'A'));
 	}
 	return character;
 }
@@ -186,30 +217,30 @@ static void SlipDraw3D_ExpandMaterialRecord(uint8_t *expandedRecord, const uint8
 	SlipDraw3DMaterialRecord *const material = (void *)expandedRecord;
 
 	memcpy(material->name, rawRecord, sizeof(material->name));
-	material->textureTransparency = (int16_t)(int8_t)rawRecord[0x14u];
-	material->skipFlatPolygon = (int16_t)(int8_t)rawRecord[0x15u];
-	material->fixedShade = SlipBytes_ReadLE16(rawRecord + 0x16u);
-	material->ambientCoefficient = SlipBytes_ReadLE16(rawRecord + 0x18u);
-	material->diffuseCoefficient = SlipBytes_ReadLE16(rawRecord + 0x1au);
-	material->specularCoefficient = SlipBytes_ReadLE16(rawRecord + 0x1cu);
-	material->vertexShading = (uint32_t)(int32_t)(int8_t)rawRecord[0x13u];
-	textureShift = SlipBytes_ReadLE16(rawRecord + 0x1eu);
+	material->textureTransparency = (int16_t)(int8_t)rawRecord[SLIP_MAT_TRANSPARENCY_OFFSET];
+	material->skipFlatPolygon = (int16_t)(int8_t)rawRecord[SLIP_MAT_SKIP_FLAT_OFFSET];
+	material->fixedShade = SlipBytes_ReadLE16(rawRecord + SLIP_MAT_FIXED_SHADE_OFFSET);
+	material->ambientCoefficient = SlipBytes_ReadLE16(rawRecord + SLIP_MAT_AMBIENT_OFFSET);
+	material->diffuseCoefficient = SlipBytes_ReadLE16(rawRecord + SLIP_MAT_DIFFUSE_OFFSET);
+	material->specularCoefficient = SlipBytes_ReadLE16(rawRecord + SLIP_MAT_SPECULAR_OFFSET);
+	material->vertexShading = (uint32_t)(int32_t)(int8_t)rawRecord[SLIP_MAT_VERTEX_SHADING_OFFSET];
+	textureShift = SlipBytes_ReadLE16(rawRecord + SLIP_MAT_DITHER_BITS_OFFSET);
 	material->ditherBits = textureShift;
-	textureMask = (1u << (textureShift & 0x1fu)) - 1u;
-	rampStart = rawRecord[0x10u];
-	rampEnd = rawRecord[0x11u];
+	textureMask = (1u << (textureShift & SLIP_MAT_DITHER_SHIFT_MASK)) - 1u;
+	rampStart = rawRecord[SLIP_MAT_RAMP_START_OFFSET];
+	rampEnd = rawRecord[SLIP_MAT_RAMP_END_OFFSET];
 	rampDelta = (uint32_t)rampEnd - (uint32_t)rampStart;
-	if (rampDelta > 0x70u) {
-		rampDelta = 0x70u;
+	if (rampDelta > SLIP_MAT_MAXIMUM_RAMP_RANGE) {
+		rampDelta = SLIP_MAT_MAXIMUM_RAMP_RANGE;
 	}
 	rampEndAdjusted = (uint32_t)rampStart + rampDelta - textureMask;
 	material->rampStart = rampStart;
 	material->rampEnd = rampEndAdjusted;
-	material->importedMaterialByte = rawRecord[0x12u];
-	for (i = 0; i < 0x10u; ++i) {
+	material->importedMaterialByte = rawRecord[SLIP_MAT_IMPORTED_BYTE_OFFSET];
+	for (i = 0; i < sizeof(material->name); ++i) {
 		material->name[i] = (char)SlipDraw3D_UppercaseAscii((uint8_t)material->name[i]);
 	}
-	memcpy(material->textureName, rawRecord + 0x22u, sizeof(material->textureName));
+	memcpy(material->textureName, rawRecord + SLIP_MAT_TEXTURE_NAME_OFFSET, sizeof(material->textureName));
 }
 
 int SlipDraw3D_SetMaterialsNoExisting(const uint8_t *rawMaterialPayload, size_t rawMaterialPayloadBytes,
@@ -230,15 +261,16 @@ int SlipDraw3D_SetMaterialsNoExisting(const uint8_t *rawMaterialPayload, size_t 
 	result->savedGeneralState = true;
 	result->clearGlobal = true;
 	result->existingMaterialGlobal = existingMaterialGlobal;
-	if (rawMaterialPayload == NULL || expandedMaterialTable == NULL || rawMaterialPayloadBytes < 4u) {
+	if (rawMaterialPayload == NULL || expandedMaterialTable == NULL ||
+	    rawMaterialPayloadBytes < SLIP_MAT_HEADER_BYTES) {
 		return 0;
 	}
 
 	count = SlipBytes_ReadLE16(rawMaterialPayload);
-	version = SlipBytes_ReadLE16(rawMaterialPayload + 2u);
+	version = SlipBytes_ReadLE16(rawMaterialPayload + SLIP_MAT_VERSION_OFFSET);
 	result->count = count;
 	result->version = version;
-	if (version != 1u) {
+	if (version != SLIP_MAT_VERSION) {
 		result->jumpWrongVersion = true;
 		return 0;
 	}
@@ -246,9 +278,10 @@ int SlipDraw3D_SetMaterialsNoExisting(const uint8_t *rawMaterialPayload, size_t 
 		return 0;
 	}
 	result->noExistingMaterialsBranch = true;
-	allocationBytes = (uint32_t)count * (uint32_t)SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE + 4u;
+	allocationBytes =
+	    (uint32_t)count * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 	result->allocationBytes = allocationBytes;
-	if (rawMaterialPayloadBytes < 4u + (size_t)count * SLIP_DRAW3D_RAW_MATERIAL_RECORD_SIZE ||
+	if (rawMaterialPayloadBytes < SLIP_MAT_HEADER_BYTES + (size_t)count * SLIP_DRAW3D_RAW_MATERIAL_RECORD_SIZE ||
 	    expandedMaterialTableBytes < (size_t)allocationBytes) {
 		return 0;
 	}
@@ -256,8 +289,8 @@ int SlipDraw3D_SetMaterialsNoExisting(const uint8_t *rawMaterialPayload, size_t 
 	result->storedMaterialGlobal = allocatedResourceHandle;
 	result->tableCount = count;
 	SlipDraw3D_WriteLE32(expandedMaterialTable, count);
-	rawRecordCursor = rawMaterialPayload + 4u;
-	expandedRecordCursor = expandedMaterialTable + 4u;
+	rawRecordCursor = rawMaterialPayload + SLIP_MAT_HEADER_BYTES;
+	expandedRecordCursor = expandedMaterialTable + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 	remainingMaterials = count;
 	while (remainingMaterials != 0u) {
 		SlipDraw3D_ExpandMaterialRecord(expandedRecordCursor, rawRecordCursor);
@@ -299,15 +332,16 @@ int SlipDraw3D_SetMaterialsAppend(const uint8_t *existingMaterialTable, size_t e
 	result->clearGlobal = true;
 	result->existingMaterialGlobal = existingMaterialGlobal;
 	if (existingMaterialTable == NULL || rawMaterialPayload == NULL || expandedMaterialTable == NULL ||
-	    existingMaterialTableBytes < 4u || rawMaterialPayloadBytes < 4u) {
+	    existingMaterialTableBytes < SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES ||
+	    rawMaterialPayloadBytes < SLIP_MAT_HEADER_BYTES) {
 		return 0;
 	}
 
 	count = SlipBytes_ReadLE16(rawMaterialPayload);
-	version = SlipBytes_ReadLE16(rawMaterialPayload + 2u);
+	version = SlipBytes_ReadLE16(rawMaterialPayload + SLIP_MAT_VERSION_OFFSET);
 	result->count = count;
 	result->version = version;
-	if (version != 1u) {
+	if (version != SLIP_MAT_VERSION) {
 		result->jumpWrongVersion = true;
 		return 0;
 	}
@@ -317,14 +351,16 @@ int SlipDraw3D_SetMaterialsAppend(const uint8_t *existingMaterialTable, size_t e
 	result->appendBranch = true;
 	existingTableCount = SlipBytes_ReadLE32(existingMaterialTable);
 	result->existingTableCount = existingTableCount;
-	existingTableAllocationBytes = existingTableCount * (uint32_t)SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE + 4u;
+	existingTableAllocationBytes =
+	    existingTableCount * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 	result->existingTableAllocationBytes = existingTableAllocationBytes;
 	appendedTableCount = existingTableCount + count;
-	outputAllocationBytes = appendedTableCount * (uint32_t)SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE + 4u;
+	outputAllocationBytes =
+	    appendedTableCount * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 	result->appendedTableCount = appendedTableCount;
 	result->outputAllocationBytes = outputAllocationBytes;
 	if (existingMaterialTableBytes < (size_t)existingTableAllocationBytes ||
-	    rawMaterialPayloadBytes < 4u + (size_t)count * SLIP_DRAW3D_RAW_MATERIAL_RECORD_SIZE ||
+	    rawMaterialPayloadBytes < SLIP_MAT_HEADER_BYTES + (size_t)count * SLIP_DRAW3D_RAW_MATERIAL_RECORD_SIZE ||
 	    expandedMaterialTableBytes < (size_t)outputAllocationBytes) {
 		return 0;
 	}
@@ -332,13 +368,14 @@ int SlipDraw3D_SetMaterialsAppend(const uint8_t *existingMaterialTable, size_t e
 	result->storedMaterialGlobal = allocatedResourceHandle;
 	SlipDraw3D_WriteLE32(expandedMaterialTable, appendedTableCount);
 	copiedExistingRecords = existingTableCount;
-	memcpy(expandedMaterialTable + 4u, existingMaterialTable + 4u,
+	memcpy(expandedMaterialTable + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES,
+	       existingMaterialTable + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES,
 	       (size_t)existingTableCount * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE);
 	result->copiedExistingRecords = copiedExistingRecords;
 
-	rawRecordCursor = rawMaterialPayload + 4u;
-	expandedRecordCursor =
-	    expandedMaterialTable + 4u + (size_t)existingTableCount * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
+	rawRecordCursor = rawMaterialPayload + SLIP_MAT_HEADER_BYTES;
+	expandedRecordCursor = expandedMaterialTable + SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES +
+	                       (size_t)existingTableCount * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
 	remainingMaterials = count;
 	while (remainingMaterials != 0u) {
 		SlipDraw3D_ExpandMaterialRecord(expandedRecordCursor, rawRecordCursor);
@@ -403,20 +440,20 @@ static uint64_t SlipDraw3D_UnsignedHighHalfShiftRightTwo(uint32_t highValue) {
 static int32_t SlipDraw3D_MultiplySigned32Shift30(int32_t value, uint32_t ratio) {
 	const int64_t product = (int64_t)value * (int64_t)(int32_t)ratio;
 
-	return (int32_t)(uint32_t)(((uint64_t)product) >> 30);
+	return (int32_t)(uint32_t)(((uint64_t)product) >> SLIP_DRAW3D_INTERPOLATION_FRACTION_BITS);
 }
 
 static uint16_t SlipDraw3D_MultiplySigned16Shift14LowWord(int16_t value, int16_t ratio) {
 	const int32_t product = (int32_t)value * (int32_t)ratio;
 
-	return (uint16_t)(((uint32_t)product) >> 14);
+	return (uint16_t)(((uint32_t)product) >> SLIP_Q14_FRACTION_BITS);
 }
 
 static int32_t SlipDraw3D_MultiplySigned16Shift14PreserveDeltaHigh(int32_t delta, int16_t ratio) {
 	const int32_t product = (int32_t)(int16_t)delta * (int32_t)ratio;
-	const uint16_t low = (uint16_t)(((uint32_t)product) >> 14);
+	const uint16_t low = (uint16_t)(((uint32_t)product) >> SLIP_Q14_FRACTION_BITS);
 
-	return (int32_t)(((uint32_t)delta & 0xffff0000u) | low);
+	return (int32_t)(((uint32_t)delta & SLIP_DRAW3D_UPPER_WORD_MASK) | low);
 }
 
 static uint32_t SlipDraw3D_ShiftSignedWordToFractionByteTwice(uint32_t inputWord) {
@@ -448,9 +485,9 @@ static int32_t SlipDraw3D_MultiplySigned32RoundShift30(int32_t value, uint32_t r
 	const uint64_t productBits = (uint64_t)product;
 	const uint32_t low = (uint32_t)productBits;
 	const uint32_t high = (uint32_t)(productBits >> 32);
-	uint32_t out = (low >> 30) | (high << 2);
+	uint32_t out = (low >> SLIP_CLIP_PRECISE_FRACTION_BITS) | (high << (32 - SLIP_CLIP_PRECISE_FRACTION_BITS));
 
-	if (((low >> 29) & 1u) != 0) {
+	if (((low >> SLIP_CLIP_PRECISE_ROUND_BIT) & 1u) != 0) {
 		++out;
 	}
 	return (int32_t)out;
@@ -461,9 +498,9 @@ static int32_t SlipDraw3D_MultiplySigned32RoundShift14(int32_t value, uint32_t r
 	const uint64_t productBits = (uint64_t)product;
 	const uint32_t low = (uint32_t)productBits;
 	const uint32_t high = (uint32_t)(productBits >> 32);
-	uint32_t out = (low >> 14) | (high << 18);
+	uint32_t out = (low >> SLIP_Q14_FRACTION_BITS) | (high << SLIP_Q14_DWORD_HIGH_SHIFT);
 
-	if (((low >> 13) & 1u) != 0) {
+	if (((low >> (SLIP_Q14_FRACTION_BITS - 1)) & 1u) != 0) {
 		++out;
 	}
 	return (int32_t)out;
@@ -476,7 +513,7 @@ static int SlipDraw3D_DivideSignedChecked32(int64_t dividend, int32_t divisor, i
 		return 0;
 	}
 	q = dividend / divisor;
-	if (q < (INT64_C(-2147483647) - 1) || q > INT64_C(2147483647)) {
+	if (q < INT32_MIN || q > INT32_MAX) {
 		return 0;
 	}
 	*quotient = (int32_t)q;
@@ -488,10 +525,10 @@ static int32_t SlipDraw3D_MultiplySigned32AddOverflowBitBeforeShift30(int32_t va
 	const uint64_t productBits = (uint64_t)product;
 	uint32_t low = (uint32_t)productBits;
 	const uint32_t high = (uint32_t)(productBits >> 32);
-	const uint32_t carry = product < INT64_C(-2147483648) || product > INT64_C(2147483647);
+	const uint32_t carry = product < INT32_MIN || product > INT32_MAX;
 
 	low += carry;
-	return (int32_t)((low >> 30) | (high << 2));
+	return (int32_t)((low >> SLIP_CLIP_PRECISE_FRACTION_BITS) | (high << (32 - SLIP_CLIP_PRECISE_FRACTION_BITS)));
 }
 
 static int32_t SlipDraw3D_MultiplySigned16RoundShift14LowWord(int16_t value, uint16_t ratio) {
@@ -499,9 +536,9 @@ static int32_t SlipDraw3D_MultiplySigned16RoundShift14LowWord(int16_t value, uin
 	const uint32_t productBits = (uint32_t)product;
 	const uint16_t low = (uint16_t)productBits;
 	const uint16_t high = (uint16_t)(productBits >> 16);
-	uint16_t out = (uint16_t)((low >> 14) | (uint16_t)(high << 2));
+	uint16_t out = (uint16_t)((low >> SLIP_Q14_FRACTION_BITS) | (uint16_t)(high << SLIP_Q14_WORD_HIGH_SHIFT));
 
-	if (((low >> 13) & 1u) != 0) {
+	if (((low >> (SLIP_Q14_FRACTION_BITS - 1)) & 1u) != 0) {
 		++out;
 	}
 	return (int32_t)(int16_t)out;
@@ -510,9 +547,9 @@ static int32_t SlipDraw3D_MultiplySigned16RoundShift14LowWord(int16_t value, uin
 static int32_t SlipDraw3D_MultiplySigned16RoundShift14(int16_t value, uint16_t ratio) {
 	const int32_t product = (int32_t)value * (int32_t)(int16_t)ratio;
 	const uint32_t productBits = (uint32_t)product;
-	int32_t out = (int32_t)product >> 14;
+	int32_t out = (int32_t)product >> SLIP_Q14_FRACTION_BITS;
 
-	if (((productBits >> 13) & 1u) != 0) {
+	if (((productBits >> (SLIP_Q14_FRACTION_BITS - 1)) & 1u) != 0) {
 		++out;
 	}
 	return out;
@@ -526,7 +563,7 @@ static int32_t SlipDraw3D_PostPlaneDepth(int32_t recordX, int32_t planeX, int16_
 	const int32_t productY = (int32_t)(int16_t)(uint16_t)deltaY * (int32_t)planeNormalY;
 	const uint32_t sum = (uint32_t)productX + (uint32_t)productY;
 
-	return (int32_t)(sum << 2);
+	return (int32_t)(sum << SLIP_POST_PLANE_DISTANCE_SHIFT);
 }
 
 static int SlipDraw3D_InterpolatePlaneIntersectionQ30(int32_t deltaX, int32_t deltaY, int32_t deltaZ,
@@ -590,9 +627,9 @@ static int SlipDraw3D_InterpolatePlaneIntersectionQ14(int32_t deltaX, int32_t de
 }
 
 static int32_t SlipDraw3D_RoundedShiftRight14(int64_t v) {
-	uint32_t out = (uint32_t)((uint64_t)v >> 14);
+	uint32_t out = (uint32_t)((uint64_t)v >> SLIP_Q14_FRACTION_BITS);
 
-	if ((v & INT64_C(0x2000)) != 0) {
+	if ((v & (INT64_C(1) << (SLIP_Q14_FRACTION_BITS - 1))) != 0) {
 		++out;
 	}
 	return (int32_t)out;
@@ -623,7 +660,7 @@ uint32_t SlipDraw3D_ClassifyShapeBounds(SlipDraw3DVec32 center, int32_t radius, 
 			renderFlags = SLIP_SHAPE_CLIP_AUXILIARY;
 		}
 	}
-	if (radius < 0x4000) {
+	if (radius < SLIP_DRAW3D_SHORT_COORDINATE_RADIUS_LIMIT) {
 		renderFlags |= SLIP_SHAPE_SHORT_COORDINATES;
 	}
 	return renderFlags;
@@ -653,7 +690,7 @@ int SlipDraw3D_BuildVertexRecords(SlipDraw3DVertexRecord *records, size_t record
 	if (recordCapacity < vertexCount) {
 		if (result != NULL) {
 			result->calledInitializeVertexBuffer = true;
-			result->initialBufferCapacity = (uint32_t)vertexCount + 0x40u;
+			result->initialBufferCapacity = (uint32_t)vertexCount + SLIP_DRAW3D_VERTEX_BUFFER_GROWTH_RESERVE;
 		}
 		return 0;
 	}
@@ -678,7 +715,8 @@ int SlipDraw3D_BuildVertexRecords(SlipDraw3DVertexRecord *records, size_t record
 
 		if (result != NULL) {
 			result->calledGrowVertexBuffer = true;
-			result->grownBufferCapacity = growCount + 0x40u + (uint32_t)recordCapacity;
+			result->grownBufferCapacity =
+			    growCount + SLIP_DRAW3D_VERTEX_BUFFER_GROWTH_RESERVE + (uint32_t)recordCapacity;
 		}
 		return 0;
 	}
@@ -695,20 +733,22 @@ int SlipDraw3D_BuildVertexRecords(SlipDraw3DVertexRecord *records, size_t record
 		result->transformCallback = transform;
 		result->stateRecordSourcePoint = sourcePoint;
 		result->sourcePointCallback = sourcePoint;
-		result->sourceTailBytesUnsigned = (uint32_t)(uint16_t)(sourceStride - 6);
-		result->vertexRecordTailBytes = 0x16u;
+		result->sourceTailBytesUnsigned = (uint32_t)(uint16_t)(sourceStride - SLIP_SHAPE_VERTEX_BYTES);
+		result->vertexRecordTailBytes =
+		    SLIP_DRAW3D_VERTEX_RECORD_SIZE - (SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET + SLIP_SHAPE_VERTEX_BYTES);
 		result->initialLoopCount = vertexCount;
 		result->initialVertexFlags = 0;
-		result->sourceTailBytesSigned = (int32_t)(int16_t)(uint16_t)(sourceStride - 6);
+		result->sourceTailBytesSigned = (int32_t)(int16_t)(uint16_t)(sourceStride - SLIP_SHAPE_VERTEX_BYTES);
 		result->loopCount = vertexCount;
 	}
 
 	for (i = 0; i < vertexCount; ++i) {
-		if (sourceOffset > sourceSize || 6u > sourceSize - sourceOffset) {
+		if (sourceOffset > sourceSize || SLIP_SHAPE_VERTEX_BYTES > sourceSize - sourceOffset) {
 			return 0;
 		}
 		SlipDraw3D_WriteLE32(records[i].bytes + SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET, 0);
-		memcpy(records[i].bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET, source + sourceOffset, 6);
+		memcpy(records[i].bytes + SLIP_DRAW3D_VERTEX_RECORD_SOURCE_OFFSET, source + sourceOffset,
+		       SLIP_SHAPE_VERTEX_BYTES);
 		sourceOffset += (size_t)sourceStride;
 	}
 	if (result != NULL) {
@@ -729,8 +769,8 @@ int SlipDraw3D_InitVertexBuffer(uint32_t requestedCapacity, uint16_t allocatedRe
 	memset(result, 0, sizeof(*result));
 	result->savedGeneralState = true;
 	result->capacityAfter = requestedCapacity;
-	result->vertexRecordBytes = 0x40u;
-	allocationProduct = (uint64_t)requestedCapacity * 0x40u;
+	result->vertexRecordBytes = SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	allocationProduct = (uint64_t)requestedCapacity * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
 	result->allocationBytesLow = (uint32_t)allocationProduct;
 	result->allocationBytesHigh = (uint32_t)(allocationProduct >> 32);
 	result->allocationBytes = (uint32_t)allocationProduct;
@@ -738,7 +778,7 @@ int SlipDraw3D_InitVertexBuffer(uint32_t requestedCapacity, uint16_t allocatedRe
 	result->callResourceAllocateAnonymous = true;
 	result->resourceAllocateAnonymousCarry = resourceAllocateAnonymousCarry;
 	if (resourceAllocateAnonymousCarry) {
-		result->allocationErrorMessageOffset = 0x0001adb6u;
+		result->allocationErrorMessageOffset = SLIP_DRAW3D_VERTEX_ALLOCATION_ERROR_MESSAGE_DOS_OFFSET;
 		result->jumpedToAllocationError = true;
 		return 0;
 	}
@@ -775,8 +815,8 @@ int SlipDraw3D_GrowVertexBuffer(uint32_t requestedCapacity, uint16_t handle, uin
 	result->pushedLimit = limit;
 	result->pushedBase = base;
 	result->capacityAfter = requestedCapacity;
-	result->vertexRecordBytes = 0x40u;
-	allocationProduct = (uint64_t)requestedCapacity * 0x40u;
+	result->vertexRecordBytes = SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	allocationProduct = (uint64_t)requestedCapacity * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
 	result->allocationBytesLow = (uint32_t)allocationProduct;
 	result->allocationBytesHigh = (uint32_t)(allocationProduct >> 32);
 	result->allocationBytes = (uint32_t)allocationProduct;
@@ -784,7 +824,7 @@ int SlipDraw3D_GrowVertexBuffer(uint32_t requestedCapacity, uint16_t handle, uin
 	result->callResourceAllocateAnonymous = true;
 	result->resourceAllocateAnonymousCarry = resourceAllocateAnonymousCarry;
 	if (resourceAllocateAnonymousCarry) {
-		result->allocationErrorMessageOffset = 0x0001de1fu;
+		result->allocationErrorMessageOffset = SLIP_DRAW3D_VERTEX_GROW_ERROR_MESSAGE_DOS_OFFSET;
 		result->jumpedToAllocationError = true;
 		return 0;
 	}
@@ -835,7 +875,7 @@ int SlipDraw3D_ProjectIndex(SlipDraw3DVertexRecord *vertexRecords, size_t vertex
 	if (vertexRecords == NULL || transform == NULL || result == NULL || (size_t)vertexIndex >= vertexRecordCount) {
 		return 0;
 	}
-	vertexOffset = (uint32_t)vertexIndex << 6u;
+	vertexOffset = (uint32_t)vertexIndex * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
 	record = vertexRecords + vertexIndex;
 	flags = record->flags;
 	alreadyTransformed = (flags & SLIP_VERTEX_TRANSFORMED) != 0;
@@ -876,7 +916,8 @@ int SlipDraw3D_PolygonStatus(SlipDraw3DVertexRecord *vertexRecords, size_t verte
 		return 0;
 	}
 	vertexCount = (uint32_t)countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
-	if (vertexCount == 0 || visitCapacity < (size_t)vertexCount || indexStreamBytes < (size_t)vertexCount * 2u) {
+	if (vertexCount == 0 || visitCapacity < (size_t)vertexCount ||
+	    indexStreamBytes < (size_t)vertexCount * SLIP_SERIALIZED_INDEX_BYTES) {
 		return 0;
 	}
 	memset(visits, 0, sizeof(*visits) * (size_t)vertexCount);
@@ -892,7 +933,7 @@ int SlipDraw3D_PolygonStatus(SlipDraw3DVertexRecord *vertexRecords, size_t verte
 		uint32_t status;
 		SlipDraw3DVec32 world;
 
-		vertexIndex = SlipBytes_ReadLE16(indexStream + (size_t)i * 2u);
+		vertexIndex = SlipBytes_ReadLE16(indexStream + (size_t)i * SLIP_SERIALIZED_INDEX_BYTES);
 		if ((size_t)vertexIndex >= vertexRecordCount) {
 			return 0;
 		}
@@ -950,7 +991,7 @@ int SlipDraw3D_PolygonStatus(SlipDraw3DVertexRecord *vertexRecords, size_t verte
 		result->signFlagAfterReturn = true;
 		return 1;
 	}
-	allMask = 0xffffffffu;
+	allMask = UINT32_MAX;
 	anyMask = 0;
 	for (i = vertexCount; i > 0; --i) {
 		const uint32_t originalIndex = i - 1u;
@@ -1004,11 +1045,12 @@ int SlipDraw3D_PerspectiveDepth(SlipDraw3DVertexRecord *vertexRecords, size_t ve
 		return 0;
 	}
 	vertexCount = (uint32_t)countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
-	if (vertexCount == 0 || visitCapacity < (size_t)vertexCount || indexStreamBytes < (size_t)vertexCount * 2u) {
+	if (vertexCount == 0 || visitCapacity < (size_t)vertexCount ||
+	    indexStreamBytes < (size_t)vertexCount * SLIP_SERIALIZED_INDEX_BYTES) {
 		return 0;
 	}
 	memset(visits, 0, sizeof(*visits) * (size_t)vertexCount);
-	minDepth = 0x7fffffffu;
+	minDepth = INT32_MAX;
 	*result = (SlipDraw3DPerspectiveDepth){countAndFlags, (uint16_t)vertexCount, minDepth, 0,
 	                                       minDepth,      projectionFactor,      0,        false};
 	for (i = 0; i < (size_t)vertexCount; ++i) {
@@ -1018,14 +1060,14 @@ int SlipDraw3D_PerspectiveDepth(SlipDraw3DVertexRecord *vertexRecords, size_t ve
 		uint32_t flags;
 		SlipDraw3DVec32 world;
 
-		vertexIndex = SlipBytes_ReadLE16(indexStream + i * 2u);
+		vertexIndex = SlipBytes_ReadLE16(indexStream + i * SLIP_SERIALIZED_INDEX_BYTES);
 		if ((size_t)vertexIndex >= vertexRecordCount) {
 			return 0;
 		}
 		record = vertexRecords + vertexIndex;
 		flags = record->flags;
 		visit->vertexIndex = vertexIndex;
-		visit->vertexOffset = (uint32_t)vertexIndex << 6u;
+		visit->vertexOffset = (uint32_t)vertexIndex * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
 		visit->alreadyTransformed = (flags & SLIP_VERTEX_TRANSFORMED) != 0;
 		visit->minDepthBefore = minDepth;
 		if (!visit->alreadyTransformed) {
@@ -1059,7 +1101,8 @@ int SlipDraw3D_PerspectiveDepth(SlipDraw3DVertexRecord *vertexRecords, size_t ve
 		result->visitCount = i + 1u;
 	}
 	result->minDepth = minDepth;
-	result->fadeDepth = (uint32_t)((uint64_t)((int64_t)(int32_t)projectionFactor * (int32_t)minDepth) >> 16);
+	result->fadeDepth = (uint32_t)((uint64_t)((int64_t)(int32_t)projectionFactor * (int32_t)minDepth) >>
+	                               SLIP_DRAW3D_SCALE_FRACTION_BITS);
 	return 1;
 }
 
@@ -1176,7 +1219,8 @@ int SlipDraw3D_BuildSolidDrawRecords(SlipDraw3DDrawRecord *drawRecords, size_t d
 
 	if (drawRecords == NULL || vertexRecords == NULL || indices == NULL || state == NULL || transform == NULL ||
 	    project == NULL || result == NULL || vertexCount == 0 || drawRecordCapacity < vertexCount ||
-	    indexBytes < (size_t)vertexCount * 2u || vertexCount > SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT) {
+	    indexBytes < (size_t)vertexCount * SLIP_SERIALIZED_INDEX_BYTES ||
+	    vertexCount > SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT) {
 		return 0;
 	}
 
@@ -1247,7 +1291,7 @@ int SlipDraw3D_BuildSolidDrawRecords(SlipDraw3DDrawRecord *drawRecords, size_t d
 
 	result->allClipFlags = allClipFlags;
 	result->anyClipFlags = anyClipFlags;
-	result->drawMode = materialDitherBits != 0u ? 4u : 0u;
+	result->drawMode = materialDitherBits != 0u ? SLIP_POLYGON_DRAW_DITHERED : SLIP_POLYGON_DRAW_FLAT;
 	result->materialDitherBits = materialDitherBits;
 	result->ditherBits = (uint8_t)materialDitherBits;
 	return 1;
@@ -1276,7 +1320,8 @@ int SlipDraw3D_BuildSolidRingExecute(
 
 	if (pool == NULL || vertexRecords == NULL || indices == NULL || state == NULL || transform == NULL ||
 	    projectPrimary == NULL || projectSecondary == NULL || result == NULL || vertexCount == 0 ||
-	    indexBytes < (size_t)vertexCount * 2u || vertexCount > SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT) {
+	    indexBytes < (size_t)vertexCount * SLIP_SERIALIZED_INDEX_BYTES ||
+	    vertexCount > SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT) {
 		return 0;
 	}
 	memset(result, 0, sizeof(*result));
@@ -1337,8 +1382,9 @@ int SlipDraw3D_BuildSolidRingExecute(
 			return 0;
 		}
 	}
-	result->build = (SlipDraw3DBuildResult){allClipFlags, anyClipFlags, materialDitherBits != 0u ? 4u : 0u,
-	                                        materialDitherBits, (uint8_t)materialDitherBits};
+	result->build = (SlipDraw3DBuildResult){
+	    allClipFlags, anyClipFlags, materialDitherBits != 0u ? SLIP_POLYGON_DRAW_DITHERED : SLIP_POLYGON_DRAW_FLAT,
+	    materialDitherBits, (uint8_t)materialDitherBits};
 	result->returned = true;
 	if ((anyClipFlags & SLIP_DRAW3D_CLIP_MASK) != 0u && (allClipFlags & SLIP_DRAW3D_CLIP_MASK) != 0u) {
 		result->carryOut = true;
@@ -1348,12 +1394,13 @@ int SlipDraw3D_BuildSolidRingExecute(
 	if ((anyClipFlags & SLIP_DRAW3D_CLIP_MASK) != 0u) {
 		if (!SlipDraw3D_ClipDispatchExecute(
 		        recordPoolBytes, recordPoolByteSize, pool->inputActiveHeadOffset, pool->freeHeadOffset, anyClipFlags,
-		        allClipFlags, state->renderFlags, materialDitherBits != 0u ? 4u : 0u, state->minZ, state->maxZ,
-		        state->minX, state->maxX, state->minY, state->maxY, projectPrimary, projectSecondary, userData,
-		        hasPostPlanes, planeBase, planeBytes, planeHeadOffset, postLimitXMin, postLimitXMax, postLimitYMin,
-		        postLimitYMax, maxClipEdgeVisits, clipFlagVisits, clipFlagVisitCapacity, postBoundsVisits,
-		        postBoundsVisitCapacity, postClipRecordVisits, postClipRecordVisitCapacity, postClipPlaneVisits,
-		        postClipPlaneVisitCapacity, &result->dispatch)) {
+		        allClipFlags, state->renderFlags,
+		        materialDitherBits != 0u ? SLIP_POLYGON_DRAW_DITHERED : SLIP_POLYGON_DRAW_FLAT, state->minZ,
+		        state->maxZ, state->minX, state->maxX, state->minY, state->maxY, projectPrimary, projectSecondary,
+		        userData, hasPostPlanes, planeBase, planeBytes, planeHeadOffset, postLimitXMin, postLimitXMax,
+		        postLimitYMin, postLimitYMax, maxClipEdgeVisits, clipFlagVisits, clipFlagVisitCapacity,
+		        postBoundsVisits, postBoundsVisitCapacity, postClipRecordVisits, postClipRecordVisitCapacity,
+		        postClipPlaneVisits, postClipPlaneVisitCapacity, &result->dispatch)) {
 			return 0;
 		}
 		pool->inputActiveHeadOffset = result->dispatch.activeHeadOffsetOut;
@@ -1558,7 +1605,7 @@ int SlipDraw3D_BuildLinePairExecute(SlipDraw3DRecordPool *pool, SlipDraw3DVertex
 
 	if (pool == NULL || vertexRecords == NULL || indices == NULL || state == NULL || transform == NULL ||
 	    projectPrimary == NULL || projectSecondary == NULL || result == NULL || vertexRecordCount == 0 ||
-	    indexBytes < 4u) {
+	    indexBytes < 2 * SLIP_SERIALIZED_INDEX_BYTES) {
 		return 0;
 	}
 	memset(result, 0, sizeof(*result));
@@ -1581,7 +1628,7 @@ int SlipDraw3D_BuildLinePairExecute(SlipDraw3DRecordPool *pool, SlipDraw3DVertex
 	for (copyIndex = 0; copyIndex < 2u; ++copyIndex) {
 		const uint32_t recordOffset = copyIndex == 0 ? firstRecordOffset : secondRecordOffset;
 		SlipDraw3DDrawRecord *const drawRecord = SlipDraw3D_RecordPoolDrawRecord(pool, recordOffset);
-		const uint16_t vertexIndex = SlipBytes_ReadLE16(indices + copyIndex * 2u);
+		const uint16_t vertexIndex = SlipBytes_ReadLE16(indices + copyIndex * SLIP_SERIALIZED_INDEX_BYTES);
 		uint32_t flags;
 
 		if (drawRecord == NULL || (size_t)vertexIndex >= vertexRecordCount) {
@@ -1589,7 +1636,7 @@ int SlipDraw3D_BuildLinePairExecute(SlipDraw3DRecordPool *pool, SlipDraw3DVertex
 		}
 		flags = SlipDraw3D_ProjectVertex(&vertexRecords[vertexIndex], state, transform, projectPrimary,
 		                                 projectSecondary, userData);
-		memcpy(drawRecord->bytes, vertexRecords[vertexIndex].bytes, 7u * sizeof(uint32_t));
+		memcpy(drawRecord->bytes, vertexRecords[vertexIndex].bytes, SLIP_DRAW3D_VERTEX_DRAW_PREFIX_BYTES);
 		allClipFlags &= flags;
 		anyClipFlags |= flags;
 	}
@@ -1641,7 +1688,7 @@ int SlipDraw3D_SetLimitState(uint32_t limitStart, uint32_t limitEnd, SlipDraw3DL
 	}
 	state->limitStart = limitStart;
 	state->limitEnd = limitEnd;
-	state->limitEnabled = 0xffffffffu;
+	state->limitEnabled = UINT32_MAX;
 	return 1;
 }
 
@@ -1779,20 +1826,20 @@ void SlipDraw3D_InitDefaultProjectState(SlipDraw3DProjectState *state) {
 	}
 
 	memset(state, 0, sizeof(*state));
-	state->minZ = 0x40;
+	state->minZ = SLIP_DRAW3D_DEFAULT_NEAR_DEPTH;
 	state->maxZ = INT32_MAX;
 	state->minX = 0;
 	state->minY = 0;
 	state->maxX = SLIPSTREAM_SCREEN_WIDTH - 1;
 	state->maxY = SLIPSTREAM_SCREEN_HEIGHT - 1;
-	state->centerX = 0xa0;
-	state->centerY = 0x64;
-	state->projectionScale = 0x100;
-	state->projectionMode = 0;
-	state->perspectiveScale = 0x10000;
-	state->projectionScaleFactor = 0x100;
+	state->centerX = SLIPSTREAM_SCREEN_WIDTH / 2;
+	state->centerY = SLIPSTREAM_SCREEN_HEIGHT / 2;
+	state->projectionScale = SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH;
+	state->projectionMode = SLIP_DRAW3D_PROJECTION_PERSPECTIVE;
+	state->perspectiveScale = SLIP_DRAW3D_SCALE_ONE_Q16;
+	state->projectionScaleFactor = SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH;
 	state->modeOneScale = 1;
-	state->inverseProjectionScale = 0x10000;
+	state->inverseProjectionScale = SLIP_DRAW3D_SCALE_ONE_Q16;
 	SlipDraw3D_RefreshProjectionState(state);
 }
 
@@ -1802,8 +1849,8 @@ void SlipDraw3D_SetViewport(SlipDraw3DProjectState *state, int32_t minX, int32_t
 	state->minY = (uint16_t)minY;
 	state->maxX = (uint16_t)maxX;
 	state->maxY = (uint16_t)maxY;
-	state->centerX = (int32_t)(((uint32_t)state->centerX & 0xffff0000u) | (uint16_t)centerX);
-	state->centerY = (int32_t)(((uint32_t)state->centerY & 0xffff0000u) | (uint16_t)centerY);
+	state->centerX = (int32_t)(((uint32_t)state->centerX & SLIP_DRAW3D_UPPER_WORD_MASK) | (uint16_t)centerX);
+	state->centerY = (int32_t)(((uint32_t)state->centerY & SLIP_DRAW3D_UPPER_WORD_MASK) | (uint16_t)centerY);
 	SlipDraw3D_RefreshPerspectiveScale(state);
 	SlipDraw3D_RefreshProjectionState(state);
 }
@@ -1856,21 +1903,21 @@ static uint16_t SlipDraw3D_Root32Software(uint32_t source) {
 	while ((source >> highestBit) == 0) {
 		--highestBit;
 	}
-	shift = (uint16_t)((highestBit ^ 31u) & 0xfffeu);
+	shift = (uint16_t)((highestBit ^ 31u) & SLIP_DRAW3D_WORD_ALIGNED_INDEX_MASK);
 	source <<= shift;
 	iterations = (uint16_t)(16u - (shift >> 1));
 	sourceLow = (uint16_t)source;
 	sourceHigh = (uint16_t)(source >> 16);
-	do {
-		const uint16_t candidateHigh = (uint16_t)(sourceHigh - 0x4000u);
-		const uint32_t subtrahend = (uint32_t)root + (sourceHigh < 0x4000u ? 1u : 0u);
+	for (unsigned iteration = 0; iteration < iterations; ++iteration) {
+		const uint16_t candidateHigh = (uint16_t)(sourceHigh - SLIP_DRAW3D_ROOT16_TRIAL_BIT);
+		const uint32_t subtrahend = (uint32_t)root + (sourceHigh < SLIP_DRAW3D_ROOT16_TRIAL_BIT ? 1u : 0u);
 		const uint16_t candidateRemainder = (uint16_t)(remainder - subtrahend);
 		bool borrow = (uint32_t)remainder < subtrahend;
 		uint16_t carryLow;
 		uint16_t carryHigh;
 
 		if (borrow) {
-			const uint32_t restoredHigh = (uint32_t)candidateHigh + 0x4000u;
+			const uint32_t restoredHigh = (uint32_t)candidateHigh + SLIP_DRAW3D_ROOT16_TRIAL_BIT;
 
 			sourceHigh = (uint16_t)restoredHigh;
 			remainder = (uint16_t)(candidateRemainder + root + (restoredHigh >> 16));
@@ -1890,7 +1937,7 @@ static uint16_t SlipDraw3D_Root32Software(uint32_t source) {
 		carryHigh = (uint16_t)(sourceHigh >> 15);
 		sourceHigh = (uint16_t)((sourceHigh << 1) | carryLow);
 		remainder = (uint16_t)((remainder << 1) | carryHigh);
-	} while (--iterations != 0);
+	}
 	return root;
 }
 
@@ -1908,7 +1955,7 @@ static uint32_t SlipDraw3D_Root64Software(uint32_t sourceLow, uint32_t sourceHig
 	while ((sourceHigh >> highestBit) == 0) {
 		--highestBit;
 	}
-	shift = (highestBit ^ 31u) & 0xfffffffeu;
+	shift = (highestBit ^ 31u) & SLIP_DRAW3D_EVEN_SHIFT_COUNT_MASK;
 	iterations = 32;
 	if (shift != 0) {
 		const uint32_t mask = UINT32_MAX << shift;
@@ -1918,16 +1965,16 @@ static uint32_t SlipDraw3D_Root64Software(uint32_t sourceLow, uint32_t sourceHig
 		sourceHigh = (sourceHigh << shift) | (rotatedLow & ~mask);
 		iterations -= shift >> 1;
 	}
-	do {
-		const uint32_t candidateHigh = sourceHigh - 0x40000000u;
-		const uint64_t subtrahend = (uint64_t)root + (sourceHigh < 0x40000000u ? 1u : 0u);
+	for (unsigned iteration = 0; iteration < iterations; ++iteration) {
+		const uint32_t candidateHigh = sourceHigh - SLIP_DRAW3D_ROOT32_TRIAL_BIT;
+		const uint64_t subtrahend = (uint64_t)root + (sourceHigh < SLIP_DRAW3D_ROOT32_TRIAL_BIT ? 1u : 0u);
 		const uint32_t candidateRemainder = (uint32_t)(remainder - subtrahend);
 		bool borrow = (uint64_t)remainder < subtrahend;
 		uint32_t carryLow;
 		uint32_t carryHigh;
 
 		if (borrow) {
-			const uint64_t restoredHigh = (uint64_t)candidateHigh + 0x40000000u;
+			const uint64_t restoredHigh = (uint64_t)candidateHigh + SLIP_DRAW3D_ROOT32_TRIAL_BIT;
 
 			sourceHigh = (uint32_t)restoredHigh;
 			remainder = candidateRemainder + root + (uint32_t)(restoredHigh >> 32);
@@ -1947,14 +1994,14 @@ static uint32_t SlipDraw3D_Root64Software(uint32_t sourceLow, uint32_t sourceHig
 		carryHigh = sourceHigh >> 31;
 		sourceHigh = (sourceHigh << 1) | carryLow;
 		remainder = (remainder << 1) | carryHigh;
-	} while (--iterations != 0);
+	}
 	return root;
 }
 
 uint16_t SlipDraw3D_Root32(uint32_t value) { return SlipDraw3D_Root32Software(value); }
 
 uint32_t SlipDraw3D_Root64(uint32_t valueLow, uint32_t valueHigh) {
-	const uint32_t integerIndefinite = 0x80000000u;
+	const uint32_t integerIndefinite = SLIP_DRAW3D_DWORD_SIGN_BIT;
 	if ((int32_t)valueHigh < 0) {
 		valueLow &= ~1u;
 	}
@@ -2028,7 +2075,7 @@ int SlipDraw3D_LightDepthBlend(uint32_t depth, uint32_t fadeStart, uint32_t fade
 	}
 	if ((int32_t)depth >= (int32_t)fadeEnd) {
 		out.branch = SLIP_DRAW3D_LIGHT_DEPTH_BLEND_BRANCH_LIMIT;
-		out.fadeBlendQ14 = 0x4000u;
+		out.fadeBlendQ14 = SLIP_Q14_ONE;
 		*result = out;
 		return 1;
 	}
@@ -2038,15 +2085,15 @@ int SlipDraw3D_LightDepthBlend(uint32_t depth, uint32_t fadeStart, uint32_t fade
 
 	out.branch = SLIP_DRAW3D_LIGHT_DEPTH_BLEND_BRANCH_INTERIOR;
 	out.delta = depth - fadeStart;
-	out.shiftedDividend = (int64_t)(int32_t)out.delta << 30;
+	out.shiftedDividend = (int64_t)(int32_t)out.delta << SLIP_DRAW3D_INTERPOLATION_FRACTION_BITS;
 	out.quotient = (int32_t)(out.shiftedDividend / (int32_t)fadeRange);
-	out.fadeBlendQ14 = (uint32_t)out.quotient >> 16;
+	out.fadeBlendQ14 = (uint32_t)out.quotient >> SLIP_DRAW3D_INTERPOLATION_TO_Q14_SHIFT;
 	*result = out;
 	return 1;
 }
 
 static int16_t SlipDraw3D_DivideComponentQ14(int16_t component, int16_t length) {
-	return (int16_t)(((int32_t)component << 14) / (int32_t)length);
+	return (int16_t)(((int32_t)component << SLIP_Q14_FRACTION_BITS) / (int32_t)length);
 }
 
 int SlipDraw3D_NormalizeVector2D(uint32_t inputX, uint32_t inputY, SlipDraw3DNormalizeVector2D *result) {
@@ -2093,16 +2140,16 @@ uint32_t SlipDraw3D_DetailValue(uint32_t mode, uint32_t minDepth, uint32_t detai
 	uint32_t dividendLow;
 	uint32_t dividendHigh;
 
-	if (mode == 1u) {
+	if (mode == SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC) {
 		return detailScale;
 	}
 	if ((int32_t)depth <= (int32_t)minDepth) {
-		return 0x7fffffffu;
+		return INT32_MAX;
 	}
-	dividendLow = detailScale << 8;
-	dividendHigh = (uint32_t)((int32_t)detailScale >> 24);
+	dividendLow = detailScale << SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH_SHIFT;
+	dividendHigh = (uint32_t)((int32_t)detailScale >> (32 - SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH_SHIFT));
 	if (dividendHigh >= depth) {
-		return 0x7fffffffu;
+		return INT32_MAX;
 	}
 	return (uint32_t)((((uint64_t)dividendHigh << 32) | dividendLow) / depth);
 }
@@ -2115,7 +2162,7 @@ int SlipDraw3D_RefreshMode0Projection(uint32_t mode, uint32_t projectionScale, u
 	SlipDraw3DNormalizeVector2D maxYPlane;
 	SlipDraw3DNormalizeVector2D minYPlane;
 
-	if (result == NULL || mode != 0u || projectionScale == 0) {
+	if (result == NULL || mode != SLIP_DRAW3D_PROJECTION_PERSPECTIVE || projectionScale == 0) {
 		return 0;
 	}
 	if (!SlipDraw3D_NormalizeVector2D(minX - centerX, projectionScale, &minXPlane) ||
@@ -2147,14 +2194,14 @@ int SlipDraw3D_RefreshMode0Projection(uint32_t mode, uint32_t projectionScale, u
 int SlipDraw3D_RefreshMode1Projection(uint32_t mode, uint32_t scale, uint32_t minX, uint32_t maxX, uint32_t minY,
                                       uint32_t maxY, uint32_t centerX, uint32_t centerY,
                                       SlipDraw3DRefreshMode1Projection *result) {
-	if (result == NULL || mode != 1u || scale == 0) {
+	if (result == NULL || mode != SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC || scale == 0) {
 		return 0;
 	}
 
 	*result = (SlipDraw3DRefreshMode1Projection){
 	    mode,
 	    scale,
-	    0x40000000u / scale,
+	    SLIP_DRAW3D_ORTHOGRAPHIC_RECIPROCAL_ONE_Q30 / scale,
 	    SlipDraw3D_MultiplyLow32(SlipDraw3D_SubtractSignedLowWords(maxX, centerX), scale),
 	    SlipDraw3D_MultiplyLow32(SlipDraw3D_SubtractSignedLowWords(minX, centerX), scale),
 	    SlipDraw3D_MultiplyLow32(SlipDraw3D_SubtractSignedLowWords(centerY, minY), scale),
@@ -2164,7 +2211,9 @@ int SlipDraw3D_RefreshMode1Projection(uint32_t mode, uint32_t scale, uint32_t mi
 }
 
 int32_t SlipDraw3D_HorizontalProjectionScale(const SlipDraw3DProjectState *state) {
-	return state->squarePixels ? state->projectionScale * 5 / 6 : state->projectionScale;
+	return state->squarePixels ? state->projectionScale * SLIP_DRAW3D_SQUARE_PIXEL_SCALE_NUMERATOR /
+	                                 SLIP_DRAW3D_SQUARE_PIXEL_SCALE_DENOMINATOR
+	                           : state->projectionScale;
 }
 
 int SlipDraw3D_RefreshProjectFrustum(const SlipDraw3DProjectState *state, uint32_t mode,
@@ -2189,35 +2238,40 @@ int SlipDraw3D_RefreshProjectFrustum(const SlipDraw3DProjectState *state, uint32
 }
 
 static void SlipDraw3D_RefreshPerspectiveScale(SlipDraw3DProjectState *state) {
-	uint32_t projectionScale = (uint32_t)(((uint64_t)state->perspectiveScale * state->projectionScaleFactor) >> 16);
+	uint32_t projectionScale = (uint32_t)(((uint64_t)state->perspectiveScale * state->projectionScaleFactor) >>
+	                                      SLIP_DRAW3D_SCALE_FRACTION_BITS);
 
-	if ((int32_t)projectionScale < 0x40) {
-		projectionScale = 0x40;
+	if ((int32_t)projectionScale < SLIP_DRAW3D_FOCAL_LENGTH_MINIMUM) {
+		projectionScale = SLIP_DRAW3D_FOCAL_LENGTH_MINIMUM;
 	}
-	if ((int32_t)projectionScale > 0x4000) {
-		projectionScale = 0x4000;
+	if ((int32_t)projectionScale > SLIP_DRAW3D_FOCAL_LENGTH_MAXIMUM) {
+		projectionScale = SLIP_DRAW3D_FOCAL_LENGTH_MAXIMUM;
 	}
 	state->projectionScale = (int32_t)projectionScale;
 }
 
 static void SlipDraw3D_RefreshProjectionState(SlipDraw3DProjectState *state) {
-	if (state->projectionMode == 0) {
+	if (state->projectionMode == SLIP_DRAW3D_PROJECTION_PERSPECTIVE) {
 		const int32_t horizontalScale = SlipDraw3D_HorizontalProjectionScale(state);
-		if (state->projectionScale == 0x100 && !state->squarePixels) {
+		if (state->projectionScale == SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH && !state->squarePixels) {
 			state->projectPrimary = SlipDraw3D_ProjectPerspective32Callback;
 			state->projectSecondary = SlipDraw3D_ProjectPerspective16Callback;
 		} else {
 			state->projectPrimary = SlipDraw3D_ProjectCheckedPerspectiveCallback;
 			state->projectSecondary = SlipDraw3D_ProjectCheckedPerspectiveCallback;
 		}
-		state->rightSlope = (int32_t)(((uint32_t)state->maxX + 1u - (uint32_t)state->centerX) << 16) / horizontalScale;
-		state->leftSlope = (int32_t)(((uint32_t)state->minX - (uint32_t)state->centerX) << 16) / horizontalScale;
-		state->bottomSlope =
-		    (int32_t)(0u - (uint32_t)((int32_t)(((uint32_t)state->maxY + 1u - (uint32_t)state->centerY) << 16) /
-		                              state->projectionScale));
-		state->topSlope =
-		    (int32_t)(0u - (uint32_t)((int32_t)(((uint32_t)state->minY - (uint32_t)state->centerY) << 16) /
-		                              state->projectionScale));
+		state->rightSlope =
+		    (int32_t)(((uint32_t)state->maxX + 1u - (uint32_t)state->centerX) << SLIP_DRAW3D_SCALE_FRACTION_BITS) /
+		    horizontalScale;
+		state->leftSlope =
+		    (int32_t)(((uint32_t)state->minX - (uint32_t)state->centerX) << SLIP_DRAW3D_SCALE_FRACTION_BITS) /
+		    horizontalScale;
+		state->bottomSlope = (int32_t)(0u - (uint32_t)((int32_t)(((uint32_t)state->maxY + 1u - (uint32_t)state->centerY)
+		                                                         << SLIP_DRAW3D_SCALE_FRACTION_BITS) /
+		                                               state->projectionScale));
+		state->topSlope = (int32_t)(0u - (uint32_t)((int32_t)(((uint32_t)state->minY - (uint32_t)state->centerY)
+		                                                      << SLIP_DRAW3D_SCALE_FRACTION_BITS) /
+		                                            state->projectionScale));
 		SlipDraw3DNormalizeVector2D normal;
 		SlipDraw3D_NormalizeVector2D((uint32_t)state->minX - (uint32_t)state->centerX, (uint32_t)horizontalScale,
 		                             &normal);
@@ -2237,8 +2291,8 @@ static void SlipDraw3D_RefreshProjectionState(SlipDraw3DProjectState *state) {
 		state->topNormalZ = (int16_t)(uint16_t)(0u - (uint16_t)normal.unitXQ14);
 		state->projectMask = SlipDraw3D_ProjectMaskPerspective;
 		state->sphereOutside = SlipDraw3D_SphereOutsidePerspective;
-	} else if (state->projectionMode == 1) {
-		state->modeOneReciprocal = 0x40000000u / state->modeOneScale;
+	} else if (state->projectionMode == SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC) {
+		state->modeOneReciprocal = SLIP_DRAW3D_ORTHOGRAPHIC_RECIPROCAL_ONE_Q30 / state->modeOneScale;
 		state->projectPrimary = SlipDraw3D_ProjectOrthographicCallback;
 		state->projectSecondary = SlipDraw3D_ProjectOrthographicCallback;
 		state->modeOneMaximumXScaled =
@@ -2259,73 +2313,76 @@ static void SlipDraw3D_RefreshProjectionState(SlipDraw3DProjectState *state) {
 }
 
 void SlipDraw3D_SetProjectionMode(SlipDraw3DProjectState *state, uint16_t mode) {
-	state->projectionMode = (state->projectionMode & 0xffff0000u) | mode;
+	state->projectionMode = (state->projectionMode & SLIP_DRAW3D_UPPER_WORD_MASK) | mode;
 	SlipDraw3D_RefreshPerspectiveScale(state);
 	SlipDraw3D_RefreshProjectionState(state);
 }
 
 void SlipDraw3D_SetProjectionScale(SlipDraw3DProjectState *state, uint32_t scale) {
-	if (state->projectionMode != 0u) {
+	if (state->projectionMode != SLIP_DRAW3D_PROJECTION_PERSPECTIVE) {
 		state->modeOneScale = scale;
 		if ((int32_t)scale < 1) {
 			scale = 1;
 		}
-		if ((int32_t)scale > 0x100000) {
-			scale = 0x100000;
+		if ((int32_t)scale > SLIP_DRAW3D_ORTHOGRAPHIC_SCALE_MAXIMUM) {
+			scale = SLIP_DRAW3D_ORTHOGRAPHIC_SCALE_MAXIMUM;
 		}
 		state->modeOneScale = scale;
 		SlipDraw3D_RefreshPerspectiveScale(state);
 		SlipDraw3D_RefreshProjectionState(state);
-		state->inverseProjectionScale = 0x10000;
+		state->inverseProjectionScale = SLIP_DRAW3D_SCALE_ONE_Q16;
 		return;
 	}
 
 	state->perspectiveScale = scale;
 	SlipDraw3D_RefreshPerspectiveScale(state);
-	state->inverseProjectionScale = (uint32_t)(0x100000000ull / state->perspectiveScale);
+	state->inverseProjectionScale =
+	    (uint32_t)((UINT64_C(1) << (2 * SLIP_DRAW3D_SCALE_FRACTION_BITS)) / state->perspectiveScale);
 	SlipDraw3D_RefreshPerspectiveScale(state);
 	SlipDraw3D_RefreshProjectionState(state);
 }
 
 void SlipDraw3D_SetProjectionScaleFactor(SlipDraw3DProjectState *state, uint16_t scaleFactor) {
-	state->projectionScaleFactor = (state->projectionScaleFactor & 0xffff0000u) | scaleFactor;
+	state->projectionScaleFactor = (state->projectionScaleFactor & SLIP_DRAW3D_UPPER_WORD_MASK) | scaleFactor;
 	SlipDraw3D_RefreshPerspectiveScale(state);
 	SlipDraw3D_RefreshProjectionState(state);
 }
 
 void SlipDraw3D_SetCameraDistance(SlipDraw3DProjectState *state, uint32_t cameraDistance) {
-	if (state->projectionMode != 0u) {
+	if (state->projectionMode != SLIP_DRAW3D_PROJECTION_PERSPECTIVE) {
 		SlipDraw3D_SetProjectionScale(state, cameraDistance / state->projectionScaleFactor);
 	}
 }
 
 void SlipDraw3D_ProjectModeOne(const SlipDraw3DProjectState *state, int32_t horizontal, int32_t vertical,
                                int32_t *screenX, int32_t *screenY) {
-	const int32_t projectedX = (int32_t)((uint64_t)((int64_t)horizontal * (int32_t)state->modeOneReciprocal) >> 30);
-	const int32_t projectedY = (int32_t)((uint64_t)((int64_t)vertical * (int32_t)state->modeOneReciprocal) >> 30);
+	const int32_t projectedX = (int32_t)((uint64_t)((int64_t)horizontal * (int32_t)state->modeOneReciprocal) >>
+	                                     SLIP_DRAW3D_ORTHOGRAPHIC_RECIPROCAL_FRACTION_BITS);
+	const int32_t projectedY = (int32_t)((uint64_t)((int64_t)vertical * (int32_t)state->modeOneReciprocal) >>
+	                                     SLIP_DRAW3D_ORTHOGRAPHIC_RECIPROCAL_FRACTION_BITS);
 
 	*screenX = (int32_t)((uint32_t)projectedX + (uint32_t)state->centerX);
 	*screenY = (int32_t)((uint32_t)(0u - (uint32_t)projectedY) + (uint32_t)state->centerY);
 }
 
 static int32_t SlipDraw3D_MultiplySigned32Shift16(int32_t left, int32_t right) {
-	return (int32_t)((uint64_t)((int64_t)left * (int64_t)right) >> 16);
+	return (int32_t)((uint64_t)((int64_t)left * (int64_t)right) >> SLIP_DRAW3D_SCALE_FRACTION_BITS);
 }
 
 uint32_t SlipDraw3D_ProjectMaskPerspective(SlipDraw3DVec32 point, const SlipDraw3DProjectState *state) {
 	uint32_t mask = 0;
 
 	if (point.x >= SlipDraw3D_MultiplySigned32Shift16(state->rightSlope, point.z)) {
-		mask |= 0x02u;
+		mask |= SLIP_BOUNDS_CLIP_RIGHT;
 	}
 	if (point.x < SlipDraw3D_MultiplySigned32Shift16(state->leftSlope, point.z)) {
-		mask |= 0x01u;
+		mask |= SLIP_BOUNDS_CLIP_LEFT;
 	}
 	if (point.y >= SlipDraw3D_MultiplySigned32Shift16(state->topSlope, point.z)) {
-		mask |= 0x08u;
+		mask |= SLIP_BOUNDS_CLIP_TOP;
 	}
 	if (point.y < SlipDraw3D_MultiplySigned32Shift16(state->bottomSlope, point.z)) {
-		mask |= 0x04u;
+		mask |= SLIP_BOUNDS_CLIP_BOTTOM;
 	}
 	return mask;
 }
@@ -2334,16 +2391,16 @@ uint32_t SlipDraw3D_ProjectMaskOrthographic(SlipDraw3DVec32 point, const SlipDra
 	uint32_t mask = 0;
 
 	if (point.x <= state->modeOneMinimumXScaled) {
-		mask |= 0x01u;
+		mask |= SLIP_BOUNDS_CLIP_LEFT;
 	}
 	if (point.x >= state->modeOneMaximumXScaled) {
-		mask |= 0x02u;
+		mask |= SLIP_BOUNDS_CLIP_RIGHT;
 	}
 	if (point.y <= state->modeOneMaximumYScaled) {
-		mask |= 0x04u;
+		mask |= SLIP_BOUNDS_CLIP_BOTTOM;
 	}
 	if (point.y >= state->modeOneMinimumYScaled) {
-		mask |= 0x08u;
+		mask |= SLIP_BOUNDS_CLIP_TOP;
 	}
 	return mask;
 }
@@ -2353,23 +2410,24 @@ bool SlipDraw3D_SphereOutsidePerspective(SlipDraw3DVec32 center, int32_t radius,
 		return true;
 	if ((int32_t)((uint32_t)center.z - (uint32_t)radius) >= state->maxZ)
 		return true;
-	uint32_t leftDistance = (uint32_t)((uint64_t)((int64_t)state->leftNormalX * center.x) >> 14);
-	leftDistance += (uint32_t)((uint64_t)((int64_t)state->leftNormalZ * center.z) >> 14);
+	uint32_t leftDistance = (uint32_t)((uint64_t)((int64_t)state->leftNormalX * center.x) >> SLIP_Q14_FRACTION_BITS);
+	leftDistance += (uint32_t)((uint64_t)((int64_t)state->leftNormalZ * center.z) >> SLIP_Q14_FRACTION_BITS);
 	leftDistance += (uint32_t)radius;
 	if ((int32_t)leftDistance < 0)
 		return true;
-	uint32_t rightDistance = (uint32_t)((uint64_t)((int64_t)state->rightNormalX * center.x) >> 14);
-	rightDistance += (uint32_t)((uint64_t)((int64_t)state->rightNormalZ * center.z) >> 14);
+	uint32_t rightDistance = (uint32_t)((uint64_t)((int64_t)state->rightNormalX * center.x) >> SLIP_Q14_FRACTION_BITS);
+	rightDistance += (uint32_t)((uint64_t)((int64_t)state->rightNormalZ * center.z) >> SLIP_Q14_FRACTION_BITS);
 	rightDistance += (uint32_t)radius;
 	if ((int32_t)rightDistance < 0)
 		return true;
-	uint32_t bottomDistance = (uint32_t)((uint64_t)((int64_t)state->bottomNormalY * center.y) >> 14);
-	bottomDistance += (uint32_t)((uint64_t)((int64_t)state->bottomNormalZ * center.z) >> 14);
+	uint32_t bottomDistance =
+	    (uint32_t)((uint64_t)((int64_t)state->bottomNormalY * center.y) >> SLIP_Q14_FRACTION_BITS);
+	bottomDistance += (uint32_t)((uint64_t)((int64_t)state->bottomNormalZ * center.z) >> SLIP_Q14_FRACTION_BITS);
 	bottomDistance += (uint32_t)radius;
 	if ((int32_t)bottomDistance < 0)
 		return true;
-	uint32_t topDistance = (uint32_t)((uint64_t)((int64_t)state->topNormalY * center.y) >> 14);
-	topDistance += (uint32_t)((uint64_t)((int64_t)state->topNormalZ * center.z) >> 14);
+	uint32_t topDistance = (uint32_t)((uint64_t)((int64_t)state->topNormalY * center.y) >> SLIP_Q14_FRACTION_BITS);
+	topDistance += (uint32_t)((uint64_t)((int64_t)state->topNormalZ * center.z) >> SLIP_Q14_FRACTION_BITS);
 	topDistance += (uint32_t)radius;
 	if ((int32_t)topDistance < 0)
 		return true;
@@ -2393,10 +2451,10 @@ bool SlipDraw3D_SphereOutsideOrthographic(SlipDraw3DVec32 center, int32_t radius
 }
 
 static uint32_t SlipDraw3D_ClassifyProjectionBounds(SlipDraw3DVec32 point, const SlipDraw3DProjectState *state) {
-	if (state->projectionMode == 0u) {
+	if (state->projectionMode == SLIP_DRAW3D_PROJECTION_PERSPECTIVE) {
 		return SlipDraw3D_ProjectMaskPerspective(point, state);
 	}
-	if (state->projectionMode == 1u) {
+	if (state->projectionMode == SLIP_DRAW3D_PROJECTION_ORTHOGRAPHIC) {
 		return SlipDraw3D_ProjectMaskOrthographic(point, state);
 	}
 	return UINT32_MAX;
@@ -2418,10 +2476,10 @@ int32_t SlipDraw3D_ClassifyPoints(const SlipDraw3DVec32 *const *points, uint16_t
 			return -1;
 		}
 		if (points[pointIndex]->z < (int32_t)SlipDraw3D_minimumDepth) {
-			depthClipMask |= 0x10u;
+			depthClipMask |= SLIP_BOX_CLIP_NEAR;
 		}
 		if (points[pointIndex]->z > (int32_t)SlipDraw3D_maximumDepth) {
-			depthClipMask |= 0x20u;
+			depthClipMask |= SLIP_BOX_CLIP_FAR;
 		}
 		allMasks &= depthClipMask;
 		anyMasks |= depthClipMask;
@@ -2514,8 +2572,8 @@ void SlipDraw3D_ProjectPerspective32Callback(SlipDraw3DVec32 world, int32_t *scr
 	int32_t projectedX;
 	int32_t projectedY;
 
-	projectedX = (int32_t)(((int64_t)world.x * 0x100) / world.z);
-	projectedY = (int32_t)(((int64_t)world.y * 0x100) / world.z);
+	projectedX = (int32_t)(((int64_t)world.x * SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH) / world.z);
+	projectedY = (int32_t)(((int64_t)world.y * SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH) / world.z);
 	*screenX = (int32_t)((uint32_t)projectedX + (uint32_t)state->centerX);
 	*screenY = (int32_t)((uint32_t)(-projectedY) + (uint32_t)state->centerY);
 }
@@ -2528,15 +2586,15 @@ void SlipDraw3D_ProjectPerspective16Callback(SlipDraw3DVec32 world, int32_t *scr
 	int16_t divisor;
 	int32_t dividend;
 
-	if (world.z > 0x7fff) {
+	if (world.z > INT16_MAX) {
 		SlipDraw3D_ProjectPerspective32Callback(world, screenX, screenY, userData);
 		return;
 	}
 
 	divisor = (int16_t)world.z;
-	dividend = (int32_t)((uint32_t)world.x << 8);
+	dividend = (int32_t)((uint32_t)world.x << SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH_SHIFT);
 	projectedX = (int16_t)(dividend / divisor);
-	dividend = (int32_t)((uint32_t)world.y << 8);
+	dividend = (int32_t)((uint32_t)world.y << SLIP_DRAW3D_DEFAULT_FOCAL_LENGTH_SHIFT);
 	projectedY = (int16_t)(dividend / divisor);
 	*screenX = (int32_t)((uint32_t)(int32_t)projectedX + (uint32_t)state->centerX);
 	*screenY = (int32_t)((uint32_t)(-(int32_t)projectedY) + (uint32_t)state->centerY);
@@ -2560,7 +2618,8 @@ int SlipDraw3D_PrepareFlatDispatch(const SlipDraw3DDrawRecord *drawRecords, uint
 	}
 
 	memset(result, 0, sizeof(*result));
-	if (drawMode != 0 && drawMode != 2 && drawMode != 4) {
+	if (drawMode != SLIP_POLYGON_DRAW_FLAT && drawMode != SLIP_POLYGON_DRAW_LINE &&
+	    drawMode != SLIP_POLYGON_DRAW_DITHERED) {
 		result->kind = SLIP_DRAW3D_DISPATCH_UNSUPPORTED;
 		return 1;
 	}
@@ -2575,11 +2634,11 @@ int SlipDraw3D_PrepareFlatDispatch(const SlipDraw3DDrawRecord *drawRecords, uint
 		result->kind = SLIP_DRAW3D_DISPATCH_WIREFRAME;
 		return 1;
 	}
-	if (drawMode == 2) {
+	if (drawMode == SLIP_POLYGON_DRAW_LINE) {
 		result->kind = drawRecordCount == 2 ? SLIP_DRAW3D_DISPATCH_SOLID_LINE : SLIP_DRAW3D_DISPATCH_UNSUPPORTED;
-	} else if (drawMode == 4) {
+	} else if (drawMode == SLIP_POLYGON_DRAW_DITHERED) {
 		result->kind = SLIP_DRAW3D_DISPATCH_DITHERED_FLAT_POLYGON;
-	} else if (drawRecordCount == 4 && SlipDraw3D_IsAxisRect(points)) {
+	} else if (drawRecordCount == SLIP_POLYGON_RECTANGLE_VERTICES && SlipDraw3D_IsAxisRect(points)) {
 		result->kind = SLIP_DRAW3D_DISPATCH_SOLID_RECT;
 	} else {
 		result->kind = SLIP_DRAW3D_DISPATCH_SOLID_FLAT_POLYGON;
@@ -2601,7 +2660,7 @@ int SlipDraw3D_RasterizeFlatDispatch(uint8_t color, uint8_t ditherBits, const Sl
 		int32_t minY = points[0].y;
 		int32_t maxY = points[0].y;
 
-		if (dispatch->pointCount != 4) {
+		if (dispatch->pointCount != SLIP_POLYGON_RECTANGLE_VERTICES) {
 			return 0;
 		}
 		for (i = 1; i < dispatch->pointCount; ++i) {
@@ -2701,19 +2760,22 @@ int SlipDraw3D_RasterizeFlatRing(const SlipDraw3DRecordPool *pool, uint32_t inpu
 		if (drawMode == SLIP_POLYGON_DRAW_SHADED ||
 		    ((drawMode == SLIP_POLYGON_DRAW_FLAT || drawMode == SLIP_POLYGON_DRAW_DITHERED) &&
 		     (renderFlags & SLIP_RENDER_WIREFRAME) == 0)) {
-			uint8_t *const destination = boundPointBuffer + (size_t)pointCount * 0x20u;
+			uint8_t *const destination = boundPointBuffer + (size_t)pointCount * sizeof(RasterTexturedPoint);
 			SlipDraw3D_WriteLE32(destination, SlipBytes_ReadLE32(rasterPoint));
-			SlipDraw3D_WriteLE32(destination + 4, SlipBytes_ReadLE32(rasterPoint + 4));
+			SlipDraw3D_WriteLE32(destination + offsetof(RasterPoint, y),
+			                     SlipBytes_ReadLE32(rasterPoint + offsetof(RasterPoint, y)));
 			if (drawMode == SLIP_POLYGON_DRAW_SHADED)
-				SlipDraw3D_WriteLE32(destination + 8, SlipBytes_ReadLE16(record + 0x20u));
+				SlipDraw3D_WriteLE32(destination + offsetof(RasterShadedPoint, shade),
+				                     SlipBytes_ReadLE16(record + offsetof(SlipDraw3DDrawRecord, shade)));
 			rasterPoint = destination;
 		}
 		points[pointCount].x = SlipBytes_ReadLEI32(rasterPoint);
-		points[pointCount].y = SlipBytes_ReadLEI32(rasterPoint + 4u);
+		points[pointCount].y = SlipBytes_ReadLEI32(rasterPoint + offsetof(RasterPoint, y));
 		shadedPoints[pointCount].x = points[pointCount].x;
 		shadedPoints[pointCount].y = points[pointCount].y;
-		shadedPoints[pointCount].shade = drawMode == SLIP_POLYGON_DRAW_SHADED ? SlipBytes_ReadLE16(rasterPoint + 8u)
-		                                                                      : SlipBytes_ReadLE16(record + 0x20u);
+		shadedPoints[pointCount].shade = drawMode == SLIP_POLYGON_DRAW_SHADED
+		                                     ? SlipBytes_ReadLE16(rasterPoint + offsetof(RasterShadedPoint, shade))
+		                                     : SlipBytes_ReadLE16(record + offsetof(SlipDraw3DDrawRecord, shade));
 		if (pointCount == 0u) {
 			firstShade = (uint8_t)(shadedPoints[pointCount].shade >> 8);
 		} else if ((uint8_t)(shadedPoints[pointCount].shade >> 8) != firstShade) {
@@ -2727,12 +2789,13 @@ int SlipDraw3D_RasterizeFlatRing(const SlipDraw3DRecordPool *pool, uint32_t inpu
 	result->dispatch.pointCount = pointCount;
 	result->returned = true;
 
-	if (drawMode != 0u && drawMode != 1u && drawMode != 2u && drawMode != 4u) {
+	if (drawMode != SLIP_POLYGON_DRAW_FLAT && drawMode != SLIP_POLYGON_DRAW_SHADED &&
+	    drawMode != SLIP_POLYGON_DRAW_LINE && drawMode != SLIP_POLYGON_DRAW_DITHERED) {
 		result->dispatch.kind = SLIP_DRAW3D_DISPATCH_UNSUPPORTED;
 		return 1;
 	}
 
-	if (drawMode == 1u) {
+	if (drawMode == SLIP_POLYGON_DRAW_SHADED) {
 		result->dispatch.kind = SLIP_DRAW3D_DISPATCH_SHADED_FLAT_POLYGON;
 		if (shadesDiffer) {
 			Raster_DrawShadedFlatPolygon(shadedPoints, pointCount);
@@ -2746,11 +2809,11 @@ int SlipDraw3D_RasterizeFlatRing(const SlipDraw3DRecordPool *pool, uint32_t inpu
 		result->dispatch.kind = SLIP_DRAW3D_DISPATCH_WIREFRAME;
 		return 1;
 	}
-	if (drawMode == 2u) {
+	if (drawMode == SLIP_POLYGON_DRAW_LINE) {
 		result->dispatch.kind = pointCount == 2u ? SLIP_DRAW3D_DISPATCH_SOLID_LINE : SLIP_DRAW3D_DISPATCH_UNSUPPORTED;
-	} else if (drawMode == 4u) {
+	} else if (drawMode == SLIP_POLYGON_DRAW_DITHERED) {
 		result->dispatch.kind = SLIP_DRAW3D_DISPATCH_DITHERED_FLAT_POLYGON;
-	} else if (pointCount == 4u && SlipDraw3D_IsAxisRect(points)) {
+	} else if (pointCount == SLIP_POLYGON_RECTANGLE_VERTICES && SlipDraw3D_IsAxisRect(points)) {
 		result->dispatch.kind = SLIP_DRAW3D_DISPATCH_SOLID_RECT;
 	} else {
 		result->dispatch.kind = SLIP_DRAW3D_DISPATCH_SOLID_FLAT_POLYGON;
@@ -2782,10 +2845,10 @@ int SlipDraw3D_PrepareTexturedDispatch(const SlipDraw3DRecordPool *pool, uint32_
 	linkOffset = reverseTraversal == 0 ? SLIP_DRAW3D_RECORD_NEXT_OFFSET : SLIP_DRAW3D_RECORD_PREV_OFFSET;
 	result->linkOffset = linkOffset;
 	result->drawMode = drawMode;
-	result->lineBranch = drawMode == 2u;
-	result->flatBranch = drawMode == 0u;
-	result->ditheredBranch = drawMode == 4u;
-	result->shadedBranch = drawMode == 1u;
+	result->lineBranch = drawMode == SLIP_POLYGON_DRAW_LINE;
+	result->flatBranch = drawMode == SLIP_POLYGON_DRAW_FLAT;
+	result->ditheredBranch = drawMode == SLIP_POLYGON_DRAW_DITHERED;
+	result->shadedBranch = drawMode == SLIP_POLYGON_DRAW_SHADED;
 	result->branchDefaultTextured =
 	    !result->lineBranch && !result->flatBranch && !result->ditheredBranch && !result->shadedBranch;
 	if (!result->branchDefaultTextured) {
@@ -2829,7 +2892,7 @@ int SlipDraw3D_PrepareTexturedDispatch(const SlipDraw3DRecordPool *pool, uint32_
 		                                                       .pointCountAfterInc = (uint32_t)pointCount + 1u,
 		                                                       .loop = nextOffset != inputActiveHeadOffset};
 		++pointCount;
-		pointBufferOffset += 0x20u;
+		pointBufferOffset += sizeof(RasterTexturedPoint);
 		currentOffset = nextOffset;
 	} while (currentOffset != inputActiveHeadOffset);
 
@@ -2837,15 +2900,15 @@ int SlipDraw3D_PrepareTexturedDispatch(const SlipDraw3DRecordPool *pool, uint32_
 	result->pointBufferReset = pointBufferBase;
 	result->renderFlags = renderFlags;
 	result->pointCount = pointCount;
-	if ((renderFlags & 0x20u) != 0u) {
-		if ((renderFlags & 0x10u) != 0u) {
+	if ((renderFlags & SLIP_RENDER_ALTERNATE_TEXTURE_RASTER) != 0u) {
+		if ((renderFlags & SLIP_RENDER_MASKED_TEXTURE) != 0u) {
 			result->rasterizerCall = SLIP_DRAW3D_TEXTURED_DISPATCH_OPAQUE_AFFINE;
 			result->calledOpaqueAffineRasterizer = true;
 		} else {
 			result->rasterizerCall = SLIP_DRAW3D_TEXTURED_DISPATCH_TRANSPARENT_AFFINE;
 			result->calledTransparentAffineRasterizer = true;
 		}
-	} else if ((renderFlags & 0x10u) != 0u) {
+	} else if ((renderFlags & SLIP_RENDER_MASKED_TEXTURE) != 0u) {
 		result->rasterizerCall = SLIP_DRAW3D_TEXTURED_DISPATCH_OPAQUE_PERSPECTIVE;
 		result->calledOpaquePerspectiveRasterizer = true;
 	} else {
@@ -3097,7 +3160,7 @@ int SlipDraw3D_MaterialGate(const uint8_t *materialTable, size_t materialTableBy
 	bool flagsBlockedIndexedPath;
 	bool hasIndexedVertices;
 
-	if (materialTable == NULL || result == NULL || materialTableBytes < 4u) {
+	if (materialTable == NULL || result == NULL || materialTableBytes < offsetof(SlipDraw3DMaterialTable, records)) {
 		return 0;
 	}
 
@@ -3105,21 +3168,23 @@ int SlipDraw3D_MaterialGate(const uint8_t *materialTable, size_t materialTableBy
 	materialCount = SlipBytes_ReadLE16(materialTable);
 	result->materialCount = materialCount;
 	if (materialIndex < materialCount) {
-		const uint32_t materialRecordByteOffset = (uint16_t)(0x54u * materialIndex);
+		const uint32_t materialRecordByteOffset = (uint16_t)(SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE * materialIndex);
 
-		materialRecordOffset = (size_t)materialRecordByteOffset + 4u;
+		materialRecordOffset = (size_t)materialRecordByteOffset + offsetof(SlipDraw3DMaterialTable, records);
 		result->selectedIndexedMaterial = true;
 		result->materialRecordOffset = materialRecordByteOffset;
 	} else {
-		materialRecordOffset = 4u;
+		materialRecordOffset = offsetof(SlipDraw3DMaterialTable, records);
 	}
-	if (materialRecordOffset > materialTableBytes || materialTableBytes - materialRecordOffset < 0x34u) {
+	if (materialRecordOffset > materialTableBytes ||
+	    materialTableBytes - materialRecordOffset <
+	        offsetof(SlipDraw3DMaterialRecord, vertexShading) + sizeof(uint32_t)) {
 		return 0;
 	}
 	materialRecord = materialTable + materialRecordOffset;
 	result->materialRecord = materialRecord;
 
-	rejectWord = SlipBytes_ReadLE16(materialRecord + 0x1au);
+	rejectWord = SlipBytes_ReadLE16(materialRecord + offsetof(SlipDraw3DMaterialRecord, skipFlatPolygon));
 	result->rejectWord = rejectWord;
 	if (rejectWord != 0) {
 		result->setRejectCarry = true;
@@ -3128,28 +3193,28 @@ int SlipDraw3D_MaterialGate(const uint8_t *materialTable, size_t materialTableBy
 	}
 
 	result->storedMaterialRecord = materialRecord;
-	vertexShading = SlipBytes_ReadLE32(materialRecord + 0x30u);
+	vertexShading = SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, vertexShading));
 	result->vertexShading = vertexShading;
 	result->flags = flags;
 	flagsBlockedIndexedPath = (flags & SLIP_RENDER_DISABLE_VERTEX_SHADING) != 0;
 	result->flagsBlockedIndexedPath = flagsBlockedIndexedPath;
 	result->countAndFlags = countAndFlags;
-	hasIndexedVertices = (countAndFlags & 0x4000u) != 0;
+	hasIndexedVertices = (countAndFlags & SLIP_PRIMITIVE_VERTEX_NORMALS) != 0;
 	result->hasIndexedShadingFlag = hasIndexedVertices;
 	if (vertexShading == 0 || flagsBlockedIndexedPath || !hasIndexedVertices) {
 		result->branch = SLIP_DRAW3D_MATERIAL_GATE_BRANCH_REGULAR;
 		return 1;
 	}
 
-	result->maskedVertexCount = countAndFlags & 0x3fffu;
-	materialRecordOffset = (size_t)result->maskedVertexCount << 1;
+	result->maskedVertexCount = countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
+	materialRecordOffset = (size_t)result->maskedVertexCount * SLIP_SERIALIZED_INDEX_BYTES;
 	if (indexedRecordBase == NULL || materialRecordOffset > indexedRecordBytes) {
 		return 0;
 	}
 	result->indexedRecordPointer = indexedRecordBase + materialRecordOffset;
 	result->indexedRecordIndex = (uint16_t)result->maskedVertexCount;
-	result->mode = 4u;
-	result->drawMode = 1u;
+	result->mode = SLIP_INTERPOLATE_SHADE;
+	result->drawMode = SLIP_POLYGON_DRAW_SHADED;
 	result->branch = SLIP_DRAW3D_MATERIAL_GATE_BRANCH_INDEXED;
 	return 1;
 }
@@ -3169,24 +3234,25 @@ int SlipDraw3D_LoadMaterialFrameSlots(uint8_t *materialTable, size_t materialTab
 		result->nullTable = true;
 		return 1;
 	}
-	if (materialTableBytes < 4u || findNameRecord == NULL) {
+	if (materialTableBytes < offsetof(SlipDraw3DMaterialTable, records) || findNameRecord == NULL) {
 		return 0;
 	}
 	SlipDraw3DMaterialTable *const materials = (void *)materialTable;
 	materialCount = materials->count;
 	result->materialTableCount = materialCount;
-	if (materialCount > (materialTableBytes - 4u) / SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE) {
+	if (materialCount >
+	    (materialTableBytes - offsetof(SlipDraw3DMaterialTable, records)) / SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE) {
 		return 0;
 	}
 
 	for (materialIndex = 0; materialIndex < materialCount; ++materialIndex) {
 		SlipDraw3DMaterialRecord *const material = &materials->records[materialIndex];
-		char textureName[13];
+		char textureName[SLIP_MAT_TEXTURE_NAME_BYTES + 1];
 		size_t nameCursor;
 		size_t starOffset;
 		bool foundStar = false;
 
-		for (unsigned frame = 0; frame < 4; ++frame)
+		for (unsigned frame = 0; frame < SLIP_DRAW3D_MATERIAL_FRAME_COUNT; ++frame)
 			material->textureHandles[frame] = 0;
 		++result->recordsVisited;
 		if (material->textureName[0] == 0) {
@@ -3216,7 +3282,7 @@ int SlipDraw3D_LoadMaterialFrameSlots(uint8_t *materialTable, size_t materialTab
 				size_t slot;
 
 				++result->resourceHits;
-				for (slot = 0; slot < 4u; ++slot) {
+				for (slot = 0; slot < SLIP_DRAW3D_MATERIAL_FRAME_COUNT; ++slot) {
 					material->textureHandles[slot] = resourceHandle;
 					++result->slotWrites;
 				}
@@ -3229,7 +3295,7 @@ int SlipDraw3D_LoadMaterialFrameSlots(uint8_t *materialTable, size_t materialTab
 			continue;
 		}
 
-		for (uint32_t digitIndex = 0; digitIndex < 4u; ++digitIndex) {
+		for (uint32_t digitIndex = 0; digitIndex < SLIP_DRAW3D_MATERIAL_FRAME_COUNT; ++digitIndex) {
 			uint32_t resourceHandle = 0;
 
 			textureName[starOffset] = (char)('0' + digitIndex);
@@ -3238,23 +3304,23 @@ int SlipDraw3D_LoadMaterialFrameSlots(uint8_t *materialTable, size_t materialTab
 				continue;
 			}
 			++result->resourceHits;
-			for (uint32_t slot = digitIndex; slot < 4u; ++slot) {
+			for (uint32_t slot = digitIndex; slot < SLIP_DRAW3D_MATERIAL_FRAME_COUNT; ++slot) {
 				material->textureHandles[slot] = resourceHandle;
 				++result->slotWrites;
 			}
 		}
 
-		for (size_t i = 0; i < 4u; ++i) {
+		for (size_t i = 0; i < SLIP_MAT_TEXTURE_SUFFIX_BYTES; ++i) {
 			textureName[starOffset + i] = textureName[starOffset + i + 1u];
 		}
-		textureName[starOffset + 4u] = '\0';
+		textureName[starOffset + SLIP_MAT_TEXTURE_SUFFIX_BYTES] = '\0';
 		{
 			uint32_t resourceHandle = 0;
 
 			++result->resourceLookups;
 			if (findNameRecord(findNameRecordUser, textureName, &resourceHandle)) {
 				++result->resourceHits;
-				for (size_t slot = 0; slot < 4u; ++slot) {
+				for (size_t slot = 0; slot < SLIP_DRAW3D_MATERIAL_FRAME_COUNT; ++slot) {
 					uint32_t *const slotHandle = &material->textureHandles[slot];
 
 					if (*slotHandle != 0) {
@@ -3287,30 +3353,33 @@ int SlipDraw3D_TexturedEmitGate(const uint8_t *materialTable, size_t materialTab
 	result->normalY = normalY;
 	result->normalZ = normalZ;
 	result->flagsBlockTexturedBranch = (renderFlags & SLIP_RENDER_SOLID_TEXTURE_FALLBACK) != 0;
-	result->lacksTextureFlag = (countAndFlags & 0x8000u) == 0;
+	result->lacksTextureFlag = (countAndFlags & SLIP_PRIMITIVE_TEXTURE_COORDINATES) == 0;
 	if (result->flagsBlockTexturedBranch || result->lacksTextureFlag) {
 		result->fallback = true;
 		return 1;
 	}
-	if (materialTable == NULL || materialTableBytes < 4u) {
+	if (materialTable == NULL || materialTableBytes < offsetof(SlipDraw3DMaterialTable, records)) {
 		return 0;
 	}
 	materialCount = SlipBytes_ReadLE16(materialTable);
 	result->materialCount = materialCount;
 	if (materialIndex < materialCount) {
-		const uint32_t materialRecordByteOffset = (uint16_t)(0x54u * materialIndex);
+		const uint32_t materialRecordByteOffset = (uint16_t)(SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE * materialIndex);
 
-		materialRecordOffset = (size_t)materialRecordByteOffset + 4u;
+		materialRecordOffset = (size_t)materialRecordByteOffset + offsetof(SlipDraw3DMaterialTable, records);
 		result->selectedIndexedMaterial = true;
 		result->materialRecordOffset = materialRecordByteOffset;
 	} else {
-		materialRecordOffset = 4u;
+		materialRecordOffset = offsetof(SlipDraw3DMaterialTable, records);
 	}
 	result->frameIndex = frameIndex;
-	frameSlotOffset = materialRecordOffset + 0x40u + frameIndex * 4u;
+	frameSlotOffset = materialRecordOffset + offsetof(SlipDraw3DMaterialRecord, textureHandles) +
+	                  frameIndex * SLIP_DRAW3D_TEXTURE_HANDLE_BYTES;
 	result->frameSlotOffset = (uint32_t)frameSlotOffset;
-	if (frameSlotOffset > materialTableBytes || materialTableBytes - frameSlotOffset < 4u ||
-	    materialRecordOffset > materialTableBytes || materialTableBytes - materialRecordOffset < 0x1au) {
+	if (frameSlotOffset > materialTableBytes || materialTableBytes - frameSlotOffset < sizeof(uint32_t) ||
+	    materialRecordOffset > materialTableBytes ||
+	    materialTableBytes - materialRecordOffset <
+	        offsetof(SlipDraw3DMaterialRecord, textureTransparency) + sizeof(int16_t)) {
 		return 0;
 	}
 	result->textureHandle = SlipBytes_ReadLE32(materialTable + frameSlotOffset);
@@ -3323,7 +3392,7 @@ int SlipDraw3D_TexturedEmitGate(const uint8_t *materialTable, size_t materialTab
 	}
 	result->calledBuildTexturedRing = true;
 	result->renderFlagsAfter = renderFlags;
-	if ((result->renderFlagsAfter & 0x20u) == 0u) {
+	if ((result->renderFlagsAfter & SLIP_RENDER_ALTERNATE_TEXTURE_RASTER) == 0u) {
 		uint16_t roundedNormalDepthX;
 		uint16_t roundedNormalDepthXY;
 
@@ -3338,16 +3407,17 @@ int SlipDraw3D_TexturedEmitGate(const uint8_t *materialTable, size_t materialTab
 		    normalZ, (uint16_t)drawStateRecord->matrix.m[8], &result->normalDepthZRoundingCarry);
 		result->normalDepth =
 		    (uint16_t)(result->normalDepthZ + roundedNormalDepthXY + (result->normalDepthZRoundingCarry ? 1u : 0u));
-		if ((int16_t)result->normalDepth <= (int16_t)0xc004u) {
-			result->renderFlagsAfter |= 0x20u;
+		if ((int16_t)result->normalDepth <= SLIP_TEXTURE_AFFINE_FACING_THRESHOLD) {
+			result->renderFlagsAfter |= SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
 		}
 	}
-	result->transparentWord = SlipBytes_ReadLE16(materialTable + materialRecordOffset + 0x18u);
+	result->transparentWord = SlipBytes_ReadLE16(materialTable + materialRecordOffset +
+	                                             offsetof(SlipDraw3DMaterialRecord, textureTransparency));
 	result->renderFlagsForDispatch = result->renderFlagsAfter;
-	if ((result->renderFlagsForDispatch & 0x10u) == 0u) {
-		result->renderFlagsForDispatch &= ~0x10u;
+	if ((result->renderFlagsForDispatch & SLIP_RENDER_MASKED_TEXTURE) == 0u) {
+		result->renderFlagsForDispatch &= ~SLIP_RENDER_MASKED_TEXTURE;
 		if (result->transparentWord == 0u) {
-			result->renderFlagsForDispatch |= 0x10u;
+			result->renderFlagsForDispatch |= SLIP_RENDER_MASKED_TEXTURE;
 		}
 	}
 	result->storedMaterialRecord = materialTable + materialRecordOffset;
@@ -3375,7 +3445,7 @@ int SlipDraw3D_GetMaterialNumber(const uint8_t *materialTable, size_t materialTa
 		result->carryOut = true;
 		return 1;
 	}
-	if (materialTable == NULL || materialTableBytes < 4u) {
+	if (materialTable == NULL || materialTableBytes < offsetof(SlipDraw3DMaterialTable, records)) {
 		return 0;
 	}
 
@@ -3415,7 +3485,8 @@ int SlipDraw3D_GetMaterialNumber(const uint8_t *materialTable, size_t materialTa
 
 	materialIndex = 0;
 	while (loopCount != 0) {
-		const size_t materialRecordOffset = 4u + (size_t)materialIndex * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
+		const size_t materialRecordOffset = offsetof(SlipDraw3DMaterialTable, records) +
+		                                    (size_t)materialIndex * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
 
 		if (materialRecordOffset > materialTableBytes ||
 		    materialTableBytes - materialRecordOffset < SLIP_DRAW3D_MATERIAL_KEY_BYTES) {
@@ -3441,12 +3512,13 @@ int SlipDraw3D_GetMaterialNumber(const uint8_t *materialTable, size_t materialTa
 }
 
 const uint8_t *SlipDraw3D_GetMaterialName(const uint8_t *table, size_t tableBytes, uint16_t materialHandle) {
-	const uint16_t index = materialHandle & 0x7fffu;
+	const uint16_t index = materialHandle & SLIP_DRAW3D_MATERIAL_INDEX_MASK;
 	size_t offset;
-	if (table == NULL || tableBytes < 4u)
+	if (table == NULL || tableBytes < offsetof(SlipDraw3DMaterialTable, records))
 		return NULL;
-	offset = 4u + (index < SlipBytes_ReadLE16(table) ? (uint16_t)(index * 0x54u) : 0u);
-	if (offset > tableBytes || tableBytes - offset < 4u)
+	offset = offsetof(SlipDraw3DMaterialTable, records) +
+	         (index < SlipBytes_ReadLE16(table) ? (uint16_t)(index * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE) : 0u);
+	if (offset > tableBytes || tableBytes - offset < sizeof(uint32_t))
 		return NULL;
 	return table + offset;
 }
@@ -3456,20 +3528,22 @@ bool SlipDraw3D_GetMaterialValues(const uint8_t *materialTable, size_t materialT
 	size_t recordOffset;
 	uint16_t materialCount;
 
-	if (materialTable == NULL || materialTableBytes < 4u || materialColor == NULL || materialControl == NULL) {
+	if (materialTable == NULL || materialTableBytes < offsetof(SlipDraw3DMaterialTable, records) ||
+	    materialColor == NULL || materialControl == NULL) {
 		return false;
 	}
-	materialIndex &= 0x7fffu;
+	materialIndex &= SLIP_DRAW3D_MATERIAL_INDEX_MASK;
 	materialCount = SlipBytes_ReadLE16(materialTable);
-	recordOffset = 4u;
+	recordOffset = offsetof(SlipDraw3DMaterialTable, records);
 	if (materialIndex < materialCount) {
-		recordOffset += (uint16_t)((uint16_t)0x0054u * materialIndex);
+		recordOffset += (uint16_t)(SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE * materialIndex);
 	}
-	if (recordOffset > materialTableBytes || materialTableBytes - recordOffset < 0x18u) {
+	if (recordOffset > materialTableBytes ||
+	    materialTableBytes - recordOffset < offsetof(SlipDraw3DMaterialRecord, rampEnd) + sizeof(uint32_t)) {
 		return false;
 	}
-	*materialColor = SlipBytes_ReadLE32(materialTable + recordOffset + 0x10u);
-	*materialControl = SlipBytes_ReadLE32(materialTable + recordOffset + 0x14u);
+	*materialColor = SlipBytes_ReadLE32(materialTable + recordOffset + offsetof(SlipDraw3DMaterialRecord, rampStart));
+	*materialControl = SlipBytes_ReadLE32(materialTable + recordOffset + offsetof(SlipDraw3DMaterialRecord, rampEnd));
 	return true;
 }
 
@@ -3509,12 +3583,14 @@ int SlipDraw3D_CopyIndexedRecord(SlipDraw3DDrawRecord *drawRecord, const uint8_t
 	const uint8_t *vertexRecord;
 
 	if (drawRecord == NULL || vertexRecordBase == NULL || indexStream == NULL || result == NULL ||
-	    (size_t)indexStreamOffset > indexStreamBytes || indexStreamBytes - (size_t)indexStreamOffset < 2u) {
+	    (size_t)indexStreamOffset > indexStreamBytes ||
+	    indexStreamBytes - (size_t)indexStreamOffset < SLIP_SERIALIZED_INDEX_BYTES) {
 		return 0;
 	}
 	indexWord = SlipBytes_ReadLE16(indexStream + indexStreamOffset);
-	vertexRecordOffset = (uint32_t)indexWord << 6;
-	if ((size_t)vertexRecordOffset > vertexRecordBytes || vertexRecordBytes - (size_t)vertexRecordOffset < 7u * 4u) {
+	vertexRecordOffset = (uint32_t)indexWord * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	if ((size_t)vertexRecordOffset > vertexRecordBytes ||
+	    vertexRecordBytes - (size_t)vertexRecordOffset < SLIP_DRAW3D_VERTEX_DRAW_PREFIX_BYTES) {
 		return 0;
 	}
 
@@ -3531,7 +3607,7 @@ int SlipDraw3D_CopyIndexedRecord(SlipDraw3DDrawRecord *drawRecord, const uint8_t
 	                                        .vertexRecordPointer = vertexRecord,
 	                                        .callProjectVertex = true,
 	                                        .flagsFromProjectVertex = projectedVertexFlags,
-	                                        .copiedDwords = 7u,
+	                                        .copiedDwords = SLIP_DRAW3D_VERTEX_DRAW_PREFIX_DWORDS,
 	                                        .allClipFlagsAfter = allClipFlagsIn & projectedVertexFlags,
 	                                        .anyClipFlagsAfter = anyClipFlagsIn | projectedVertexFlags};
 	return 1;
@@ -3558,18 +3634,20 @@ int SlipDraw3D_CopySolidRecord(SlipDraw3DDrawRecord *drawRecord, const uint8_t *
 	unsigned i;
 
 	if (drawRecord == NULL || vertexRecordBase == NULL || indexStream == NULL || result == NULL ||
-	    (size_t)indexStreamOffset > indexStreamBytes || indexStreamBytes - (size_t)indexStreamOffset < 2u ||
-	    remainingVertices == 0) {
+	    (size_t)indexStreamOffset > indexStreamBytes ||
+	    indexStreamBytes - (size_t)indexStreamOffset < SLIP_SERIALIZED_INDEX_BYTES || remainingVertices == 0) {
 		return 0;
 	}
 	indexWord = SlipBytes_ReadLE16(indexStream + indexStreamOffset);
-	vertexRecordOffset = (uint32_t)indexWord << 6;
-	if ((size_t)vertexRecordOffset > vertexRecordBytes || vertexRecordBytes - (size_t)vertexRecordOffset < 7u * 4u) {
+	vertexRecordOffset = (uint32_t)indexWord * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	if ((size_t)vertexRecordOffset > vertexRecordBytes ||
+	    vertexRecordBytes - (size_t)vertexRecordOffset < SLIP_DRAW3D_VERTEX_DRAW_PREFIX_BYTES) {
 		return 0;
 	}
 	vertexRecord = vertexRecordBase + vertexRecordOffset;
-	for (i = 0; i < 7u; ++i) {
-		SlipDraw3D_WriteLE32(drawRecord->bytes + i * 4u, SlipBytes_ReadLE32(vertexRecord + i * 4u));
+	for (i = 0; i < SLIP_DRAW3D_VERTEX_DRAW_PREFIX_DWORDS; ++i) {
+		SlipDraw3D_WriteLE32(drawRecord->bytes + i * sizeof(uint32_t),
+		                     SlipBytes_ReadLE32(vertexRecord + i * sizeof(uint32_t)));
 	}
 	loopCountAfterDec = remainingVertices - 1u;
 	*result = (SlipDraw3DSolidRecordCopy){.loopCountEntry = remainingVertices,
@@ -3578,7 +3656,7 @@ int SlipDraw3D_CopySolidRecord(SlipDraw3DDrawRecord *drawRecord, const uint8_t *
 	                                      .vertexRecordPointer = vertexRecord,
 	                                      .callProjectVertex = true,
 	                                      .flagsFromProjectVertex = projectedVertexFlags,
-	                                      .copiedDwords = 7u,
+	                                      .copiedDwords = SLIP_DRAW3D_VERTEX_DRAW_PREFIX_DWORDS,
 	                                      .allClipFlagsAfter = allClipFlagsIn & projectedVertexFlags,
 	                                      .anyClipFlagsAfter = anyClipFlagsIn | projectedVertexFlags,
 	                                      .loopCountAfterDec = loopCountAfterDec,
@@ -3598,14 +3676,15 @@ int SlipDraw3D_StoreMaterialBytes(SlipDraw3DDrawRecord *drawRecord, const uint8_
 	uint8_t shadeLowByte;
 
 	if (drawRecord == NULL || materialInputStream == NULL || result == NULL ||
-	    (size_t)materialInputOffset > materialInputBytes || materialInputBytes - (size_t)materialInputOffset < 6u) {
+	    (size_t)materialInputOffset > materialInputBytes ||
+	    materialInputBytes - (size_t)materialInputOffset < SLIP_SERIALIZED_NORMAL_BYTES) {
 		return 0;
 	}
 	materialInput = materialInputStream + materialInputOffset;
-	normalZ = SlipBytes_ReadLE16(materialInput + 4u);
-	normalY = SlipBytes_ReadLE16(materialInput + 2u);
-	normalX = SlipBytes_ReadLE16(materialInput);
-	shadeHighByte = (uint8_t)(returnedMaterialColor & 0xffu);
+	normalZ = SlipBytes_ReadLE16(materialInput + SLIP_SERIALIZED_NORMAL_Z_OFFSET);
+	normalY = SlipBytes_ReadLE16(materialInput + SLIP_SERIALIZED_NORMAL_Y_OFFSET);
+	normalX = SlipBytes_ReadLE16(materialInput + SLIP_SERIALIZED_NORMAL_X_OFFSET);
+	shadeHighByte = (uint8_t)(returnedMaterialColor & UINT8_MAX);
 	shadeLowByte = (uint8_t)(returnedMaterialColor >> 8);
 	drawRecord->shade = (uint16_t)(((uint16_t)shadeHighByte << 8) | shadeLowByte);
 	*result = (SlipDraw3DMaterialBytes){.materialInputPointer = materialInput,
@@ -3626,17 +3705,18 @@ int SlipDraw3D_RegularSetup(const uint8_t *materialRecord, size_t materialRecord
 	uint32_t materialDitherBits;
 	uint32_t maskedIndex;
 
-	if (materialRecord == NULL || result == NULL || materialRecordBytes < 0x30u) {
+	if (materialRecord == NULL || result == NULL ||
+	    materialRecordBytes < offsetof(SlipDraw3DMaterialRecord, ditherBits) + sizeof(uint32_t)) {
 		return 0;
 	}
-	drawMode = 0;
-	materialDitherBits = SlipBytes_ReadLE32(materialRecord + 0x2cu);
+	drawMode = SLIP_POLYGON_DRAW_FLAT;
+	materialDitherBits = SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, ditherBits));
 	if (materialDitherBits != 0u) {
-		drawMode = 4;
+		drawMode = SLIP_POLYGON_DRAW_DITHERED;
 	}
-	maskedIndex = ((uint32_t)(uint16_t)countAndFlags) & 0x3fffu;
+	maskedIndex = countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
 	*result = (SlipDraw3DRegularSetup){.materialRecord = materialRecord,
-	                                   .drawModeInitial = 0,
+	                                   .drawModeInitial = SLIP_POLYGON_DRAW_FLAT,
 	                                   .materialDitherBits = materialDitherBits,
 	                                   .flatBranch = materialDitherBits == 0u,
 	                                   .drawMode = drawMode,
@@ -3685,7 +3765,7 @@ int SlipDraw3D_AppendSolidRecord(uint8_t *drawRecordPool, size_t recordBytes, ui
 	                                        .appendedRecordOffset = appendedRecordOffset,
 	                                        .previousNextAfter = appendedRecordOffset,
 	                                        .appendedPrevAfter = previousRecordOffset,
-	                                        .indexStreamOffsetAfter = indexStreamOffset + 2u,
+	                                        .indexStreamOffsetAfter = indexStreamOffset + SLIP_SERIALIZED_INDEX_BYTES,
 	                                        .jumpToLoop = true};
 	return 1;
 }
@@ -3711,8 +3791,8 @@ int SlipDraw3D_AppendRecord(uint8_t *drawRecordPool, size_t recordBytes, uint32_
 	                                   .appendedRecordOffset = appendedRecordOffset,
 	                                   .previousNextAfter = appendedRecordOffset,
 	                                   .appendedPrevAfter = previousRecordOffset,
-	                                   .indexStreamOffsetAfter = indexStreamOffset + 2u,
-	                                   .materialInputOffsetAfter = materialInputOffset + 6u};
+	                                   .indexStreamOffsetAfter = indexStreamOffset + SLIP_SERIALIZED_INDEX_BYTES,
+	                                   .materialInputOffsetAfter = materialInputOffset + SLIP_SERIALIZED_NORMAL_BYTES};
 	return 1;
 }
 
@@ -3841,7 +3921,7 @@ int SlipDraw3D_PointPointerRing(SlipDraw3DRecordPool *pool, const uint8_t *point
 	}
 	pointCount = (uint32_t)countAndFlags;
 	if (pointCount == 0 || pointCount > flagCount || pointCount > visitCapacity ||
-	    pointPointerTableBytes < pointCount * 4u) {
+	    pointPointerTableBytes < pointCount * SLIP_DRAW3D_POINT_POINTER_BYTES) {
 		return 0;
 	}
 	recordPoolBytes = SlipDraw3D_RecordPoolBytes(pool);
@@ -3881,7 +3961,7 @@ int SlipDraw3D_PointPointerRing(SlipDraw3DRecordPool *pool, const uint8_t *point
 			appendedRecordOffset = appendPop.poppedRecordOffset;
 			SlipDraw3D_SetRecordNext(recordPoolBytes, currentRecordOffset, appendedRecordOffset);
 			SlipDraw3D_SetRecordPrev(recordPoolBytes, appendedRecordOffset, currentRecordOffset);
-			pointPointerTableOffsetAfter = pointPointerTableOffset + 4u;
+			pointPointerTableOffsetAfter = pointPointerTableOffset + SLIP_DRAW3D_POINT_POINTER_BYTES;
 		}
 		visit = visits + visitCount;
 		*visit = (SlipDraw3DPointPointerRingVisit){loopCount,
@@ -3981,7 +4061,8 @@ int SlipDraw3D_PointPointerRingWithScreenPointFlags(SlipDraw3DRecordPool *pool, 
 		return 0;
 	}
 	pointCount = (uint32_t)countAndFlags;
-	if (pointCount == 0 || pointCount > visitCapacity || pointPointerTableBytes < pointCount * 4u) {
+	if (pointCount == 0 || pointCount > visitCapacity ||
+	    pointPointerTableBytes < pointCount * SLIP_DRAW3D_POINT_POINTER_BYTES) {
 		return 0;
 	}
 	recordPoolBytes = SlipDraw3D_RecordPoolBytes(pool);
@@ -4018,11 +4099,12 @@ int SlipDraw3D_PointPointerRingWithScreenPointFlags(SlipDraw3DRecordPool *pool, 
 		}
 		pointPointerHostOffset = pointPointerToken - pointCoordinateBaseAddress;
 		if ((size_t)pointPointerHostOffset > pointCoordinateMemoryBytes ||
-		    pointCoordinateMemoryBytes - (size_t)pointPointerHostOffset < 4u) {
+		    pointCoordinateMemoryBytes - (size_t)pointPointerHostOffset < sizeof(SlipDraw3DScreenPoint16)) {
 			return 0;
 		}
 		pointScreenX = (int16_t)SlipBytes_ReadLE16(pointCoordinateMemory + pointPointerHostOffset);
-		pointScreenY = (int16_t)SlipBytes_ReadLE16(pointCoordinateMemory + pointPointerHostOffset + 2u);
+		pointScreenY = (int16_t)SlipBytes_ReadLE16(pointCoordinateMemory + pointPointerHostOffset +
+		                                           offsetof(SlipDraw3DScreenPoint16, y));
 		if (!SlipDraw3D_ScreenPointFlags(SlipDraw3D_RecordPoolDrawRecord(pool, currentRecordOffset), pointScreenX,
 		                                 pointScreenY, minX, maxX, minY, maxY, &screenPointFlags)) {
 			return 0;
@@ -4039,7 +4121,7 @@ int SlipDraw3D_PointPointerRingWithScreenPointFlags(SlipDraw3DRecordPool *pool, 
 			appendedRecordOffset = appendPop.poppedRecordOffset;
 			SlipDraw3D_SetRecordNext(recordPoolBytes, currentRecordOffset, appendedRecordOffset);
 			SlipDraw3D_SetRecordPrev(recordPoolBytes, appendedRecordOffset, currentRecordOffset);
-			pointPointerTableOffsetAfter = pointPointerTableOffset + 4u;
+			pointPointerTableOffsetAfter = pointPointerTableOffset + SLIP_DRAW3D_POINT_POINTER_BYTES;
 		}
 		visit = visits + visitCount;
 		*visit = (SlipDraw3DPointPointerRingVisit){loopCount,
@@ -4123,13 +4205,15 @@ int SlipDraw3D_PointPolygon(SlipDraw3DRecordPool *pool, const SlipDraw3DVec32 *c
                             SlipDraw3DPostPlaneClipRecordVisit *recordVisits, size_t recordCapacity,
                             SlipDraw3DPostPlaneClipPlaneVisit *planeVisits, size_t planeCapacity,
                             SlipDraw3DPointPolygon *result) {
-	if (pool == NULL || points == NULL || ((color & 0x8000u) != 0 && shades == NULL) || state == NULL ||
-	    result == NULL || count == 0)
+	if (pool == NULL || points == NULL || ((color & SLIP_POLYGON_COLOUR_VERTEX_SHADED) != 0 && shades == NULL) ||
+	    state == NULL || result == NULL || count == 0)
 		return 0;
-	*result = (SlipDraw3DPointPolygon){.mode = (color & 0x8000u) != 0 ? 4u : 0u,
-	                                   .drawMode = (color & 0x8000u) != 0 ? 1u : 0u,
-	                                   .color = color,
-	                                   .allFlags = SLIP_CLIP_ALL};
+	*result =
+	    (SlipDraw3DPointPolygon){.mode = (color & SLIP_POLYGON_COLOUR_VERTEX_SHADED) != 0 ? SLIP_INTERPOLATE_SHADE : 0,
+	                             .drawMode = (color & SLIP_POLYGON_COLOUR_VERTEX_SHADED) != 0 ? SLIP_POLYGON_DRAW_SHADED
+	                                                                                          : SLIP_POLYGON_DRAW_FLAT,
+	                             .color = color,
+	                             .allFlags = SLIP_CLIP_ALL};
 	SlipDraw3DLinkedDrawRecord *const freeHead = SlipDraw3D_RecordPoolLinkedRecord(pool, pool->freeHeadOffset);
 	if (freeHead == NULL)
 		return 0;
@@ -4156,8 +4240,8 @@ int SlipDraw3D_PointPolygon(SlipDraw3DRecordPool *pool, const SlipDraw3DVec32 *c
 		const uint32_t flags = SlipDraw3D_ProjectDrawRecordPoint(&current->drawRecord, *points[i], state);
 		result->allFlags &= flags;
 		result->anyFlags |= flags;
-		if ((color & 0x8000u) != 0)
-			current->drawRecord.shade = (uint16_t)((shades[i] & 0xffu) << 8);
+		if ((color & SLIP_POLYGON_COLOUR_VERTEX_SHADED) != 0)
+			current->drawRecord.shade = (uint16_t)((shades[i] & UINT8_MAX) << 8);
 		previous = current;
 		if (i + 1u < count)
 			currentOffset = freeHead->links.nextOffset;
@@ -4213,8 +4297,10 @@ int SlipDraw3D_SpritePolygon(SlipDraw3DRecordPool *pool, const SlipDraw3DVec32 *
                              SlipDraw3DSpritePolygon *result) {
 	if (pool == NULL || points == NULL || textureCoordinates == NULL || state == NULL || result == NULL || count == 0)
 		return 0;
-	*result =
-	    (SlipDraw3DSpritePolygon){.mode = 2, .drawMode = 3, .textureHandle = textureHandle, .allFlags = SLIP_CLIP_ALL};
+	*result = (SlipDraw3DSpritePolygon){.mode = SLIP_INTERPOLATE_TEXTURE,
+	                                    .drawMode = SLIP_POLYGON_DRAW_TEXTURED,
+	                                    .textureHandle = textureHandle,
+	                                    .allFlags = SLIP_CLIP_ALL};
 	SlipDraw3DLinkedDrawRecord *const freeHead = SlipDraw3D_RecordPoolLinkedRecord(pool, pool->freeHeadOffset);
 	if (freeHead == NULL)
 		return 0;
@@ -4375,8 +4461,8 @@ int SlipDraw3D_SpritePointTextureRing(SlipDraw3DRecordPool *pool, const SlipDraw
 			appendedRecordOffset = appendPop.poppedRecordOffset;
 			SlipDraw3D_SetRecordNext(recordPoolBytes, currentRecordOffset, appendedRecordOffset);
 			SlipDraw3D_SetRecordPrev(recordPoolBytes, appendedRecordOffset, currentRecordOffset);
-			pointPointerTableOffsetAfter = pointPointerTableOffset + 4u;
-			textureCoordOffsetAfter = textureCoordOffset + 4u;
+			pointPointerTableOffsetAfter = pointPointerTableOffset + SLIP_DRAW3D_POINT_POINTER_BYTES;
+			textureCoordOffsetAfter = textureCoordOffset + SLIP_SERIALIZED_TEXTURE_COORDINATE_BYTES;
 		}
 		visit = visits + visitCount;
 		*visit = (SlipDraw3DSpritePointTextureRingVisit){loopCount,
@@ -4408,8 +4494,8 @@ int SlipDraw3D_SpritePointTextureRing(SlipDraw3DRecordPool *pool, const SlipDraw
 
 	*result = (SlipDraw3DSpritePointTextureRing){countAndFlags,
 	                                             pointCount,
-	                                             2u,
-	                                             3u,
+	                                             SLIP_INTERPOLATE_TEXTURE,
+	                                             SLIP_POLYGON_DRAW_TEXTURED,
 	                                             textureHandle,
 	                                             firstPop,
 	                                             firstRecordOffset,
@@ -4463,7 +4549,7 @@ int SlipDraw3D_BuildActiveRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRecor
 
 	if (pool == NULL || vertexRecords == NULL || indexStream == NULL || state == NULL || transform == NULL ||
 	    projectPrimary == NULL || projectSecondary == NULL || visits == NULL || result == NULL || countAndFlags == 0 ||
-	    visitCapacity < countAndFlags || indexStreamBytes < (size_t)countAndFlags * 2u) {
+	    visitCapacity < countAndFlags || indexStreamBytes < (size_t)countAndFlags * SLIP_SERIALIZED_INDEX_BYTES) {
 		return 0;
 	}
 	recordPoolBytes = SlipDraw3D_RecordPoolBytes(pool);
@@ -4490,13 +4576,14 @@ int SlipDraw3D_BuildActiveRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRecor
 		size_t i;
 
 		if (visitCount >= visitCapacity || (size_t)indexStreamOffset > indexStreamBytes ||
-		    indexStreamBytes - (size_t)indexStreamOffset < 2u) {
+		    indexStreamBytes - (size_t)indexStreamOffset < SLIP_SERIALIZED_INDEX_BYTES) {
 			return 0;
 		}
 		indexWord = SlipBytes_ReadLE16(indexStream + indexStreamOffset);
-		vertexRecordOffset = (uint32_t)indexWord << 6;
+		vertexRecordOffset = (uint32_t)indexWord * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
 		if (indexWord >= vertexRecordCount || (size_t)vertexRecordOffset > vertexRecordCount * sizeof(*vertexRecords) ||
-		    vertexRecordCount * sizeof(*vertexRecords) - (size_t)vertexRecordOffset < 7u * 4u) {
+		    vertexRecordCount * sizeof(*vertexRecords) - (size_t)vertexRecordOffset <
+		        SLIP_DRAW3D_VERTEX_DRAW_PREFIX_BYTES) {
 			return 0;
 		}
 		flags = SlipDraw3D_ProjectVertex(&vertexRecords[indexWord], state, transform, projectPrimary, projectSecondary,
@@ -4505,9 +4592,9 @@ int SlipDraw3D_BuildActiveRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRecor
 		if (drawRecord == NULL) {
 			return 0;
 		}
-		for (i = 0; i < 7u; ++i) {
-			SlipDraw3D_WriteLE32(drawRecord->bytes + i * 4u,
-			                     SlipBytes_ReadLE32(vertexRecords[indexWord].bytes + i * 4u));
+		for (i = 0; i < SLIP_DRAW3D_VERTEX_DRAW_PREFIX_DWORDS; ++i) {
+			SlipDraw3D_WriteLE32(drawRecord->bytes + i * sizeof(uint32_t),
+			                     SlipBytes_ReadLE32(vertexRecords[indexWord].bytes + i * sizeof(uint32_t)));
 		}
 		allClipFlags &= flags;
 		anyClipFlags |= flags;
@@ -4518,7 +4605,7 @@ int SlipDraw3D_BuildActiveRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRecor
 		                                     .drawRecordOffset = currentRecordOffset,
 		                                     .callProjectVertex = true,
 		                                     .flagsFromProjectVertex = flags,
-		                                     .copiedDwords = 7u,
+		                                     .copiedDwords = SLIP_DRAW3D_VERTEX_DRAW_PREFIX_DWORDS,
 		                                     .allClipFlagsAfter = allClipFlags,
 		                                     .anyClipFlagsAfter = anyClipFlags};
 		--loopCount;
@@ -4537,7 +4624,7 @@ int SlipDraw3D_BuildActiveRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRecor
 			currentRecordOffset = appendPop.poppedRecordOffset;
 			SlipDraw3D_SetRecordNext(recordPoolBytes, previousRecordOffset, currentRecordOffset);
 			SlipDraw3D_SetRecordPrev(recordPoolBytes, currentRecordOffset, previousRecordOffset);
-			indexStreamOffset += 2u;
+			indexStreamOffset += SLIP_SERIALIZED_INDEX_BYTES;
 			visit->appendNextRecord = true;
 			visit->appendPop = appendPop;
 			visit->appendedPrevAfter = previousRecordOffset;
@@ -4621,17 +4708,20 @@ int SlipDraw3D_BuildTexturedRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRec
 	if (pool == NULL || vertexRecords == NULL || indexStream == NULL || state == NULL || transform == NULL ||
 	    projectPrimary == NULL || projectSecondary == NULL || visits == NULL || countAndFlags == 0 ||
 	    visitCapacity < (size_t)(countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK) ||
-	    indexStreamBytes < (size_t)(countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK) * 2u) {
+	    indexStreamBytes < (size_t)(countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_SERIALIZED_INDEX_BYTES) {
 		return 0;
 	}
 	result->countAndFlags = countAndFlags;
 	loopCount = (uint32_t)countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
 	wideTextureCoordStride = ((uint32_t)countAndFlags & SLIP_PRIMITIVE_VERTEX_NORMALS) != 0;
-	textureCoordBaseOffset = ((uint32_t)countAndFlags << 1u) & 0x3fffu;
+	textureCoordBaseOffset =
+	    ((uint32_t)countAndFlags * SLIP_SERIALIZED_INDEX_BYTES) & SLIP_SERIALIZED_TEXTURE_COORDINATE_BASE_MASK;
 	if (wideTextureCoordStride) {
-		textureCoordBaseOffset = (((uint32_t)countAndFlags << 1u) << 2u) & 0x3fffu;
+		textureCoordBaseOffset =
+		    ((uint32_t)countAndFlags * (SLIP_SERIALIZED_INDEX_BYTES + SLIP_SERIALIZED_NORMAL_BYTES)) &
+		    SLIP_SERIALIZED_TEXTURE_COORDINATE_BASE_MASK;
 	}
-	textureCoordBytesRequired = (size_t)loopCount * 4u;
+	textureCoordBytesRequired = (size_t)loopCount * SLIP_SERIALIZED_TEXTURE_COORDINATE_BYTES;
 	if (loopCount == 0 || textureCoordBaseOffset > indexStreamBytes ||
 	    indexStreamBytes - textureCoordBaseOffset < textureCoordBytesRequired) {
 		return 0;
@@ -4662,14 +4752,16 @@ int SlipDraw3D_BuildTexturedRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRec
 		size_t i;
 
 		if (visitCount >= visitCapacity || (size_t)indexStreamOffset > indexStreamBytes ||
-		    indexStreamBytes - (size_t)indexStreamOffset < 2u || (size_t)textureCoordOffset > indexStreamBytes ||
-		    indexStreamBytes - (size_t)textureCoordOffset < 4u) {
+		    indexStreamBytes - (size_t)indexStreamOffset < SLIP_SERIALIZED_INDEX_BYTES ||
+		    (size_t)textureCoordOffset > indexStreamBytes ||
+		    indexStreamBytes - (size_t)textureCoordOffset < SLIP_SERIALIZED_TEXTURE_COORDINATE_BYTES) {
 			return 0;
 		}
 		indexWord = SlipBytes_ReadLE16(indexStream + indexStreamOffset);
-		vertexRecordOffset = (uint32_t)indexWord << 6;
+		vertexRecordOffset = (uint32_t)indexWord * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
 		if (indexWord >= vertexRecordCount || (size_t)vertexRecordOffset > vertexRecordCount * sizeof(*vertexRecords) ||
-		    vertexRecordCount * sizeof(*vertexRecords) - (size_t)vertexRecordOffset < 7u * 4u) {
+		    vertexRecordCount * sizeof(*vertexRecords) - (size_t)vertexRecordOffset <
+		        SLIP_DRAW3D_VERTEX_DRAW_PREFIX_BYTES) {
 			return 0;
 		}
 		flags = SlipDraw3D_ProjectVertex(&vertexRecords[indexWord], state, transform, projectPrimary, projectSecondary,
@@ -4678,15 +4770,15 @@ int SlipDraw3D_BuildTexturedRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRec
 		if (drawRecord == NULL) {
 			return 0;
 		}
-		for (i = 0; i < 7u; ++i) {
-			SlipDraw3D_WriteLE32(drawRecord->bytes + i * 4u,
-			                     SlipBytes_ReadLE32(vertexRecords[indexWord].bytes + i * 4u));
+		for (i = 0; i < SLIP_DRAW3D_VERTEX_DRAW_PREFIX_DWORDS; ++i) {
+			SlipDraw3D_WriteLE32(drawRecord->bytes + i * sizeof(uint32_t),
+			                     SlipBytes_ReadLE32(vertexRecords[indexWord].bytes + i * sizeof(uint32_t)));
 		}
 		allClipFlags &= flags;
 		anyClipFlags |= flags;
-		textureCoordWord = SlipBytes_ReadLE16(indexStream + textureCoordOffset);
+		textureCoordWord = SlipBytes_ReadLE16(indexStream + textureCoordOffset + SLIP_SERIALIZED_TEXTURE_U_OFFSET);
 
-		textureV = SlipBytes_ReadLE16(indexStream + textureCoordOffset + 2u);
+		textureV = SlipBytes_ReadLE16(indexStream + textureCoordOffset + SLIP_SERIALIZED_TEXTURE_V_OFFSET);
 		drawRecord->textureU = textureCoordWord;
 		drawRecord->textureV = textureV;
 		visit = visits + visitCount;
@@ -4696,7 +4788,7 @@ int SlipDraw3D_BuildTexturedRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRec
 		                                       .drawRecordOffset = currentRecordOffset,
 		                                       .callProjectVertex = true,
 		                                       .flagsFromProjectVertex = flags,
-		                                       .copiedDwords = 7u,
+		                                       .copiedDwords = SLIP_DRAW3D_VERTEX_DRAW_PREFIX_DWORDS,
 		                                       .allClipFlagsAfter = allClipFlags,
 		                                       .anyClipFlagsAfter = anyClipFlags,
 		                                       .textureCoordOffset = textureCoordOffset,
@@ -4718,8 +4810,8 @@ int SlipDraw3D_BuildTexturedRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRec
 			currentRecordOffset = appendPop.poppedRecordOffset;
 			SlipDraw3D_SetRecordNext(recordPoolBytes, previousRecordOffset, currentRecordOffset);
 			SlipDraw3D_SetRecordPrev(recordPoolBytes, currentRecordOffset, previousRecordOffset);
-			indexStreamOffset += 2u;
-			textureCoordOffset += 4u;
+			indexStreamOffset += SLIP_SERIALIZED_INDEX_BYTES;
+			textureCoordOffset += SLIP_SERIALIZED_TEXTURE_COORDINATE_BYTES;
 			visit->appendNextRecord = true;
 			visit->appendPop = appendPop;
 			visit->appendedPrevAfter = previousRecordOffset;
@@ -4737,8 +4829,8 @@ int SlipDraw3D_BuildTexturedRing(SlipDraw3DRecordPool *pool, SlipDraw3DVertexRec
 	                                        .textureCoordBaseOffset = textureCoordBaseOffset,
 	                                        .textureCoordStreamOffset = textureCoordBaseOffset,
 	                                        .textureHandle = textureHandle,
-	                                        .mode = 3u,
-	                                        .drawMode = 3u,
+	                                        .mode = SLIP_INTERPOLATE_TEXTURE_PERSPECTIVE,
+	                                        .drawMode = SLIP_POLYGON_DRAW_TEXTURED,
 	                                        .firstPop = firstPop,
 	                                        .inputActiveHeadOffset = pool->inputActiveHeadOffset,
 	                                        .savedFirstRecordOffset = firstRecordOffset,
@@ -4796,7 +4888,7 @@ int SlipDraw3D_BuildTexturedRingExecute(
 	memset(result, 0, sizeof(*result));
 	if (!SlipDraw3D_PolygonStatus(vertexRecords, vertexRecordCount, indexStream, indexStreamBytes, countAndFlags, state,
 	                              transform, projectMask, userData, statusVisits, statusVisitCapacity, &status)) {
-		result->failureStage = 0x1995bu;
+		result->failureStage = SLIP_DRAW3D_TEXTURED_RING_STATUS_FAILURE_DOS_STAGE;
 		return 0;
 	}
 	result->calledPolygonStatus = true;
@@ -4804,7 +4896,7 @@ int SlipDraw3D_BuildTexturedRingExecute(
 	if (!SlipDraw3D_BuildTexturedRing(pool, vertexRecords, vertexRecordCount, indexStream, indexStreamBytes,
 	                                  countAndFlags, textureHandle, state, transform, projectPrimary, projectSecondary,
 	                                  userData, status.clipClassification == -1, 0, 0, visits, visitCapacity, &build)) {
-		result->failureStage = 0x1c753u;
+		result->failureStage = SLIP_DRAW3D_TEXTURED_RING_BUILD_FAILURE_DOS_STAGE;
 		return 0;
 	}
 	result->build = build;
@@ -4832,7 +4924,7 @@ int SlipDraw3D_BuildTexturedRingExecute(
 	        postLimitYMax, maxClipEdgeVisits, clipFlagVisits, clipFlagVisitCapacity, postBoundsVisits,
 	        postBoundsVisitCapacity, postClipRecordVisits, postClipRecordVisitCapacity, postClipPlaneVisits,
 	        postClipPlaneVisitCapacity, &result->dispatch)) {
-		result->failureStage = 0x1bc7fu;
+		result->failureStage = SLIP_DRAW3D_TEXTURED_RING_CLIP_FAILURE_DOS_STAGE;
 		return 0;
 	}
 	pool->inputActiveHeadOffset = result->dispatch.activeHeadOffsetOut;
@@ -4926,11 +5018,12 @@ int SlipDraw3D_BuildActiveMaterialRingExecute(
 		return 0;
 	}
 	memset(result, 0, sizeof(*result));
-	specialBranch = (renderFlags & SLIP_RENDER_DISABLE_VERTEX_SHADING) == 0u && (materialColor & 0x8000u) != 0u;
+	specialBranch = (renderFlags & SLIP_RENDER_DISABLE_VERTEX_SHADING) == 0u &&
+	                (materialColor & SLIP_POLYGON_COLOUR_VERTEX_SHADED) != 0u;
 	result->specialBranch = (renderFlags & SLIP_RENDER_DISABLE_VERTEX_SHADING) == 0u;
-	result->hasVertexShadingFlag = (materialColor & 0x8000u) != 0u;
-	result->mode = specialBranch ? 4u : 0u;
-	result->drawMode = specialBranch ? 1u : 0u;
+	result->hasVertexShadingFlag = (materialColor & SLIP_POLYGON_COLOUR_VERTEX_SHADED) != 0u;
+	result->mode = specialBranch ? SLIP_INTERPOLATE_SHADE : 0;
+	result->drawMode = specialBranch ? SLIP_POLYGON_DRAW_SHADED : SLIP_POLYGON_DRAW_FLAT;
 	result->materialColor = specialBranch ? 0u : materialColor;
 	if (!SlipDraw3D_BuildActiveRing(pool, vertexRecords, vertexRecordCount, indexStream, indexStreamBytes,
 	                                countAndFlags, state, transform, projectPrimary, projectSecondary, userData, 0, 0,
@@ -4942,7 +5035,8 @@ int SlipDraw3D_BuildActiveMaterialRingExecute(
 	if (specialBranch) {
 		size_t i;
 
-		if (materialControl == NULL || materialControlBytes < (size_t)countAndFlags * 2u || visits == NULL ||
+		if (materialControl == NULL ||
+		    materialControlBytes < (size_t)countAndFlags * SLIP_DRAW3D_VERTEX_SHADE_CONTROL_BYTES || visits == NULL ||
 		    visitCapacity < build.visitCount) {
 			return 0;
 		}
@@ -4957,8 +5051,9 @@ int SlipDraw3D_BuildActiveMaterialRingExecute(
 			if (!SlipDraw3D_LinkedRecordOffsetValid(recordPoolBytesCount, recordOffset)) {
 				return 0;
 			}
-			recordPoolBytes[recordOffset + 0x21u] = materialControl[i * 2u];
-			recordPoolBytes[recordOffset + 0x20u] = 0;
+			recordPoolBytes[recordOffset + offsetof(SlipDraw3DDrawRecord, shade) + 1] =
+			    materialControl[i * SLIP_DRAW3D_VERTEX_SHADE_CONTROL_BYTES];
+			recordPoolBytes[recordOffset + offsetof(SlipDraw3DDrawRecord, shade)] = 0;
 		}
 	}
 	result->returned = true;
@@ -5016,10 +5111,10 @@ int SlipDraw3D_ActiveBounds(const SlipDraw3DRecordPool *pool, SlipDraw3DActiveBo
 	    visitCapacity == 0) {
 		return 0;
 	}
-	minX = 0x7fff;
-	minY = 0x7fff;
-	maxX = (int32_t)0xffff9000u;
-	maxY = (int32_t)0xffff9000u;
+	minX = INT16_MAX;
+	minY = INT16_MAX;
+	maxX = SLIP_DRAW3D_ACTIVE_BOUNDS_MAXIMUM_INITIAL;
+	maxY = SLIP_DRAW3D_ACTIVE_BOUNDS_MAXIMUM_INITIAL;
 	recordOffset = headOffset;
 	visitCount = 0;
 	do {
@@ -5033,14 +5128,14 @@ int SlipDraw3D_ActiveBounds(const SlipDraw3DRecordPool *pool, SlipDraw3DActiveBo
 			return 0;
 		}
 		record = recordPoolBytes + recordOffset;
-		screenX = SlipBytes_ReadLEI32(record + 0x0cu);
+		screenX = SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, screenX));
 		if (screenX < minX) {
 			minX = screenX;
 		}
 		if (screenX > maxX) {
 			maxX = screenX;
 		}
-		screenY = SlipBytes_ReadLEI32(record + 0x10u);
+		screenY = SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, screenY));
 		if (screenY < minY) {
 			minY = screenY;
 		}
@@ -5062,10 +5157,10 @@ int SlipDraw3D_ActiveBounds(const SlipDraw3DRecordPool *pool, SlipDraw3DActiveBo
 		++visitCount;
 	} while (recordOffset != headOffset);
 	*result = (SlipDraw3DActiveBounds){.activeHeadOffset = headOffset,
-	                                   .minXInitial = 0x7fff,
-	                                   .minYInitial = 0x7fff,
-	                                   .maxXInitial = (int32_t)0xffff9000u,
-	                                   .maxYInitial = (int32_t)0xffff9000u,
+	                                   .minXInitial = INT16_MAX,
+	                                   .minYInitial = INT16_MAX,
+	                                   .maxXInitial = SLIP_DRAW3D_ACTIVE_BOUNDS_MAXIMUM_INITIAL,
+	                                   .maxYInitial = SLIP_DRAW3D_ACTIVE_BOUNDS_MAXIMUM_INITIAL,
 	                                   .visitCount = visitCount,
 	                                   .minX = minX,
 	                                   .minY = minY,
@@ -5185,12 +5280,12 @@ int SlipDraw3D_CapturePostPlaneRing(SlipDraw3DRecordPool *pool, uint32_t postPla
 	planeLightDotWord = (uint16_t)dotOut;
 	result->dot = dot;
 	result->planeLightDot = (int16_t)planeLightDotWord;
-	if ((int16_t)planeLightDotWord < 0x0200) {
+	if ((int16_t)planeLightDotWord < SLIP_DRAW3D_POST_PLANE_MINIMUM_LIGHT_DOT_Q14) {
 		result->setRejectCarry = true;
 		result->carryOut = true;
 		return 1;
 	}
-	planeScale = 0x40000000u / (uint32_t)planeLightDotWord;
+	planeScale = (SLIP_Q14_ONE * SLIP_DRAW3D_SCALE_ONE_Q16) / (uint32_t)planeLightDotWord;
 	result->planeScale = planeScale;
 	result->calledActiveBounds = true;
 	if (!SlipDraw3D_ActiveBounds(pool, boundsVisits, sizeof(boundsVisits) / sizeof(boundsVisits[0]), &bounds)) {
@@ -5230,10 +5325,10 @@ int SlipDraw3D_CapturePostPlaneRing(SlipDraw3DRecordPool *pool, uint32_t postPla
 			return 0;
 		}
 		nextRecord = recordPoolBytes + nextOffset;
-		edgeY = (int32_t)((uint32_t)SlipBytes_ReadLEI32(nextRecord + 0x10u) -
-		                  (uint32_t)SlipBytes_ReadLEI32(currentRecord + 0x10u));
-		edgeX = (int32_t)((uint32_t)SlipBytes_ReadLEI32(nextRecord + 0x0cu) -
-		                  (uint32_t)SlipBytes_ReadLEI32(currentRecord + 0x0cu));
+		edgeY = (int32_t)((uint32_t)SlipBytes_ReadLEI32(nextRecord + offsetof(SlipDraw3DDrawRecord, screenY)) -
+		                  (uint32_t)SlipBytes_ReadLEI32(currentRecord + offsetof(SlipDraw3DDrawRecord, screenY)));
+		edgeX = (int32_t)((uint32_t)SlipBytes_ReadLEI32(nextRecord + offsetof(SlipDraw3DDrawRecord, screenX)) -
+		                  (uint32_t)SlipBytes_ReadLEI32(currentRecord + offsetof(SlipDraw3DDrawRecord, screenX)));
 		anyEdgeDelta |= (uint32_t)edgeX;
 		anyEdgeDelta |= (uint32_t)edgeY;
 		if (!SlipDraw3D_NormalizeVector2D((uint32_t)edgeX, (uint32_t)edgeY, &normal)) {
@@ -5242,7 +5337,7 @@ int SlipDraw3D_CapturePostPlaneRing(SlipDraw3DRecordPool *pool, uint32_t postPla
 		visit = visits + visitCount;
 		*visit = (SlipDraw3DPostPlaneCaptureVisit){
 		    .currentOffset = currentOffset, .nextOffset = nextOffset, .edgeX = edgeX, .edgeY = edgeY, .normal = normal};
-		if ((int16_t)normal.length <= 4) {
+		if ((int16_t)normal.length <= SLIP_DRAW3D_POST_PLANE_SHORT_EDGE_MAXIMUM_LENGTH) {
 			uint32_t savedNextOffset;
 			uint32_t previousOffset;
 			uint32_t freeFirstOffset;
@@ -5275,8 +5370,8 @@ int SlipDraw3D_CapturePostPlaneRing(SlipDraw3DRecordPool *pool, uint32_t postPla
 			currentOffset = pool->inputActiveHeadOffset;
 			continue;
 		}
-		SlipDraw3D_WriteI32(currentRecord + 0x2cu, -(int32_t)normal.unitYQ14);
-		SlipDraw3D_WriteI32(currentRecord + 0x30u, (int32_t)normal.unitXQ14);
+		SlipDraw3D_WriteI32(currentRecord + SLIP_DRAW3D_EDGE_NORMAL_X_OFFSET, -(int32_t)normal.unitYQ14);
+		SlipDraw3D_WriteI32(currentRecord + SLIP_DRAW3D_EDGE_NORMAL_Y_OFFSET, (int32_t)normal.unitXQ14);
 		visit->keptEdge = true;
 		visit->storedNormalX = (int32_t)normal.unitXQ14;
 		visit->storedNormalY = -(int32_t)normal.unitYQ14;
@@ -5502,7 +5597,7 @@ int SlipDraw3D_CollectClipFlags(const uint8_t *drawRecordBase, size_t drawRecord
 		recordFlags = SlipBytes_ReadLE32(record + SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET);
 		allClipFlags &= recordFlags;
 		anyClipFlags |= recordFlags;
-		next = SlipBytes_ReadLE32(record + 0x34u);
+		next = SlipBytes_ReadLE32(record + SLIP_DRAW3D_RECORD_NEXT_OFFSET);
 		visit = visits + visitCount;
 		*visit = (SlipDraw3DClipFlagVisit){.recordOffset = recordOffset,
 		                                   .flags = recordFlags,
@@ -6119,11 +6214,11 @@ int SlipDraw3D_ClipEdgeList(uint8_t *recordBase, size_t recordBytes, uint32_t he
 		SlipDraw3D_SetRecordPrev(recordBase, originalInside, borrowed);
 		SlipDraw3D_SetRecordNext(recordBase, previous, borrowed);
 		SlipDraw3D_SetRecordPrev(recordBase, borrowed, previous);
-		for (i = 0; i < 0x0du; ++i) {
+		for (i = 0; i < offsetof(SlipDraw3DLinkedDrawRecordLinks, nextOffset) / sizeof(uint32_t); ++i) {
 			uint32_t dwordValue;
 
-			dwordValue = SlipBytes_ReadLE32(recordBase + originalInside + i * 4u);
-			SlipDraw3D_WriteLE32(recordBase + borrowed + i * 4u, dwordValue);
+			dwordValue = SlipBytes_ReadLE32(recordBase + originalInside + i * sizeof(uint32_t));
+			SlipDraw3D_WriteLE32(recordBase + borrowed + i * sizeof(uint32_t), dwordValue);
 		}
 		result->copiedDrawPayload = true;
 		result->targetOffsetOut = borrowed;
@@ -6202,7 +6297,8 @@ uint32_t SlipDraw3D_ProjectDrawRecordPoint(SlipDraw3DDrawRecord *record, SlipDra
 		uint64_t dot = (uint64_t)((int64_t)x * state->auxiliaryClipPlaneNormal.x);
 		dot += (uint64_t)((int64_t)y * state->auxiliaryClipPlaneNormal.y);
 		dot += (uint64_t)((int64_t)z * state->auxiliaryClipPlaneNormal.z);
-		record->depth = (int32_t)((uint32_t)(dot >> 14) + (uint32_t)((dot >> 13) & 1u));
+		record->depth = (int32_t)((uint32_t)(dot >> SLIP_Q14_FRACTION_BITS) +
+		                          (uint32_t)((dot >> (SLIP_Q14_FRACTION_BITS - 1)) & 1u));
 		if (record->depth < 0)
 			flags |= SLIP_CLIP_AUXILIARY;
 	}
@@ -6257,7 +6353,7 @@ int SlipDraw3D_ProjectFlags(uint8_t *recordBase, size_t recordBytes, uint32_t re
 	                             .screenClipFlagsInitial = SLIP_VERTEX_PROJECTED,
 	                             .returned = true};
 	SlipDraw3D_WriteI32(record + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET, projectedScreenX);
-	SlipDraw3D_WriteI32(record + SLIP_DRAW3D_VERTEX_RECORD_SCREEN_OFFSET + 4u, projectedScreenY);
+	SlipDraw3D_WriteI32(record + offsetof(SlipDraw3DVertexRecord, screenY), projectedScreenY);
 	screenClipFlags = SLIP_VERTEX_PROJECTED;
 	result->xBelow = projectedScreenX < limitXMin;
 	if (result->xBelow) {
@@ -6277,8 +6373,10 @@ int SlipDraw3D_ProjectFlags(uint8_t *recordBase, size_t recordBytes, uint32_t re
 	}
 	result->hasScreenClipFlags = (screenClipFlags & SLIP_CLIP_SCREEN) != 0;
 	if (result->hasScreenClipFlags) {
-		result->withinPositiveSentinel = projectedScreenX < 0x3ffe && projectedScreenY < 0x3ffe;
-		result->withinNegativeSentinel = projectedScreenX > -0x3ffe && projectedScreenY > -0x3ffe;
+		result->withinPositiveSentinel = projectedScreenX < SLIP_SCREEN_CLIP_COORDINATE_LIMIT &&
+		                                 projectedScreenY < SLIP_SCREEN_CLIP_COORDINATE_LIMIT;
+		result->withinNegativeSentinel = projectedScreenX > -SLIP_SCREEN_CLIP_COORDINATE_LIMIT &&
+		                                 projectedScreenY > -SLIP_SCREEN_CLIP_COORDINATE_LIMIT;
 		if (result->withinPositiveSentinel && result->withinNegativeSentinel) {
 			screenClipFlags |= SLIP_VERTEX_SCREEN_CLIP_IN_RANGE;
 			result->finiteOffscreenFlag = true;
@@ -6312,8 +6410,9 @@ int SlipDraw3D_ProjectFlagsWithCallback(uint8_t *recordBase, size_t recordBytes,
 		return 0;
 	}
 	record = recordBase + recordOffset;
-	world = (SlipDraw3DVec32){SlipBytes_ReadLEI32(record + 0x00u), SlipBytes_ReadLEI32(record + 0x04u),
-	                          SlipBytes_ReadLEI32(record + 0x08u)};
+	world = (SlipDraw3DVec32){SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, world.x)),
+	                          SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, world.y)),
+	                          SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, world.z))};
 	project(world, &projectedScreenX, &projectedScreenY, userData);
 	return SlipDraw3D_ProjectFlags(recordBase, recordBytes, recordOffset, renderFlags, projectedScreenX,
 	                               projectedScreenY, limitXMin, limitXMax, limitYMin, limitYMax, result);
@@ -6347,8 +6446,10 @@ int SlipDraw3D_ScreenPointFlags(SlipDraw3DDrawRecord *record, int32_t screenX, i
 	}
 	result->hasScreenClipFlags = (screenClipFlags & SLIP_CLIP_SCREEN) != 0;
 	if (result->hasScreenClipFlags) {
-		result->withinPositiveSentinel = screenX < 0x3ffe && screenY < 0x3ffe;
-		result->withinNegativeSentinel = screenX > -0x3ffe && screenY > -0x3ffe;
+		result->withinPositiveSentinel =
+		    screenX < SLIP_SCREEN_CLIP_COORDINATE_LIMIT && screenY < SLIP_SCREEN_CLIP_COORDINATE_LIMIT;
+		result->withinNegativeSentinel =
+		    screenX > -SLIP_SCREEN_CLIP_COORDINATE_LIMIT && screenY > -SLIP_SCREEN_CLIP_COORDINATE_LIMIT;
 		if (result->withinPositiveSentinel && result->withinNegativeSentinel) {
 			screenClipFlags |= SLIP_VERTEX_SCREEN_CLIP_IN_RANGE;
 			result->finiteOffscreenFlag = true;
@@ -6385,10 +6486,10 @@ static int SlipDraw3D_SplitDepthRecordInternal(uint8_t *recordBase, size_t recor
 	}
 	target = recordBase + targetOffset;
 	other = recordBase + otherOffset;
-	targetX = SlipBytes_ReadLEI32(target + 0x00u);
-	targetY = SlipBytes_ReadLEI32(target + 0x04u);
-	targetZ = SlipBytes_ReadLEI32(target + 0x08u);
-	otherZ = SlipBytes_ReadLEI32(other + 0x08u);
+	targetX = SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.x));
+	targetY = SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.y));
+	targetZ = SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.z));
+	otherZ = SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, world.z));
 	zDeltaToPlane = (uint32_t)clipPlaneZ - (uint32_t)targetZ;
 	zDeltaBetweenRecords = (uint32_t)otherZ - (uint32_t)targetZ;
 	*result = (SlipDraw3DSplitDepth){.highPrecisionPath = (renderFlags & SLIP_SHAPE_SHORT_COORDINATES) != 0,
@@ -6414,27 +6515,34 @@ static int SlipDraw3D_SplitDepthRecordInternal(uint8_t *recordBase, size_t recor
 			return 0;
 		}
 		quotient = numerator / divisor;
-		if (quotient > 0xffffu) {
+		if (quotient > UINT16_MAX) {
 			return 0;
 		}
 		interpolationRatio = quotient;
-		yStep = ((int32_t)(int16_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x04u) - (uint32_t)targetY) *
+		yStep = ((int32_t)(int16_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, world.y)) -
+		                            (uint32_t)targetY) *
 		         (int32_t)(int16_t)interpolationRatio) >>
-		        14;
-		xStep = ((int32_t)(int16_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x00u) - (uint32_t)targetX) *
+		        SLIP_Q14_FRACTION_BITS;
+		xStep = ((int32_t)(int16_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, world.x)) -
+		                            (uint32_t)targetX) *
 		         (int32_t)(int16_t)interpolationRatio) >>
-		        14;
-		SlipDraw3D_WriteI32(target + 0x04u, (int32_t)((uint32_t)targetY + (uint32_t)yStep));
-		SlipDraw3D_WriteI32(target + 0x00u, (int32_t)((uint32_t)targetX + (uint32_t)xStep));
+		        SLIP_Q14_FRACTION_BITS;
+		SlipDraw3D_WriteI32(target + offsetof(SlipDraw3DDrawRecord, world.y),
+		                    (int32_t)((uint32_t)targetY + (uint32_t)yStep));
+		SlipDraw3D_WriteI32(target + offsetof(SlipDraw3DDrawRecord, world.x),
+		                    (int32_t)((uint32_t)targetX + (uint32_t)xStep));
 		result->interpolationRatio = interpolationRatio;
 		result->xStep = xStep;
 		result->yStep = yStep;
 		if ((projectionMode & SLIP_INTERPOLATE_SHADE) != 0) {
 			const uint16_t wordStep = SlipDraw3D_MultiplySigned16Shift14LowWord(
-			    (int16_t)(SlipBytes_ReadLE16(other + 0x20u) - SlipBytes_ReadLE16(target + 0x20u)),
+			    (int16_t)(SlipBytes_ReadLE16(other + offsetof(SlipDraw3DDrawRecord, shade)) -
+			              SlipBytes_ReadLE16(target + offsetof(SlipDraw3DDrawRecord, shade))),
 			    (int16_t)interpolationRatio);
 
-			SlipDraw3D_WriteLE16(target + 0x20u, (uint16_t)(SlipBytes_ReadLE16(target + 0x20u) + wordStep));
+			SlipDraw3D_WriteLE16(
+			    target + offsetof(SlipDraw3DDrawRecord, shade),
+			    (uint16_t)(SlipBytes_ReadLE16(target + offsetof(SlipDraw3DDrawRecord, shade)) + wordStep));
 			result->interpolatedShade = true;
 			result->shadeStep = wordStep;
 		}
@@ -6453,25 +6561,34 @@ static int SlipDraw3D_SplitDepthRecordInternal(uint8_t *recordBase, size_t recor
 			return 0;
 		}
 		quotient = numerator / zDeltaBetweenRecords;
-		if (quotient > 0xffffffffu) {
+		if (quotient > UINT32_MAX) {
 			return 0;
 		}
 		interpolationRatio = (uint32_t)quotient;
 		xStep = SlipDraw3D_MultiplySigned32Shift30(
-		    (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x00u) - (uint32_t)targetX), interpolationRatio);
-		SlipDraw3D_WriteI32(target + 0x00u, (int32_t)((uint32_t)targetX + (uint32_t)xStep));
+		    (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, world.x)) -
+		              (uint32_t)targetX),
+		    interpolationRatio);
+		SlipDraw3D_WriteI32(target + offsetof(SlipDraw3DDrawRecord, world.x),
+		                    (int32_t)((uint32_t)targetX + (uint32_t)xStep));
 		yStep = SlipDraw3D_MultiplySigned32Shift30(
-		    (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x04u) - (uint32_t)targetY), interpolationRatio);
-		SlipDraw3D_WriteI32(target + 0x04u, (int32_t)((uint32_t)targetY + (uint32_t)yStep));
+		    (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, world.y)) -
+		              (uint32_t)targetY),
+		    interpolationRatio);
+		SlipDraw3D_WriteI32(target + offsetof(SlipDraw3DDrawRecord, world.y),
+		                    (int32_t)((uint32_t)targetY + (uint32_t)yStep));
 		result->interpolationRatio = interpolationRatio;
 		result->xStep = xStep;
 		result->yStep = yStep;
 		if ((projectionMode & SLIP_INTERPOLATE_SHADE) != 0) {
 			const uint16_t wordStep = SlipDraw3D_MultiplySigned16Shift14LowWord(
-			    (int16_t)(SlipBytes_ReadLE16(other + 0x20u) - SlipBytes_ReadLE16(target + 0x20u)),
-			    (int16_t)((int32_t)interpolationRatio >> 16));
+			    (int16_t)(SlipBytes_ReadLE16(other + offsetof(SlipDraw3DDrawRecord, shade)) -
+			              SlipBytes_ReadLE16(target + offsetof(SlipDraw3DDrawRecord, shade))),
+			    (int16_t)((int32_t)interpolationRatio >> SLIP_DRAW3D_INTERPOLATION_TO_Q14_SHIFT));
 
-			SlipDraw3D_WriteLE16(target + 0x20u, (uint16_t)(SlipBytes_ReadLE16(target + 0x20u) + wordStep));
+			SlipDraw3D_WriteLE16(
+			    target + offsetof(SlipDraw3DDrawRecord, shade),
+			    (uint16_t)(SlipBytes_ReadLE16(target + offsetof(SlipDraw3DDrawRecord, shade)) + wordStep));
 			result->interpolatedShade = true;
 			result->shadeStep = wordStep;
 		}
@@ -6481,7 +6598,7 @@ static int SlipDraw3D_SplitDepthRecordInternal(uint8_t *recordBase, size_t recor
 			return 0;
 		}
 	}
-	SlipDraw3D_WriteI32(target + 0x08u, clipPlaneZ);
+	SlipDraw3D_WriteI32(target + offsetof(SlipDraw3DDrawRecord, world.z), clipPlaneZ);
 	result->wroteClipPlaneZ = true;
 	result->calledProjectFlags = true;
 	if (useProjectCallback) {
@@ -6541,11 +6658,14 @@ static int SlipDraw3D_SplitDepthMathRecordInternal(
 	}
 	target = recordBase + targetOffset;
 	other = recordBase + otherOffset;
-	deltaX = (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x00u) - (uint32_t)SlipBytes_ReadLEI32(target + 0x00u));
-	deltaY = (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x04u) - (uint32_t)SlipBytes_ReadLEI32(target + 0x04u));
-	deltaZ = (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x08u) - (uint32_t)SlipBytes_ReadLEI32(target + 0x08u));
-	targetDepth = SlipBytes_ReadLEI32(target + 0x18u);
-	otherDepth = SlipBytes_ReadLEI32(other + 0x18u);
+	deltaX = (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, world.x)) -
+	                   (uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.x)));
+	deltaY = (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, world.y)) -
+	                   (uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.y)));
+	deltaZ = (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, world.z)) -
+	                   (uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.z)));
+	targetDepth = SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, depth));
+	otherDepth = SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, depth));
 	if ((renderFlags & SLIP_SHAPE_SHORT_COORDINATES) != 0) {
 		if (!SlipDraw3D_InterpolatePlaneIntersectionQ14(deltaX, deltaY, deltaZ, targetDepth, otherDepth, &xStep, &yStep,
 		                                                &zStep, &interpolationRatio)) {
@@ -6570,20 +6690,28 @@ static int SlipDraw3D_SplitDepthMathRecordInternal(
 	                                     .zStepApplied = zStep,
 	                                     .interpolationRatio = interpolationRatio,
 	                                     .returned = true};
-	xAfter = (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + 0x00u) + (uint32_t)xStep);
-	yAfter = (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + 0x04u) + (uint32_t)yStep);
-	zAfter = (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + 0x08u) + (uint32_t)zStep);
-	SlipDraw3D_WriteI32(target + 0x00u, xAfter);
-	SlipDraw3D_WriteI32(target + 0x04u, yAfter);
-	SlipDraw3D_WriteI32(target + 0x08u, zAfter);
+	xAfter =
+	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.x)) + (uint32_t)xStep);
+	yAfter =
+	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.y)) + (uint32_t)yStep);
+	zAfter =
+	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.z)) + (uint32_t)zStep);
+	SlipDraw3D_WriteI32(target + offsetof(SlipDraw3DDrawRecord, world.x), xAfter);
+	SlipDraw3D_WriteI32(target + offsetof(SlipDraw3DDrawRecord, world.y), yAfter);
+	SlipDraw3D_WriteI32(target + offsetof(SlipDraw3DDrawRecord, world.z), zAfter);
 	if ((projectionMode & SLIP_INTERPOLATE_SHADE) != 0) {
 		uint16_t wordStep;
 		int16_t ratio;
 
-		ratio = result->highPrecisionPath ? (int16_t)interpolationRatio : (int16_t)((int32_t)interpolationRatio >> 16);
+		ratio = result->highPrecisionPath
+		            ? (int16_t)interpolationRatio
+		            : (int16_t)((int32_t)interpolationRatio >> SLIP_DRAW3D_INTERPOLATION_TO_Q14_SHIFT);
 		wordStep = SlipDraw3D_MultiplySigned16Shift14LowWord(
-		    (int16_t)(SlipBytes_ReadLE16(other + 0x20u) - SlipBytes_ReadLE16(target + 0x20u)), ratio);
-		SlipDraw3D_WriteLE16(target + 0x20u, (uint16_t)(SlipBytes_ReadLE16(target + 0x20u) + wordStep));
+		    (int16_t)(SlipBytes_ReadLE16(other + offsetof(SlipDraw3DDrawRecord, shade)) -
+		              SlipBytes_ReadLE16(target + offsetof(SlipDraw3DDrawRecord, shade))),
+		    ratio);
+		SlipDraw3D_WriteLE16(target + offsetof(SlipDraw3DDrawRecord, shade),
+		                     (uint16_t)(SlipBytes_ReadLE16(target + offsetof(SlipDraw3DDrawRecord, shade)) + wordStep));
 		result->interpolatedShade = true;
 		result->shadeStep = wordStep;
 	}
@@ -6600,9 +6728,8 @@ static int SlipDraw3D_SplitDepthMathRecordInternal(
 			return 0;
 		}
 	}
-	zAfter = SlipBytes_ReadLEI32(target + 0x08u);
-	flags =
-	    SlipBytes_ReadLE32(target + SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET) & ~(uint32_t)SLIP_CLIP_BEFORE_PROJECTION;
+	zAfter = SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, world.z));
+	flags = SlipBytes_ReadLE32(target + SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET) & ~SLIP_CLIP_BEFORE_PROJECTION;
 	SlipDraw3D_WriteLE32(target + SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET, flags);
 	result->flagsAfterClear = flags;
 	result->zAfterAdd = zAfter;
@@ -6694,7 +6821,8 @@ int SlipDraw3D_InterpolateExtraFields32(uint8_t *recordBase, size_t recordBytes,
                                         uint32_t otherOffset, uint32_t projectionMode, uint32_t interpolationRatio,
                                         SlipDraw3DExtraFieldInterpolation *result) {
 	if (!SlipDraw3D_InterpolateExtraFields16(recordBase, recordBytes, targetOffset, otherOffset, projectionMode,
-	                                         (uint16_t)(interpolationRatio >> 16), result)) {
+	                                         (uint16_t)(interpolationRatio >> SLIP_DRAW3D_INTERPOLATION_TO_Q14_SHIFT),
+	                                         result)) {
 		return 0;
 	}
 	result->ratio = interpolationRatio;
@@ -6871,7 +6999,7 @@ int SlipDraw3D_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint3
 			return 0;
 		}
 		quotient = numerator / divisor;
-		if (quotient > 0xffffu) {
+		if (quotient > UINT16_MAX) {
 			return 0;
 		}
 		ratio = (uint16_t)((quotient >> 1) + (quotient & 1u));
@@ -6886,7 +7014,7 @@ int SlipDraw3D_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint3
 			return 0;
 		}
 		quotient = numerator / xDeltaBetweenRecords;
-		if (quotient > 0xffffffffu) {
+		if (quotient > UINT32_MAX) {
 			return 0;
 		}
 		ratio = (uint32_t)quotient;
@@ -6897,8 +7025,9 @@ int SlipDraw3D_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint3
 	result->interpolationRatio = ratio;
 	result->yStep = yStep;
 	if ((projectionMode & SLIP_INTERPOLATE_SHADE) != 0) {
-		const int16_t wordRatio =
-		    result->highPrecisionPath ? (int16_t)(uint16_t)ratio : (int16_t)((int32_t)ratio >> 16);
+		const int16_t wordRatio = result->highPrecisionPath
+		                              ? (int16_t)(uint16_t)ratio
+		                              : (int16_t)((int32_t)ratio >> SLIP_DRAW3D_INTERPOLATION_TO_Q14_SHIFT);
 		const uint16_t wordStep =
 		    SlipDraw3D_MultiplySigned16Shift14LowWord((int16_t)(other->shade - target->shade), wordRatio);
 
@@ -6924,7 +7053,7 @@ int SlipDraw3D_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint3
 	yAfter = target->screenY;
 	flags = target->flags;
 	result->flagsBefore = flags;
-	flags &= ~(uint32_t)SLIP_VERTEX_VERTICAL_CLIP_STATUS;
+	flags &= ~SLIP_VERTEX_VERTICAL_CLIP_STATUS;
 	result->flagsAfterClear = flags;
 	result->yBelow = yAfter < limitYMin;
 	if (result->yBelow) {
@@ -6934,7 +7063,8 @@ int SlipDraw3D_SplitScreenXRecord(uint8_t *recordBase, size_t recordBytes, uint3
 	if (result->yAbove) {
 		flags |= SLIP_CLIP_BOTTOM;
 	}
-	result->yInsideFiniteSentinel = yAfter < 0x3ffe && yAfter > -0x3ffe;
+	result->yInsideFiniteSentinel =
+	    yAfter < SLIP_SCREEN_CLIP_COORDINATE_LIMIT && yAfter > -SLIP_SCREEN_CLIP_COORDINATE_LIMIT;
 	if (result->yInsideFiniteSentinel) {
 		flags |= SLIP_VERTEX_SCREEN_CLIP_IN_RANGE;
 	}
@@ -6990,7 +7120,7 @@ int SlipDraw3D_SplitScreenYRecord(uint8_t *recordBase, size_t recordBytes, uint3
 			return 0;
 		}
 		quotient = numerator / divisor;
-		if (quotient > 0xffffu) {
+		if (quotient > UINT16_MAX) {
 			return 0;
 		}
 		ratio = (uint16_t)((quotient >> 1) + (quotient & 1u));
@@ -7005,7 +7135,7 @@ int SlipDraw3D_SplitScreenYRecord(uint8_t *recordBase, size_t recordBytes, uint3
 			return 0;
 		}
 		quotient = numerator / yDeltaBetweenRecords;
-		if (quotient > 0xffffffffu) {
+		if (quotient > UINT32_MAX) {
 			return 0;
 		}
 		ratio = (uint32_t)quotient;
@@ -7016,8 +7146,9 @@ int SlipDraw3D_SplitScreenYRecord(uint8_t *recordBase, size_t recordBytes, uint3
 	result->interpolationRatio = ratio;
 	result->xStep = xStep;
 	if ((projectionMode & SLIP_INTERPOLATE_SHADE) != 0) {
-		const int16_t wordRatio =
-		    result->highPrecisionPath ? (int16_t)(uint16_t)ratio : (int16_t)((int32_t)ratio >> 16);
+		const int16_t wordRatio = result->highPrecisionPath
+		                              ? (int16_t)(uint16_t)ratio
+		                              : (int16_t)((int32_t)ratio >> SLIP_DRAW3D_INTERPOLATION_TO_Q14_SHIFT);
 		const uint16_t wordStep =
 		    SlipDraw3D_MultiplySigned16Shift14LowWord((int16_t)(other->shade - target->shade), wordRatio);
 
@@ -7058,7 +7189,7 @@ int SlipDraw3D_PostPlaneBounds(const uint8_t *recordBase, size_t recordBytes, ui
 	}
 	recordOffset = headOffset;
 	loopHeadOffset = recordOffset;
-	allFlags = 0xffffffffu;
+	allFlags = UINT32_MAX;
 	visitCount = 0;
 	do {
 		const uint8_t *record;
@@ -7073,14 +7204,14 @@ int SlipDraw3D_PostPlaneBounds(const uint8_t *recordBase, size_t recordBytes, ui
 		}
 		record = recordBase + recordOffset;
 		screenFlags = 0;
-		screenX = SlipBytes_ReadLEI32(record + 0x0cu);
+		screenX = SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, screenX));
 		if (screenX < limitXMin) {
 			screenFlags = SLIP_CLIP_LEFT;
 		}
 		if (screenX > limitXMax) {
 			screenFlags = SLIP_CLIP_RIGHT;
 		}
-		screenY = SlipBytes_ReadLEI32(record + 0x10u);
+		screenY = SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, screenY));
 		if (screenY < limitYMin) {
 			screenFlags |= SLIP_CLIP_TOP;
 		}
@@ -7088,7 +7219,7 @@ int SlipDraw3D_PostPlaneBounds(const uint8_t *recordBase, size_t recordBytes, ui
 			screenFlags |= SLIP_CLIP_BOTTOM;
 		}
 		allFlags &= screenFlags;
-		nextOffset = SlipBytes_ReadLE32(record + 0x34u);
+		nextOffset = SlipBytes_ReadLE32(record + SLIP_DRAW3D_RECORD_NEXT_OFFSET);
 		visit = visits + visitCount;
 		*visit = (SlipDraw3DPostPlaneBoundsVisit){.recordOffset = recordOffset,
 		                                          .screenX = screenX,
@@ -7101,7 +7232,7 @@ int SlipDraw3D_PostPlaneBounds(const uint8_t *recordBase, size_t recordBytes, ui
 		++visitCount;
 	} while (recordOffset != loopHeadOffset);
 	*result = (SlipDraw3DPostPlaneBounds){.headOffset = headOffset,
-	                                      .allFlagsInitial = 0xffffffffu,
+	                                      .allFlagsInitial = UINT32_MAX,
 	                                      .limitXMin = limitXMin,
 	                                      .limitXMax = limitXMax,
 	                                      .limitYMin = limitYMin,
@@ -7138,24 +7269,32 @@ int SlipDraw3D_SplitPostPlaneRecord(uint8_t *recordBase, size_t recordBytes, uin
 	}
 	target = recordBase + targetOffset;
 	other = recordBase + otherOffset;
-	targetDepth = SlipBytes_ReadLEI32(target + 0x1cu);
-	otherDepth = SlipBytes_ReadLEI32(other + 0x1cu);
+	targetDepth = SlipBytes_ReadLEI32(target + SLIP_DRAW3D_PLANE_DISTANCE_OFFSET);
+	otherDepth = SlipBytes_ReadLEI32(other + SLIP_DRAW3D_PLANE_DISTANCE_OFFSET);
 	depthDelta = (uint32_t)otherDepth - (uint32_t)targetDepth;
 	if (depthDelta == 0) {
 		return 0;
 	}
 	numerator = SlipDraw3D_UnsignedHighHalfShiftRightTwo(0u - (uint32_t)targetDepth);
 	quotient = numerator / depthDelta;
-	if (quotient > 0xffffffffu) {
+	if (quotient > UINT32_MAX) {
 		return 0;
 	}
 	ratio = (uint32_t)quotient;
 	xStep = SlipDraw3D_MultiplySigned32RoundShift30(
-	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x0cu) - (uint32_t)SlipBytes_ReadLEI32(target + 0x0cu)), ratio);
-	SlipDraw3D_WriteI32(target + 0x0cu, (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + 0x0cu) + (uint32_t)xStep));
+	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, screenX)) -
+	              (uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, screenX))),
+	    ratio);
+	SlipDraw3D_WriteI32(
+	    target + offsetof(SlipDraw3DDrawRecord, screenX),
+	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, screenX)) + (uint32_t)xStep));
 	yStep = SlipDraw3D_MultiplySigned32RoundShift30(
-	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + 0x10u) - (uint32_t)SlipBytes_ReadLEI32(target + 0x10u)), ratio);
-	SlipDraw3D_WriteI32(target + 0x10u, (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + 0x10u) + (uint32_t)yStep));
+	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(other + offsetof(SlipDraw3DDrawRecord, screenY)) -
+	              (uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, screenY))),
+	    ratio);
+	SlipDraw3D_WriteI32(
+	    target + offsetof(SlipDraw3DDrawRecord, screenY),
+	    (int32_t)((uint32_t)SlipBytes_ReadLEI32(target + offsetof(SlipDraw3DDrawRecord, screenY)) + (uint32_t)yStep));
 	*result = (SlipDraw3DSplitPostPlane){.targetOffset = targetOffset,
 	                                     .otherOffset = otherOffset,
 	                                     .targetDepth = targetDepth,
@@ -7206,7 +7345,7 @@ int SlipDraw3D_PostPlaneClip(uint8_t *recordBase, size_t recordBytes, uint32_t i
 		planeVisit = planeVisits + planeVisitCount;
 		*planeVisit =
 		    (SlipDraw3DPostPlaneClipPlaneVisit){.planeOffset = planeOffset, .activeHeadOffset = activeHeadOffset};
-		allFlags = 0xffffffffu;
+		allFlags = UINT32_MAX;
 		anyFlags = 0;
 		recordOffset = activeHeadOffset;
 		perPlaneRecordVisits = 0;
@@ -7228,19 +7367,19 @@ int SlipDraw3D_PostPlaneClip(uint8_t *recordBase, size_t recordBytes, uint32_t i
 				return 0;
 			}
 			record = recordBase + recordOffset;
-			recordX = SlipBytes_ReadLEI32(record + 0x0cu);
-			recordY = SlipBytes_ReadLEI32(record + 0x10u);
-			planeX = SlipBytes_ReadLEI32(plane + 0x0cu);
-			planeY = SlipBytes_ReadLEI32(plane + 0x10u);
-			planeNormalX = (int16_t)SlipBytes_ReadLE16(plane + 0x2cu);
-			planeNormalY = (int16_t)SlipBytes_ReadLE16(plane + 0x30u);
+			recordX = SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, screenX));
+			recordY = SlipBytes_ReadLEI32(record + offsetof(SlipDraw3DDrawRecord, screenY));
+			planeX = SlipBytes_ReadLEI32(plane + offsetof(SlipDraw3DDrawRecord, screenX));
+			planeY = SlipBytes_ReadLEI32(plane + offsetof(SlipDraw3DDrawRecord, screenY));
+			planeNormalX = (int16_t)SlipBytes_ReadLE16(plane + SLIP_DRAW3D_EDGE_NORMAL_X_OFFSET);
+			planeNormalY = (int16_t)SlipBytes_ReadLE16(plane + SLIP_DRAW3D_EDGE_NORMAL_Y_OFFSET);
 			planeDepth = SlipDraw3D_PostPlaneDepth(recordX, planeX, planeNormalX, recordY, planeY, planeNormalY);
-			SlipDraw3D_WriteI32(record + 0x1cu, planeDepth);
-			flag = planeDepth < 0 ? 0x2000u : 0;
+			SlipDraw3D_WriteI32(record + SLIP_DRAW3D_PLANE_DISTANCE_OFFSET, planeDepth);
+			flag = planeDepth < 0 ? SLIP_CLIP_AUXILIARY : 0;
 			allFlags &= flag;
 			anyFlags |= flag;
 			SlipDraw3D_WriteLE32(record + SLIP_DRAW3D_VERTEX_RECORD_FLAGS_OFFSET, flag);
-			nextRecordOffset = SlipBytes_ReadLE32(record + 0x34u);
+			nextRecordOffset = SlipBytes_ReadLE32(record + SLIP_DRAW3D_RECORD_NEXT_OFFSET);
 			recordVisit = recordVisits + recordVisitCount;
 			*recordVisit =
 			    (SlipDraw3DPostPlaneClipRecordVisit){.planeOffset = planeOffset,
@@ -7308,7 +7447,7 @@ int SlipDraw3D_PostPlaneClip(uint8_t *recordBase, size_t recordBytes, uint32_t i
 				return 0;
 			}
 		}
-		planeVisit->nextPlaneOffset = SlipBytes_ReadLE32(plane + 0x34u);
+		planeVisit->nextPlaneOffset = SlipBytes_ReadLE32(plane + SLIP_DRAW3D_RECORD_NEXT_OFFSET);
 		planeVisit->loop = planeVisit->nextPlaneOffset != planeHeadOffset;
 		planeOffset = planeVisit->nextPlaneOffset;
 		++planeVisitCount;
@@ -7738,7 +7877,7 @@ int SlipDraw3D_BackgroundSetup(const uint8_t *materialTable, size_t materialTabl
 	uint16_t viewTilt;
 	uint16_t fixedFillThreshold;
 
-	if (materialTable == NULL || viewMatrix == NULL || result == NULL || materialTableBytes < 2u) {
+	if (materialTable == NULL || viewMatrix == NULL || result == NULL || materialTableBytes < sizeof(uint16_t)) {
 		return 0;
 	}
 
@@ -7749,17 +7888,18 @@ int SlipDraw3D_BackgroundSetup(const uint8_t *materialTable, size_t materialTabl
 	materialIndex = stripMaterialIndex;
 	materialCount = SlipBytes_ReadLE16(materialTable);
 	if (materialIndex < materialCount) {
-		materialOffset = (((uint32_t)0x54u * materialIndex) & 0xffffu) + 4u;
+		materialOffset = ((SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE * materialIndex) & UINT16_MAX) +
+		                 SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 	} else {
-		materialOffset = 4u;
+		materialOffset = SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 	}
-	if ((size_t)materialOffset + 0x15u > materialTableBytes) {
+	if ((size_t)materialOffset + SLIP_DRAW3D_MATERIAL_RAMP_END_FIRST_BYTE_END > materialTableBytes) {
 		return 0;
 	}
 
 	viewTilt = (uint16_t)viewMatrix->m[7];
 
-	fixedFillThreshold = (uint16_t)(stripCurvature + 0x1f00u);
+	fixedFillThreshold = (uint16_t)(stripCurvature + SLIP_BACKGROUND_FIXED_FILL_TILT_BIAS_Q14);
 	out = (SlipDraw3DBackgroundSetup){backgroundDistance,
 	                                  backgroundSpan,
 	                                  backgroundMaterialIndex,
@@ -7772,8 +7912,8 @@ int SlipDraw3D_BackgroundSetup(const uint8_t *materialTable, size_t materialTabl
 	                                  materialIndex,
 	                                  materialCount,
 	                                  materialOffset,
-	                                  materialTable[materialOffset + 0x10u],
-	                                  materialTable[materialOffset + 0x14u],
+	                                  materialTable[materialOffset + SLIP_DRAW3D_MATERIAL_RAMP_START_OFFSET],
+	                                  materialTable[materialOffset + SLIP_DRAW3D_MATERIAL_RAMP_END_OFFSET],
 	                                  fixedStripCount,
 	                                  cachedFixedStripCount,
 	                                  (uint8_t)projectionRevisionAfterScale,
@@ -7813,13 +7953,13 @@ int SlipDraw3D_BackgroundSetup(const uint8_t *materialTable, size_t materialTabl
 	if ((int16_t)viewTilt >= (int16_t)fixedFillThreshold) {
 		out.branch = SLIP_DRAW3D_BACKGROUND_SETUP_FIXED_FILL;
 		out.materialFillFlag = 0;
-		out.fixedFillFlag = 0xffffu;
-	} else if ((int16_t)viewTilt <= (int16_t)0xd000u) {
+		out.fixedFillFlag = SLIP_BACKGROUND_FILL_ENABLED;
+	} else if ((int16_t)viewTilt <= SLIP_BACKGROUND_MATERIAL_FILL_TILT_MAXIMUM_Q14) {
 		out.branch = SLIP_DRAW3D_BACKGROUND_SETUP_MATERIAL_FILL;
 		out.callDraw3DBackgroundMaterial = true;
 		out.callDraw3DBackgroundValue = true;
 		out.materialFillValue = materialFillValue;
-		out.materialFillFlag = 0xffffu;
+		out.materialFillFlag = SLIP_BACKGROUND_FILL_ENABLED;
 		out.fixedFillFlag = 0;
 	} else {
 		out.branch = SLIP_DRAW3D_BACKGROUND_SETUP_STRIPS;
@@ -7838,9 +7978,9 @@ int SlipDraw3D_BackgroundSetup(const uint8_t *materialTable, size_t materialTabl
 		g_spriteScaleY = out.spriteScaleY;
 		g_spriteHalfWidth = out.spriteHalfWidth;
 		g_spriteHalfHeight = out.spriteHalfHeight;
-		out.tiltComponent = (uint16_t)(viewTilt - 0x00c0u);
+		out.tiltComponent = (uint16_t)(viewTilt - SLIP_BACKGROUND_TILT_CENTRE_BIAS_Q14);
 		out.tiltComponentSquare = (uint32_t)((int32_t)(int16_t)out.tiltComponent * (int32_t)(int16_t)out.tiltComponent);
-		out.complementSquare = 0x10000000u - out.tiltComponentSquare;
+		out.complementSquare = (SLIP_Q14_ONE * SLIP_Q14_ONE) - out.tiltComponentSquare;
 		out.complementComponent = SlipDraw3D_Root32(out.complementSquare);
 		out.callDraw3DBackgroundStripTableFixed = true;
 		out.callDraw3DBackgroundStripTableMaterial = true;
@@ -7861,7 +8001,7 @@ int SlipDraw3D_BackgroundStripBuild(const SlipView3DMaths *maths, uint8_t *fixed
 	uint16_t stepHigh = 0;
 	uint16_t currentLow = 0;
 	uint16_t currentWord;
-	uint16_t previousStripValue = 0xffffu;
+	uint16_t previousStripValue = SLIP_BACKGROUND_NO_PREVIOUS_STRIP;
 	uint16_t angle = 0;
 	uint16_t angleStep;
 	uint16_t scaleStep;
@@ -7869,31 +8009,36 @@ int SlipDraw3D_BackgroundStripBuild(const SlipView3DMaths *maths, uint8_t *fixed
 	size_t stripOffset;
 	uint16_t outCount;
 	uint16_t diagnosticCount = 0;
-	uint16_t diagnosticAngles[16] = {0};
-	uint16_t diagnosticTrig[16] = {0};
-	uint16_t diagnosticStripValues[16] = {0};
+	uint16_t diagnosticAngles[SLIP_BACKGROUND_STRIP_DIAGNOSTIC_CAPACITY] = {0};
+	uint16_t diagnosticTrig[SLIP_BACKGROUND_STRIP_DIAGNOSTIC_CAPACITY] = {0};
+	uint16_t diagnosticStripValues[SLIP_BACKGROUND_STRIP_DIAGNOSTIC_CAPACITY] = {0};
 
 	if (maths == NULL || fixedStripTable == NULL || result == NULL || fixedStripCount == 0 ||
-	    stripTableBytes < 2u + ((size_t)fixedStripCount + 2u) * 0x0cu) {
+	    stripTableBytes < SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES +
+	                          ((size_t)fixedStripCount + SLIP_BACKGROUND_FIXED_STRIP_RESERVED_ENTRIES) *
+	                              SLIP_BACKGROUND_STRIP_BYTES) {
 		return 0;
 	}
 
 	countWord = fixedStripCount;
-	stripOffset = 2u;
+	stripOffset = SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES;
 	SlipDraw3D_WriteLE16(fixedStripTable, 0);
 	divisor = (uint32_t)countWord - 1u;
 	currentWord = startValueByte;
 	if (divisor != 0u) {
 		const int32_t dividend = (int32_t)(int16_t)((uint16_t)startValueByte - (uint16_t)endValueByte);
-		const int32_t quotient = (int32_t)((dividend << 16) / (int32_t)divisor);
+		const int32_t quotient = (int32_t)((dividend << SLIP_BACKGROUND_STRIP_VALUE_FRACTION_BITS) / (int32_t)divisor);
 
 		stepLow = (uint16_t)quotient;
-		stepHigh = (uint16_t)(quotient >> 16);
+		stepHigh = (uint16_t)(quotient >> SLIP_BACKGROUND_STRIP_VALUE_FRACTION_BITS);
 		currentWord = endValueByte;
 	}
 
-	scaleStep = (uint16_t)((((int32_t)(int16_t)stripCurvature << 16) >> 2) / 0x2000);
-	angleStep = (uint16_t)(0x2000u / countWord);
+	scaleStep = (uint16_t)((((int32_t)(int16_t)stripCurvature
+	                         << (SLIP_Q14_FRACTION_BITS + SLIP_BACKGROUND_STRIP_CURVATURE_PRESCALE_BITS)) >>
+	                        SLIP_BACKGROUND_STRIP_CURVATURE_PRESCALE_BITS) /
+	                       SLIP_BACKGROUND_STRIP_CURVATURE_DIVISOR);
+	angleStep = (uint16_t)(SLIP_BACKGROUND_STRIP_ANGLE_SPAN / countWord);
 	outCount = 0;
 	remainingStrips = countWord;
 	while (remainingStrips != 0u) {
@@ -7905,23 +8050,23 @@ int SlipDraw3D_BackgroundStripBuild(const SlipView3DMaths *maths, uint8_t *fixed
 		stripValue = SlipDraw3D_UnsignedProductShift14LowWord((uint32_t)stripValue * (uint16_t)scale);
 		stripValue = (uint16_t)(0u - stripValue);
 		stripValue = SlipDraw3D_SignedProductShift14LowWord((int32_t)(int16_t)stripValue * (int32_t)(int16_t)scaleStep);
-		if (diagnosticCount < 16u) {
+		if (diagnosticCount < SLIP_BACKGROUND_STRIP_DIAGNOSTIC_CAPACITY) {
 			diagnosticAngles[diagnosticCount] = angle;
 			diagnosticTrig[diagnosticCount] = (uint16_t)tangent;
 			diagnosticStripValues[diagnosticCount] = stripValue;
 			++diagnosticCount;
 		}
-		SlipDraw3D_WriteLE16(fixedStripTable + stripOffset + 2u, stripValue);
+		SlipDraw3D_WriteLE16(fixedStripTable + stripOffset + SLIP_BACKGROUND_STRIP_CENTRE_OFFSET, stripValue);
 		--remainingStrips;
 		if (stripValue != previousStripValue) {
 			previousStripValue = stripValue;
-			stripOffset += 0x0cu;
+			stripOffset += SLIP_BACKGROUND_STRIP_BYTES;
 			++outCount;
 			SlipDraw3D_WriteLE16(fixedStripTable, outCount);
 		}
 		{
 			const uint32_t sumLow = (uint32_t)currentLow + stepLow;
-			const uint16_t carry = sumLow > 0xffffu ? 1u : 0u;
+			const uint16_t carry = sumLow > UINT16_MAX ? 1u : 0u;
 
 			currentLow = (uint16_t)sumLow;
 			currentWord = (uint16_t)(currentWord + stepHigh + carry);
@@ -7930,11 +8075,12 @@ int SlipDraw3D_BackgroundStripBuild(const SlipView3DMaths *maths, uint8_t *fixed
 	}
 	++outCount;
 	SlipDraw3D_WriteLE16(fixedStripTable, outCount);
-	if (stripOffset == 2u) {
-		stripOffset += 2u;
+	if (stripOffset == SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES) {
+		stripOffset += sizeof(uint16_t);
 	}
-	SlipDraw3D_WriteLE16(fixedStripTable + stripOffset + 2u, 0xe000u);
-	SlipDraw3D_WriteLE16(fixedStripTable + stripOffset - 0x0cu, startValueByte);
+	SlipDraw3D_WriteLE16(fixedStripTable + stripOffset + SLIP_BACKGROUND_STRIP_CENTRE_OFFSET,
+	                     (uint16_t)SLIP_BACKGROUND_STRIP_FINAL_CENTRE_Q14);
+	SlipDraw3D_WriteLE16(fixedStripTable + stripOffset - SLIP_BACKGROUND_STRIP_BYTES, startValueByte);
 	*result = (SlipDraw3DBackgroundStripBuild){fixedStripCount,
 	                                           startValueByte,
 	                                           endValueByte,
@@ -8057,8 +8203,8 @@ static void SlipDraw3D_Add64Words(uint32_t lowA, uint32_t highA, uint32_t lowB, 
 }
 
 static uint32_t SlipDraw3D_RoundShift14Low32FromHalves(uint32_t low, uint32_t high, bool *carryOut) {
-	const uint32_t shifted = (low >> 14) | (high << 18);
-	const uint32_t carry = (low >> 13) & 1u;
+	const uint32_t shifted = (low >> SLIP_Q14_FRACTION_BITS) | (high << SLIP_Q14_DWORD_HIGH_SHIFT);
+	const uint32_t carry = (low >> (SLIP_Q14_FRACTION_BITS - 1)) & 1u;
 
 	if (carryOut != NULL) {
 		*carryOut = carry != 0u;
@@ -8077,7 +8223,7 @@ static int64_t SlipDraw3D_I64FromU64(uint64_t value) {
 }
 
 static uint32_t SlipDraw3D_RoundSignedHalf(uint32_t value) {
-	const uint32_t shifted = (value >> 1) | (value & 0x80000000u);
+	const uint32_t shifted = (value >> 1) | (value & SLIP_DRAW3D_DWORD_SIGN_BIT);
 	const uint32_t carry = value & 1u;
 
 	return shifted + carry;
@@ -8100,7 +8246,8 @@ static void SlipDraw3D_MultiplyUnsignedWords(uint16_t multiplicand, uint16_t ope
 }
 
 static uint16_t SlipDraw3D_Shift14LowWordFromHalves(uint16_t productLowWord, uint16_t productHighWord) {
-	return (uint16_t)((uint16_t)(productLowWord >> 14) | (uint16_t)(productHighWord << 2));
+	return (uint16_t)((uint16_t)(productLowWord >> SLIP_Q14_FRACTION_BITS) |
+	                  (uint16_t)(productHighWord << SLIP_Q14_WORD_HIGH_SHIFT));
 }
 
 static uint32_t SlipDraw3D_MultiplyUnsignedLowWordPreserveHigh(uint32_t multiplicand, uint16_t operand) {
@@ -8108,7 +8255,8 @@ static uint32_t SlipDraw3D_MultiplyUnsignedLowWordPreserveHigh(uint32_t multipli
 	uint16_t productHighWord;
 
 	SlipDraw3D_MultiplyUnsignedWords((uint16_t)multiplicand, operand, &productLowWord, &productHighWord);
-	return (multiplicand & 0xffff0000u) | SlipDraw3D_Shift14LowWordFromHalves(productLowWord, productHighWord);
+	return (multiplicand & SLIP_DRAW3D_UPPER_WORD_MASK) |
+	       SlipDraw3D_Shift14LowWordFromHalves(productLowWord, productHighWord);
 }
 
 static uint32_t SlipDraw3D_MultiplySignedLowWordPreserveHigh(uint32_t multiplicand, uint16_t operand) {
@@ -8116,7 +8264,8 @@ static uint32_t SlipDraw3D_MultiplySignedLowWordPreserveHigh(uint32_t multiplica
 	const uint16_t productLowWord = (uint16_t)product;
 	const uint16_t productHighWord = (uint16_t)((uint32_t)product >> 16);
 
-	return (multiplicand & 0xffff0000u) | SlipDraw3D_Shift14LowWordFromHalves(productLowWord, productHighWord);
+	return (multiplicand & SLIP_DRAW3D_UPPER_WORD_MASK) |
+	       SlipDraw3D_Shift14LowWordFromHalves(productLowWord, productHighWord);
 }
 
 int SlipDraw3D_LightingMaterial(const SlipDraw3DMaterialRecord *materialRecord, size_t materialRecordBytes,
@@ -8129,7 +8278,9 @@ int SlipDraw3D_LightingMaterial(const SlipDraw3DMaterialRecord *materialRecord, 
 	uint32_t fadeBlend = inputFadeBlend;
 	const SlipDraw3DMaterialRecord *const material = materialRecord;
 
-	if (materialRecord == NULL || materialRecordBytes < 0x2cu || result == NULL) {
+	if (materialRecord == NULL ||
+	    materialRecordBytes < offsetof(SlipDraw3DMaterialRecord, specularCoefficient) + sizeof(uint32_t) ||
+	    result == NULL) {
 		return 0;
 	}
 
@@ -8160,7 +8311,7 @@ int SlipDraw3D_LightingMaterial(const SlipDraw3DMaterialRecord *materialRecord, 
 	if (out.fixedValue != 0u) {
 		out.branch = SLIP_DRAW3D_LIGHTING_MATERIAL_BRANCH_FIXED;
 		shadeAccumulator = out.fixedValue;
-		scaledContribution = 0x4000u - shadeAccumulator;
+		scaledContribution = SLIP_Q14_ONE - shadeAccumulator;
 		scaledContribution =
 		    SlipDraw3D_MultiplyUnsignedLowWordPreserveHigh(scaledContribution, (uint16_t)inputFadeBlend);
 		fadeBlend = scaledContribution;
@@ -8183,8 +8334,8 @@ int SlipDraw3D_LightingMaterial(const SlipDraw3DMaterialRecord *materialRecord, 
 			    SlipDraw3D_MultiplyUnsignedLowWordPreserveHigh(specularLight, (uint16_t)out.specularCoefficient);
 			shadeAccumulator += scaledContribution;
 		}
-		if (shadeAccumulator > 0x4000u) {
-			shadeAccumulator = 0x4000u;
+		if (shadeAccumulator > SLIP_Q14_ONE) {
+			shadeAccumulator = SLIP_Q14_ONE;
 			out.clampedUnsigned = true;
 		}
 	}
@@ -8203,7 +8354,7 @@ int SlipDraw3D_LightingMaterial(const SlipDraw3DMaterialRecord *materialRecord, 
 		*result = out;
 		return 1;
 	}
-	if (fadeBlend == 0x4000u) {
+	if (fadeBlend == SLIP_Q14_ONE) {
 		out.fullBlend = true;
 		out.shade = fadeColour;
 		*result = out;
@@ -8217,8 +8368,8 @@ int SlipDraw3D_LightingMaterial(const SlipDraw3DMaterialRecord *materialRecord, 
 	if ((int32_t)shadeAccumulator < 0) {
 		shadeAccumulator = 0;
 		out.clampedNegative = true;
-	} else if ((int32_t)shadeAccumulator > 0x4000) {
-		shadeAccumulator = 0x4000u;
+	} else if ((int32_t)shadeAccumulator > SLIP_Q14_ONE) {
+		shadeAccumulator = SLIP_Q14_ONE;
 		out.clampedHigh = true;
 	}
 	out.shade = shadeAccumulator;
@@ -8248,9 +8399,10 @@ int SlipDraw3D_PolygonColor(const SlipDraw3DMaterialRecord *material, int16_t no
 		if (state->direct != 0) {
 			const int64_t dot = (int64_t)normalX * (int16_t)state->light.x +
 			                    (int64_t)normalY * (int16_t)state->light.y + (int64_t)normalZ * (int16_t)state->light.z;
-			const int32_t projected = -(int32_t)(int16_t)((uint64_t)dot >> 14);
+			const int32_t projected = -(int32_t)(int16_t)((uint64_t)dot >> SLIP_Q14_FRACTION_BITS);
 			if (projected >= 0)
-				diffuse = (uint16_t)(((uint32_t)(uint16_t)projected * (uint16_t)state->direct) >> 14);
+				diffuse =
+				    (uint16_t)(((uint32_t)(uint16_t)projected * (uint16_t)state->direct) >> SLIP_Q14_FRACTION_BITS);
 		}
 	}
 	if (state->fadeStart != 0) {
@@ -8267,7 +8419,7 @@ int SlipDraw3D_PolygonColor(const SlipDraw3DMaterialRecord *material, int16_t no
 	return 1;
 }
 
-static uint16_t standaloneSpecularTable[0x4001];
+static uint16_t standaloneSpecularTable[SLIP_Q14_ONE + 1];
 static const uint16_t *boundSpecularTable = standaloneSpecularTable;
 static uint32_t specularThreshold;
 
@@ -8282,19 +8434,19 @@ void SlipDraw3D_InstallSpecularTable(void) {
 	uint32_t power;
 	do {
 		power = value;
-		for (unsigned step = 0; step < 5; ++step) {
+		for (unsigned step = 0; step < SLIP_DRAW3D_SPECULAR_SQUARING_STEPS; ++step) {
 			const uint16_t doubled = (uint16_t)(power << 1);
-			power = ((uint32_t)doubled * doubled) >> 16;
+			power = ((uint32_t)doubled * doubled) >> SLIP_WORD_BITS;
 		}
 		if (power == 0)
 			++value;
 	} while (power == 0);
 	specularThreshold = value;
-	for (; value <= 0x4000u; ++value) {
+	for (; value <= SLIP_Q14_ONE; ++value) {
 		power = value;
-		for (unsigned step = 0; step < 5; ++step) {
+		for (unsigned step = 0; step < SLIP_DRAW3D_SPECULAR_SQUARING_STEPS; ++step) {
 			const uint16_t doubled = (uint16_t)(power << 1);
-			power = ((uint32_t)doubled * doubled) >> 16;
+			power = ((uint32_t)doubled * doubled) >> SLIP_WORD_BITS;
 		}
 		standaloneSpecularTable[value - specularThreshold] = (uint16_t)power;
 	}
@@ -8317,17 +8469,17 @@ static uint16_t SlipDraw3D_Specular(SlipDraw3DVec32 relative, int16_t normalX, i
 	SlipDraw3D_ApproxAbsVectorLength((uint32_t)x, (uint32_t)y, (uint32_t)z, &length);
 	uint32_t ratio;
 	if (high >= length.approximateLength) {
-		ratio = 0x4000u;
+		ratio = SLIP_Q14_ONE;
 	} else {
 		ratio = (uint32_t)((((uint64_t)high << 32) | (uint32_t)dot) / length.approximateLength);
-		if (ratio > 0x4000u)
-			ratio = 0x4000u;
+		if (ratio > SLIP_Q14_ONE)
+			ratio = SLIP_Q14_ONE;
 	}
 	uint32_t index = ratio - specularThreshold;
 	if ((int32_t)index < 0)
 		return 0;
-	index = ((index << 1) & 0xfffeu) >> 1;
-	return (uint16_t)(((uint32_t)boundSpecularTable[index] * (uint16_t)state->direct) >> 14);
+	index = ((index << 1) & SLIP_DRAW3D_WORD_ALIGNED_INDEX_MASK) >> 1;
+	return (uint16_t)(((uint32_t)boundSpecularTable[index] * (uint16_t)state->direct) >> SLIP_Q14_FRACTION_BITS);
 }
 
 uint32_t SlipDraw3D_VertexColor(const SlipDraw3DMaterialRecord *material, SlipDraw3DVertexRecord *vertex,
@@ -8348,9 +8500,9 @@ uint32_t SlipDraw3D_VertexColor(const SlipDraw3DMaterialRecord *material, SlipDr
 	if (state->direct != 0) {
 		const int64_t dot = (int64_t)normalX * (int16_t)state->light.x + (int64_t)normalY * (int16_t)state->light.y +
 		                    (int64_t)normalZ * (int16_t)state->light.z;
-		const int32_t projected = -(int32_t)(int16_t)((uint64_t)dot >> 14);
+		const int32_t projected = -(int32_t)(int16_t)((uint64_t)dot >> SLIP_Q14_FRACTION_BITS);
 		if (projected >= 0)
-			diffuse = (uint16_t)(((uint32_t)(uint16_t)projected * (uint16_t)state->direct) >> 14);
+			diffuse = (uint16_t)(((uint32_t)(uint16_t)projected * (uint16_t)state->direct) >> SLIP_Q14_FRACTION_BITS);
 	}
 
 	if (state->fadeStart != 0) {
@@ -8435,29 +8587,33 @@ int SlipDraw3D_DrawUnclippedPolygon(const SlipDraw3DMaterialTable *materials, ui
 		SlipDraw3DVertexRecord *const vertex = &vertices[index];
 		SlipDraw3D_ProjectUnclippedVertex(vertex, projection, transform, project, lighting->transformContext);
 
-		uint8_t *const point = boundPointBuffer + (size_t)vertexIndex * 0x20u;
+		uint8_t *const point = boundPointBuffer + (size_t)vertexIndex * sizeof(RasterTexturedPoint);
 		SlipDraw3D_WriteLE32(point, (uint32_t)vertex->screenX);
-		SlipDraw3D_WriteLE32(point + 4, (uint32_t)vertex->screenY);
+		SlipDraw3D_WriteLE32(point + offsetof(RasterPoint, y), (uint32_t)vertex->screenY);
 		if (shaded) {
 			const uint8_t *const normal = stream + (size_t)count * SLIP_SERIALIZED_INDEX_BYTES +
 			                              (size_t)vertexIndex * SLIP_SERIALIZED_NORMAL_BYTES;
-			const uint32_t color = SlipDraw3D_VertexColor(material, vertex, (int16_t)SlipBytes_ReadLE16(normal),
-			                                              (int16_t)SlipBytes_ReadLE16(normal + 2),
-			                                              (int16_t)SlipBytes_ReadLE16(normal + 4), lighting);
+			const uint32_t color = SlipDraw3D_VertexColor(
+			    material, vertex, (int16_t)SlipBytes_ReadLE16(normal + SLIP_SERIALIZED_NORMAL_X_OFFSET),
+			    (int16_t)SlipBytes_ReadLE16(normal + SLIP_SERIALIZED_NORMAL_Y_OFFSET),
+			    (int16_t)SlipBytes_ReadLE16(normal + SLIP_SERIALIZED_NORMAL_Z_OFFSET), lighting);
 
-			const uint32_t rotated = (color & 0xffff0000u) | ((color << 8) & 0xff00u) | ((color >> 8) & 0xffu);
-			SlipDraw3D_WriteLE32(point + 8, rotated);
+			const uint32_t rotated = (color & SLIP_DRAW3D_UPPER_WORD_MASK) |
+			                         ((color << 8) & SLIP_DRAW3D_SHADE_HIGH_BYTE_MASK) | ((color >> 8) & UINT8_MAX);
+			SlipDraw3D_WriteLE32(point + offsetof(RasterShadedPoint, shade), rotated);
 		}
 		++vertexIndex;
 	} while (--remaining != 0);
 
 	for (uint16_t index = 0; index < count; ++index) {
-		const uint8_t *const point = boundPointBuffer + (size_t)index * 0x20u;
+		const uint8_t *const point = boundPointBuffer + (size_t)index * sizeof(RasterTexturedPoint);
 		if (shaded)
-			shades[index] = (RasterShadedPoint){SlipBytes_ReadLEI32(point), SlipBytes_ReadLEI32(point + 4),
-			                                    SlipBytes_ReadLE16(point + 8)};
+			shades[index] =
+			    (RasterShadedPoint){SlipBytes_ReadLEI32(point), SlipBytes_ReadLEI32(point + offsetof(RasterPoint, y)),
+			                        SlipBytes_ReadLE16(point + offsetof(RasterShadedPoint, shade))};
 		else
-			points[index] = (RasterPoint){SlipBytes_ReadLEI32(point), SlipBytes_ReadLEI32(point + 4)};
+			points[index] =
+			    (RasterPoint){SlipBytes_ReadLEI32(point), SlipBytes_ReadLEI32(point + offsetof(RasterPoint, y))};
 	}
 	if (shaded)
 		Raster_DrawShadedFlatPolygon(shades, count);
@@ -8478,8 +8634,9 @@ static uint16_t SlipDraw3D_MultiplySigned16RoundShift14AddCenter(uint16_t scaleW
 	product = (int32_t)(int16_t)scaleWord * (int32_t)(int16_t)centerOffset;
 	productLowWord = (uint16_t)product;
 	productHighWord = (uint16_t)((uint32_t)product >> 16);
-	shifted = (uint16_t)((uint16_t)(productLowWord >> 14) | (uint16_t)(productHighWord << 2));
-	carry = (uint16_t)((productLowWord >> 13) & 1u);
+	shifted = (uint16_t)((uint16_t)(productLowWord >> SLIP_Q14_FRACTION_BITS) |
+	                     (uint16_t)(productHighWord << SLIP_Q14_WORD_HIGH_SHIFT));
+	carry = (uint16_t)((productLowWord >> (SLIP_Q14_FRACTION_BITS - 1)) & 1u);
 	if (shiftedWord != NULL) {
 		*shiftedWord = shifted;
 	}
@@ -8587,14 +8744,14 @@ int SlipDraw3D_BackgroundMaterial(const uint8_t *materialTable, size_t materialT
 	uint16_t wordAdditionCarry;
 	uint32_t negated;
 
-	if (materialTable == NULL || result == NULL || materialTableBytes < 2u) {
+	if (materialTable == NULL || result == NULL || materialTableBytes < sizeof(uint16_t)) {
 		return 0;
 	}
 	out = (SlipDraw3DBackgroundMaterial){materialIndex,
 	                                     SlipBytes_ReadLE16(materialTable),
 	                                     false,
-	                                     4u,
-	                                     4u,
+	                                     offsetof(SlipDraw3DMaterialTable, records),
+	                                     SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES,
 	                                     detailScale,
 	                                     detailScale == 0u,
 	                                     0,
@@ -8608,7 +8765,8 @@ int SlipDraw3D_BackgroundMaterial(const uint8_t *materialTable, size_t materialT
 	                                     true};
 	out.materialIndexInRange = materialIndex < out.materialCount;
 	if (out.materialIndexInRange) {
-		out.materialRecordOffset = (((uint32_t)0x54u * materialIndex) & 0xffffu) + 4u;
+		out.materialRecordOffset = ((SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE * materialIndex) & UINT16_MAX) +
+		                           SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES;
 		out.selectedMaterialRecordOffset = out.materialRecordOffset;
 	}
 	if ((size_t)out.selectedMaterialRecordOffset > materialTableBytes) {
@@ -8628,18 +8786,18 @@ int SlipDraw3D_BackgroundMaterial(const uint8_t *materialTable, size_t materialT
 	SlipDraw3D_MultiplySignedWords(0u, out.lightVectorX, &productLowWord, &productHighWord);
 	lightSumLow = productLowWord;
 	lightSumHigh = productHighWord;
-	SlipDraw3D_MultiplySignedWords((uint16_t)out.lightVectorY, 0x4000u, &productLowWord, &productHighWord);
-	wordAdditionCarry = (uint16_t)((uint32_t)lightSumLow + productLowWord > 0xffffu ? 1u : 0u);
+	SlipDraw3D_MultiplySignedWords((uint16_t)out.lightVectorY, SLIP_Q14_ONE, &productLowWord, &productHighWord);
+	wordAdditionCarry = (uint16_t)((uint32_t)lightSumLow + productLowWord > UINT16_MAX ? 1u : 0u);
 	lightSumLow = (uint16_t)(lightSumLow + productLowWord);
 	lightSumHigh = lightSumHigh + productHighWord + wordAdditionCarry;
 	SlipDraw3D_MultiplySignedWords((uint16_t)out.lightVectorZ, 0u, &productLowWord, &productHighWord);
-	wordAdditionCarry = (uint16_t)((uint32_t)productLowWord + lightSumLow > 0xffffu ? 1u : 0u);
+	wordAdditionCarry = (uint16_t)((uint32_t)productLowWord + lightSumLow > UINT16_MAX ? 1u : 0u);
 	productLowWord = (uint16_t)(productLowWord + lightSumLow);
 	productHighWord = (uint16_t)((uint32_t)productHighWord + lightSumHigh + wordAdditionCarry);
 	out.projectedLight = SlipDraw3D_Shift14LowWordFromHalves(productLowWord, productHighWord);
 	negated = (uint32_t)(-(int32_t)(int16_t)out.projectedLight);
 	out.negatedProjectedLight = negated;
-	out.negativeBranch = (negated & 0x80000000u) != 0u;
+	out.negativeBranch = (negated & SLIP_DRAW3D_DWORD_SIGN_BIT) != 0u;
 	if (out.negativeBranch) {
 		*result = out;
 		return 1;
@@ -8658,7 +8816,8 @@ int SlipDraw3D_BackgroundValue(const uint8_t *materialRecord, size_t materialRec
 	uint16_t productLowWord;
 	uint16_t productHighWord;
 
-	if (materialRecord == NULL || materialRecordBytes < 0x18u || result == NULL) {
+	if (materialRecord == NULL ||
+	    materialRecordBytes < offsetof(SlipDraw3DMaterialRecord, rampEnd) + sizeof(uint32_t) || result == NULL) {
 		return 0;
 	}
 	out = (SlipDraw3DBackgroundValue){true,
@@ -8677,8 +8836,8 @@ int SlipDraw3D_BackgroundValue(const uint8_t *materialRecord, size_t materialRec
 	                                  0,
 	                                  true};
 	if (limitEnabled == 0u) {
-		out.baseValue = SlipBytes_ReadLE32(materialRecord + 0x10u);
-		out.endValue = SlipBytes_ReadLE32(materialRecord + 0x14u);
+		out.baseValue = SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, rampStart));
+		out.endValue = SlipBytes_ReadLE32(materialRecord + offsetof(SlipDraw3DMaterialRecord, rampEnd));
 	} else {
 		out.baseValue = limitStart;
 		out.endValue = limitEnd;
@@ -8686,7 +8845,7 @@ int SlipDraw3D_BackgroundValue(const uint8_t *materialRecord, size_t materialRec
 	out.valueDifference = out.endValue - out.baseValue;
 	SlipDraw3D_MultiplyUnsignedWords((uint16_t)out.valueDifference, depthBlend, &productLowWord, &productHighWord);
 	out.scaledDifferenceLow = SlipDraw3D_Shift14LowWordFromHalves(productLowWord, productHighWord);
-	out.mergedDifference = (out.valueDifference & 0xffff0000u) | out.scaledDifferenceLow;
+	out.mergedDifference = (out.valueDifference & SLIP_DRAW3D_UPPER_WORD_MASK) | out.scaledDifferenceLow;
 	out.interpolatedValue = out.mergedDifference + out.baseValue;
 	out.value = (uint16_t)out.interpolatedValue;
 	*result = out;
@@ -8700,7 +8859,9 @@ int SlipDraw3D_BackgroundValueExecute(const uint8_t *materialRecord, size_t mate
                                       SlipDraw3DBackgroundValueExecute *result) {
 	SlipDraw3DBackgroundValueExecute out;
 
-	if (materialRecord == NULL || materialRecordBytes < 0x2cu || result == NULL) {
+	if (materialRecord == NULL ||
+	    materialRecordBytes < offsetof(SlipDraw3DMaterialRecord, specularCoefficient) + sizeof(uint32_t) ||
+	    result == NULL) {
 		return 0;
 	}
 
@@ -8729,7 +8890,7 @@ int SlipDraw3D_BackgroundStripEntry(uint8_t *stripRecord, size_t stripRecordByte
 	uint16_t adjustedX;
 	uint16_t adjustedY;
 
-	if (stripRecord == NULL || stripRecordBytes < 0x0cu || result == NULL) {
+	if (stripRecord == NULL || stripRecordBytes < SLIP_BACKGROUND_STRIP_BYTES || result == NULL) {
 		return 0;
 	}
 	out = (SlipDraw3DBackgroundStripEntry){centerOffset,
@@ -8773,10 +8934,10 @@ int SlipDraw3D_BackgroundStripEntry(uint8_t *stripRecord, size_t stripRecordByte
 		out.recordTop = (uint16_t)(centerY - halfHeight);
 		out.returnedWithoutOffset = true;
 	}
-	SlipDraw3D_WriteLE16(stripRecord + 0x08u, out.recordRight);
-	SlipDraw3D_WriteLE16(stripRecord + 0x0au, out.recordBottom);
-	SlipDraw3D_WriteLE16(stripRecord + 0x04u, out.recordLeft);
-	SlipDraw3D_WriteLE16(stripRecord + 0x06u, out.recordTop);
+	SlipDraw3D_WriteLE16(stripRecord + SLIP_BACKGROUND_STRIP_RIGHT_OFFSET, out.recordRight);
+	SlipDraw3D_WriteLE16(stripRecord + SLIP_BACKGROUND_STRIP_BOTTOM_OFFSET, out.recordBottom);
+	SlipDraw3D_WriteLE16(stripRecord + SLIP_BACKGROUND_STRIP_LEFT_OFFSET, out.recordLeft);
+	SlipDraw3D_WriteLE16(stripRecord + SLIP_BACKGROUND_STRIP_TOP_OFFSET, out.recordTop);
 	*result = out;
 	return 1;
 }
@@ -8792,16 +8953,27 @@ int SlipDraw3D_BackgroundStripTableFixed(uint8_t *fixedStripTable, size_t stripT
 	size_t i;
 	uint32_t stripEntryAddress;
 
-	if (fixedStripTable == NULL || result == NULL || stripTableBytes < 2u) {
+	if (fixedStripTable == NULL || result == NULL || stripTableBytes < SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES) {
 		return 0;
 	}
 	sourceCount = SlipBytes_ReadLE16(fixedStripTable);
 	if (sourceCount == 0u || sourceCount > visitCapacity || visits == NULL ||
-	    2u + (size_t)sourceCount * 0x0cu > stripTableBytes) {
+	    SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES + (size_t)sourceCount * SLIP_BACKGROUND_STRIP_BYTES >
+	        stripTableBytes) {
 		return 0;
 	}
-	out = (SlipDraw3DBackgroundStripTableFixed){backgroundSpan, true,        {0},         0, 0,   0, 0,
-	                                            0x00018260u,    sourceCount, 0x00018262u, 0, true};
+	out = (SlipDraw3DBackgroundStripTableFixed){backgroundSpan,
+	                                            true,
+	                                            {0},
+	                                            0,
+	                                            0,
+	                                            0,
+	                                            0,
+	                                            SLIP_BACKGROUND_FIXED_STRIP_TABLE_DOS_ADDRESS,
+	                                            sourceCount,
+	                                            SLIP_BACKGROUND_FIXED_STRIP_FIRST_DOS_ADDRESS,
+	                                            0,
+	                                            true};
 	if (!SlipDraw3D_BackgroundCenter(backgroundSpan, tiltComponent, complementComponent, backgroundDistance, scale,
 	                                 viewportX, viewportY, scaleX, scaleY, &out.center)) {
 		return 0;
@@ -8810,24 +8982,25 @@ int SlipDraw3D_BackgroundStripTableFixed(uint8_t *fixedStripTable, size_t stripT
 	out.centerY = out.center.centerY;
 	out.cachedCenterX = out.center.centerX;
 	out.cachedCenterY = out.center.centerY;
-	stripEntryAddress = 0x00018262u;
+	stripEntryAddress = SLIP_BACKGROUND_FIXED_STRIP_FIRST_DOS_ADDRESS;
 	for (i = 0; i < sourceCount; ++i) {
-		const size_t tableOffset = 2u + i * 0x0cu;
+		const size_t tableOffset = SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES + i * SLIP_BACKGROUND_STRIP_BYTES;
 		SlipDraw3DBackgroundStripTableVisitFixed *const visit = visits + i;
 
-		*visit = (SlipDraw3DBackgroundStripTableVisitFixed){stripEntryAddress,
-		                                                    SlipBytes_ReadLE16(fixedStripTable + tableOffset + 0x02u),
-		                                                    true,
-		                                                    {0},
-		                                                    stripEntryAddress + 0x0cu,
-		                                                    (uint32_t)sourceCount - (uint32_t)i - 1u,
-		                                                    i + 1u < sourceCount};
+		*visit = (SlipDraw3DBackgroundStripTableVisitFixed){
+		    stripEntryAddress,
+		    SlipBytes_ReadLE16(fixedStripTable + tableOffset + SLIP_BACKGROUND_STRIP_CENTRE_OFFSET),
+		    true,
+		    {0},
+		    stripEntryAddress + SLIP_BACKGROUND_STRIP_BYTES,
+		    (uint32_t)sourceCount - (uint32_t)i - 1u,
+		    i + 1u < sourceCount};
 		if (!SlipDraw3D_BackgroundStripEntry(fixedStripTable + tableOffset, stripTableBytes - tableOffset,
 		                                     visit->stripOffset, out.centerX, out.centerY, scaleX, scaleY, halfWidth,
 		                                     halfHeight, &visit->entry)) {
 			return 0;
 		}
-		stripEntryAddress += 0x0cu;
+		stripEntryAddress += SLIP_BACKGROUND_STRIP_BYTES;
 	}
 	out.visitCount = sourceCount;
 	*result = out;
@@ -8851,11 +9024,12 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 	uint32_t step;
 	uint16_t previousStripValue;
 
-	if (materialStripTable == NULL || materialTable == NULL || result == NULL || materialTableBytes < 2u) {
+	if (materialStripTable == NULL || materialTable == NULL || result == NULL ||
+	    materialTableBytes < sizeof(uint16_t)) {
 		return 0;
 	}
 
-	out = (SlipDraw3DBackgroundStripTableMaterial){0x00018562u,
+	out = (SlipDraw3DBackgroundStripTableMaterial){SLIP_BACKGROUND_MATERIAL_STRIP_TABLE_DOS_ADDRESS,
 	                                               count,
 	                                               fadeStart,
 	                                               (count != 1u && fadeStart != 0u)
@@ -8875,7 +9049,7 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 	                                               {0},
 	                                               0,
 	                                               0,
-	                                               0xffffu,
+	                                               UINT16_MAX,
 	                                               0,
 	                                               false,
 	                                               {0},
@@ -8891,11 +9065,13 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 	materialRecordBytes = materialTableBytes - (size_t)out.material.selectedMaterialRecordOffset;
 
 	if (out.branch == SLIP_DRAW3D_BACKGROUND_STRIP_TABLE_BRANCH_MULTI) {
-		const uint32_t dividendHigh = (backgroundSpan & 0x80000000u) ? 0xffffffffu : 0u;
+		const uint32_t dividendHigh = (backgroundSpan & SLIP_DRAW3D_DWORD_SIGN_BIT) ? UINT32_MAX : 0u;
 		size_t i;
 
 		if (count == 0u || dividendHigh >= (uint32_t)count || count > visitCapacity || visits == NULL ||
-		    14u + (size_t)count * 0x0cu > stripTableBytes) {
+		    (SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES + SLIP_BACKGROUND_STRIP_BYTES) +
+		            (size_t)count * SLIP_BACKGROUND_STRIP_BYTES >
+		        stripTableBytes) {
 			return 0;
 		}
 
@@ -8903,7 +9079,7 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 		cursor = step;
 		out.spanStep = step;
 		out.spanPosition = cursor;
-		stripEntryOffset = 2u;
+		stripEntryOffset = SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES;
 		if (!SlipDraw3D_BackgroundCenter(cursor, tiltComponent, complementComponent, backgroundDistance, scale,
 		                                 viewportX, viewportY, scaleX, scaleY, &out.initialCenter)) {
 			return 0;
@@ -8911,8 +9087,8 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 		out.centerX = out.initialCenter.centerX;
 		out.centerY = out.initialCenter.centerY;
 		if (!SlipDraw3D_BackgroundStripEntry(materialStripTable + stripEntryOffset, stripTableBytes - stripEntryOffset,
-		                                     0x2000u, out.centerX, out.centerY, scaleX, scaleY, halfWidth, halfHeight,
-		                                     &out.initialEntry)) {
+		                                     SLIP_BACKGROUND_STRIP_INITIAL_CENTRE_Q14, out.centerX, out.centerY, scaleX,
+		                                     scaleY, halfWidth, halfHeight, &out.initialEntry)) {
 			return 0;
 		}
 		if (!SlipDraw3D_BackgroundValueExecute(materialRecord, materialRecordBytes, backgroundDistance,
@@ -8924,15 +9100,16 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 		SlipDraw3D_WriteLE16(materialStripTable + stripEntryOffset, out.initialValue.value);
 		SlipDraw3D_WriteLE16(materialStripTable, 1u);
 		out.outputCount = 1u;
-		stripEntryOffset += 0x0cu;
-		out.entryAddressAfterInitial = 0x00018562u + (uint32_t)stripEntryOffset;
-		previousStripValue = 0xffffu;
+		stripEntryOffset += SLIP_BACKGROUND_STRIP_BYTES;
+		out.entryAddressAfterInitial = SLIP_BACKGROUND_MATERIAL_STRIP_TABLE_DOS_ADDRESS + (uint32_t)stripEntryOffset;
+		previousStripValue = SLIP_BACKGROUND_NO_PREVIOUS_STRIP;
 		out.previousValue = previousStripValue;
 
 		for (i = 0; i < count; ++i) {
 			SlipDraw3DBackgroundStripTableVisitMaterial *const visit = visits + i;
 
-			*visit = (SlipDraw3DBackgroundStripTableVisitMaterial){0x00018562u + (uint32_t)stripEntryOffset,
+			*visit = (SlipDraw3DBackgroundStripTableVisitMaterial){SLIP_BACKGROUND_MATERIAL_STRIP_TABLE_DOS_ADDRESS +
+			                                                           (uint32_t)stripEntryOffset,
 			                                                       cursor,
 			                                                       true,
 			                                                       {0},
@@ -8976,31 +9153,40 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 				}
 				visit->duplicateValue = visit->backgroundValue.value == previousStripValue;
 				if (visit->duplicateValue) {
-					SlipDraw3D_WriteLE16(materialStripTable + stripEntryOffset - 0x08u,
-					                     SlipBytes_ReadLE16(materialStripTable + stripEntryOffset + 0x04u));
-					SlipDraw3D_WriteLE16(materialStripTable + stripEntryOffset - 0x06u,
-					                     SlipBytes_ReadLE16(materialStripTable + stripEntryOffset + 0x06u));
-					SlipDraw3D_WriteLE16(materialStripTable + stripEntryOffset - 0x04u,
-					                     SlipBytes_ReadLE16(materialStripTable + stripEntryOffset + 0x08u));
-					SlipDraw3D_WriteLE16(materialStripTable + stripEntryOffset - 0x02u,
-					                     SlipBytes_ReadLE16(materialStripTable + stripEntryOffset + 0x0au));
+					SlipDraw3D_WriteLE16(
+					    materialStripTable + stripEntryOffset - SLIP_BACKGROUND_STRIP_BYTES +
+					        SLIP_BACKGROUND_STRIP_LEFT_OFFSET,
+					    SlipBytes_ReadLE16(materialStripTable + stripEntryOffset + SLIP_BACKGROUND_STRIP_LEFT_OFFSET));
+					SlipDraw3D_WriteLE16(
+					    materialStripTable + stripEntryOffset - SLIP_BACKGROUND_STRIP_BYTES +
+					        SLIP_BACKGROUND_STRIP_TOP_OFFSET,
+					    SlipBytes_ReadLE16(materialStripTable + stripEntryOffset + SLIP_BACKGROUND_STRIP_TOP_OFFSET));
+					SlipDraw3D_WriteLE16(
+					    materialStripTable + stripEntryOffset - SLIP_BACKGROUND_STRIP_BYTES +
+					        SLIP_BACKGROUND_STRIP_RIGHT_OFFSET,
+					    SlipBytes_ReadLE16(materialStripTable + stripEntryOffset + SLIP_BACKGROUND_STRIP_RIGHT_OFFSET));
+					SlipDraw3D_WriteLE16(materialStripTable + stripEntryOffset - SLIP_BACKGROUND_STRIP_BYTES +
+					                         SLIP_BACKGROUND_STRIP_BOTTOM_OFFSET,
+					                     SlipBytes_ReadLE16(materialStripTable + stripEntryOffset +
+					                                        SLIP_BACKGROUND_STRIP_BOTTOM_OFFSET));
 				} else {
 					SlipDraw3D_WriteLE16(materialStripTable + stripEntryOffset, visit->backgroundValue.value);
 					previousStripValue = visit->backgroundValue.value;
 					++out.outputCount;
 					SlipDraw3D_WriteLE16(materialStripTable, out.outputCount);
-					stripEntryOffset += 0x0cu;
+					stripEntryOffset += SLIP_BACKGROUND_STRIP_BYTES;
 				}
 			}
 			cursor += step;
-			visit->nextEntryAddress = 0x00018562u + (uint32_t)stripEntryOffset;
+			visit->nextEntryAddress = SLIP_BACKGROUND_MATERIAL_STRIP_TABLE_DOS_ADDRESS + (uint32_t)stripEntryOffset;
 			visit->nextSpanPosition = cursor;
 		}
 		out.spanPosition = cursor;
 		out.previousValue = previousStripValue;
 		out.visitCount = count;
 	} else {
-		if (stripTableBytes < 2u + 2u * 0x0cu) {
+		if (stripTableBytes < SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES +
+		                          SLIP_BACKGROUND_STRIP_BOUNDARY_PAIR_COUNT * SLIP_BACKGROUND_STRIP_BYTES) {
 			return 0;
 		}
 
@@ -9012,12 +9198,12 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 		}
 		out.centerX = out.initialCenter.centerX;
 		out.centerY = out.initialCenter.centerY;
-		SlipDraw3D_WriteLE16(materialStripTable, 2u);
-		out.outputCount = 2u;
-		stripEntryOffset = 2u;
+		SlipDraw3D_WriteLE16(materialStripTable, SLIP_BACKGROUND_STRIP_BOUNDARY_PAIR_COUNT);
+		out.outputCount = SLIP_BACKGROUND_STRIP_BOUNDARY_PAIR_COUNT;
+		stripEntryOffset = SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES;
 		if (!SlipDraw3D_BackgroundStripEntry(materialStripTable + stripEntryOffset, stripTableBytes - stripEntryOffset,
-		                                     0x2000u, out.centerX, out.centerY, scaleX, scaleY, halfWidth, halfHeight,
-		                                     &out.initialEntry)) {
+		                                     SLIP_BACKGROUND_STRIP_INITIAL_CENTRE_Q14, out.centerX, out.centerY, scaleX,
+		                                     scaleY, halfWidth, halfHeight, &out.initialEntry)) {
 			return 0;
 		}
 		if (!SlipDraw3D_BackgroundValueExecute(materialRecord, materialRecordBytes, backgroundDistance,
@@ -9027,8 +9213,8 @@ int SlipDraw3D_BackgroundStripTableMaterial(
 			return 0;
 		}
 		SlipDraw3D_WriteLE16(materialStripTable + stripEntryOffset, out.initialValue.value);
-		stripEntryOffset += 0x0cu;
-		out.entryAddressAfterInitial = 0x00018562u + (uint32_t)stripEntryOffset;
+		stripEntryOffset += SLIP_BACKGROUND_STRIP_BYTES;
+		out.entryAddressAfterInitial = SLIP_BACKGROUND_MATERIAL_STRIP_TABLE_DOS_ADDRESS + (uint32_t)stripEntryOffset;
 		out.callFallbackBackgroundStripEntry = true;
 		if (!SlipDraw3D_BackgroundStripEntry(materialStripTable + stripEntryOffset, stripTableBytes - stripEntryOffset,
 		                                     0, out.centerX, out.centerY, scaleX, scaleY, halfWidth, halfHeight,
@@ -9098,7 +9284,7 @@ int SlipDraw3D_BackgroundPassMaterial(uint16_t materialFillFlag, uint16_t fixedF
 		return 1;
 	}
 	out.branch = SLIP_DRAW3D_BACKGROUND_PASS_STRIP;
-	out.stripTableAddress = 0x00018562u;
+	out.stripTableAddress = SLIP_BACKGROUND_MATERIAL_STRIP_TABLE_DOS_ADDRESS;
 	out.callDraw3DStripDispatch = true;
 	*result = out;
 	return 1;
@@ -9134,7 +9320,7 @@ int SlipDraw3D_BackgroundPassFixed(uint16_t materialFillFlag, uint16_t fixedFill
 		return 1;
 	}
 	out.branch = SLIP_DRAW3D_BACKGROUND_PASS_STRIP;
-	out.stripTableAddress = 0x00018260u;
+	out.stripTableAddress = SLIP_BACKGROUND_FIXED_STRIP_TABLE_DOS_ADDRESS;
 	out.callDraw3DStripDispatch = true;
 	*result = out;
 	return 1;
@@ -9164,13 +9350,14 @@ int SlipDraw3D_BackgroundPassExecuteMaterial(
 	} else if (out.materialPass.branch == SLIP_DRAW3D_BACKGROUND_PASS_STRIP) {
 		out.callDraw3DStripDispatch = true;
 		if (!SlipDraw3D_StripDispatchWithPointPointerRing(
-		        pool, materialStripTable, stripTableBytes, 0x00018562u, renderFlags, initialMaterialColor, minX, maxX,
-		        minY, maxY, depthClipRejected, screenClipRejected, returnVisits, returnVisitCapacity, pointRingVisits,
-		        pointRingVisitCapacity, stripVisits, stripVisitCapacity, &out.strip)) {
+		        pool, materialStripTable, stripTableBytes, SLIP_BACKGROUND_MATERIAL_STRIP_TABLE_DOS_ADDRESS,
+		        renderFlags, initialMaterialColor, minX, maxX, minY, maxY, depthClipRejected, screenClipRejected,
+		        returnVisits, returnVisitCapacity, pointRingVisits, pointRingVisitCapacity, stripVisits,
+		        stripVisitCapacity, &out.strip)) {
 			return 0;
 		}
 		out.returnActiveVisitCount = out.strip.returnActiveVisitCount;
-		out.pointRingVisitCount = out.strip.visitCount * 4u;
+		out.pointRingVisitCount = out.strip.visitCount * SLIP_BACKGROUND_STRIP_CORNER_COUNT;
 		out.stripVisitCount = out.strip.visitCount;
 	}
 	*result = out;
@@ -9201,13 +9388,14 @@ int SlipDraw3D_BackgroundPassExecuteFixed(SlipDraw3DRecordPool *pool, uint16_t m
 	} else if (out.fixedPass.branch == SLIP_DRAW3D_BACKGROUND_PASS_STRIP) {
 		out.callDraw3DStripDispatch = true;
 		if (!SlipDraw3D_StripDispatchWithPointPointerRing(
-		        pool, fixedStripTable, stripTableBytes, 0x00018260u, renderFlags, initialMaterialColor, minX, maxX,
-		        minY, maxY, depthClipRejected, screenClipRejected, returnVisits, returnVisitCapacity, pointRingVisits,
-		        pointRingVisitCapacity, stripVisits, stripVisitCapacity, &out.strip)) {
+		        pool, fixedStripTable, stripTableBytes, SLIP_BACKGROUND_FIXED_STRIP_TABLE_DOS_ADDRESS, renderFlags,
+		        initialMaterialColor, minX, maxX, minY, maxY, depthClipRejected, screenClipRejected, returnVisits,
+		        returnVisitCapacity, pointRingVisits, pointRingVisitCapacity, stripVisits, stripVisitCapacity,
+		        &out.strip)) {
 			return 0;
 		}
 		out.returnActiveVisitCount = out.strip.returnActiveVisitCount;
-		out.pointRingVisitCount = out.strip.visitCount * 4u;
+		out.pointRingVisitCount = out.strip.visitCount * SLIP_BACKGROUND_STRIP_CORNER_COUNT;
 		out.stripVisitCount = out.strip.visitCount;
 	}
 	*result = out;
@@ -9333,7 +9521,8 @@ int SlipDraw3D_StripDispatch(const uint8_t *stripTable, size_t stripTableBytes, 
 	uint32_t stripOffset;
 	size_t visitCount;
 
-	if (stripTable == NULL || carryFromByVisit == NULL || visits == NULL || result == NULL || stripTableBytes < 2u) {
+	if (stripTable == NULL || carryFromByVisit == NULL || visits == NULL || result == NULL ||
+	    stripTableBytes < SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES) {
 		return 0;
 	}
 	sourceCount = SlipBytes_ReadLE16(stripTable);
@@ -9344,41 +9533,43 @@ int SlipDraw3D_StripDispatch(const uint8_t *stripTable, size_t stripTableBytes, 
 	if ((size_t)loopCount > carryCount || (size_t)loopCount > visitCapacity) {
 		return 0;
 	}
-	stripOffset = 2u;
+	stripOffset = SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES;
 	visitCount = 0;
 	while (loopCount != 0u) {
 		SlipDraw3DStripDispatchVisit *visit;
 		uint32_t currentStripAddress;
 		bool draw3DPointPointerRingCarry;
 
-		if ((size_t)stripOffset + 0x18u > stripTableBytes) {
+		if ((size_t)stripOffset + SLIP_BACKGROUND_STRIP_BOUNDARY_PAIR_COUNT * SLIP_BACKGROUND_STRIP_BYTES >
+		    stripTableBytes) {
 			return 0;
 		}
 		currentStripAddress = stripTableBaseAddress + stripOffset;
 		draw3DPointPointerRingCarry = carryFromByVisit[visitCount];
 		visit = visits + visitCount;
-		*visit = (SlipDraw3DStripDispatchVisit){currentStripAddress,
-		                                        loopCount,
-		                                        currentStripAddress + 4u,
-		                                        currentStripAddress + 0x10u,
-		                                        currentStripAddress + 0x14u,
-		                                        currentStripAddress + 8u,
-		                                        4u,
-		                                        SlipBytes_ReadLE16(stripTable + stripOffset),
-		                                        0x0001da30u,
-		                                        true,
-		                                        true,
-		                                        draw3DPointPointerRingCarry,
-		                                        !draw3DPointPointerRingCarry,
-		                                        {0},
-		                                        {0},
-		                                        currentStripAddress + 0x0cu,
-		                                        loopCount - 1u,
-		                                        loopCount != 1u,
-		                                        SlipBytes_ReadLE16(stripTable + stripOffset),
-		                                        0,
-		                                        0};
-		stripOffset += 0x0cu;
+		*visit = (SlipDraw3DStripDispatchVisit){
+		    currentStripAddress,
+		    loopCount,
+		    currentStripAddress + SLIP_BACKGROUND_STRIP_LEFT_OFFSET,
+		    currentStripAddress + (SLIP_BACKGROUND_STRIP_BYTES + SLIP_BACKGROUND_STRIP_LEFT_OFFSET),
+		    currentStripAddress + (SLIP_BACKGROUND_STRIP_BYTES + SLIP_BACKGROUND_STRIP_RIGHT_OFFSET),
+		    currentStripAddress + SLIP_BACKGROUND_STRIP_RIGHT_OFFSET,
+		    SLIP_BACKGROUND_STRIP_CORNER_COUNT,
+		    SlipBytes_ReadLE16(stripTable + stripOffset),
+		    SLIP_BACKGROUND_STRIP_CORNER_POINTER_TABLE_DOS_ADDRESS,
+		    true,
+		    true,
+		    draw3DPointPointerRingCarry,
+		    !draw3DPointPointerRingCarry,
+		    {0},
+		    {0},
+		    currentStripAddress + SLIP_BACKGROUND_STRIP_BYTES,
+		    loopCount - 1u,
+		    loopCount != 1u,
+		    SlipBytes_ReadLE16(stripTable + stripOffset),
+		    0,
+		    0};
+		stripOffset += SLIP_BACKGROUND_STRIP_BYTES;
 		--loopCount;
 		++visitCount;
 	}
@@ -9387,7 +9578,7 @@ int SlipDraw3D_StripDispatch(const uint8_t *stripTable, size_t stripTableBytes, 
 	                                    stripTableBaseAddress,
 	                                    sourceCount,
 	                                    (uint32_t)sourceCount - 1u,
-	                                    stripTableBaseAddress + 2u,
+	                                    stripTableBaseAddress + SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES,
 	                                    visitCount,
 	                                    renderFlags,
 	                                    true,
@@ -9412,7 +9603,7 @@ int SlipDraw3D_StripDispatchWithPointPointerRing(
 	SlipDraw3DRasterPoint flatPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 
 	if (pool == NULL || stripTable == NULL || pointRingVisits == NULL || visits == NULL || result == NULL ||
-	    stripTableBytes < 2u) {
+	    stripTableBytes < SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES) {
 		return 0;
 	}
 	sourceCount = SlipBytes_ReadLE16(stripTable);
@@ -9420,17 +9611,18 @@ int SlipDraw3D_StripDispatchWithPointPointerRing(
 		return 0;
 	}
 	loopCount = (uint32_t)sourceCount - 1u;
-	if ((size_t)loopCount > visitCapacity || (size_t)loopCount > pointRingVisitCapacity / 4u) {
+	if ((size_t)loopCount > visitCapacity ||
+	    (size_t)loopCount > pointRingVisitCapacity / SLIP_BACKGROUND_STRIP_CORNER_COUNT) {
 		return 0;
 	}
-	stripOffset = 2u;
+	stripOffset = SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES;
 	visitCount = 0;
 	returnVisitCount = 0;
 	pointRingVisitCount = 0;
 	rasterizedCount = 0;
 	while (loopCount != 0u) {
 		SlipDraw3DStripDispatchVisit *visit;
-		uint8_t stripCornerPointers[16];
+		uint8_t stripCornerPointers[SLIP_BACKGROUND_STRIP_CORNER_COUNT * SLIP_BACKGROUND_STRIP_CORNER_POINTER_BYTES];
 		uint32_t currentStripAddress;
 		uint16_t stripShade;
 		uint32_t stripMaterialColor;
@@ -9441,16 +9633,20 @@ int SlipDraw3D_StripDispatchWithPointPointerRing(
 		SlipDraw3DFlatRingDispatch flatDispatch;
 		size_t returnVisitCountBefore;
 
-		if ((size_t)stripOffset + 0x18u > stripTableBytes) {
+		if ((size_t)stripOffset + SLIP_BACKGROUND_STRIP_BOUNDARY_PAIR_COUNT * SLIP_BACKGROUND_STRIP_BYTES >
+		    stripTableBytes) {
 			return 0;
 		}
 		currentStripAddress = stripTableBaseAddress + stripOffset;
-		SlipDraw3D_WriteLE32(stripCornerPointers, currentStripAddress + 4u);
-		SlipDraw3D_WriteLE32(stripCornerPointers + 4u, currentStripAddress + 0x10u);
-		SlipDraw3D_WriteLE32(stripCornerPointers + 8u, currentStripAddress + 0x14u);
-		SlipDraw3D_WriteLE32(stripCornerPointers + 12u, currentStripAddress + 8u);
+		SlipDraw3D_WriteLE32(stripCornerPointers, currentStripAddress + SLIP_BACKGROUND_STRIP_LEFT_OFFSET);
+		SlipDraw3D_WriteLE32(stripCornerPointers + SLIP_BACKGROUND_STRIP_CORNER_POINTER_BYTES,
+		                     currentStripAddress + (SLIP_BACKGROUND_STRIP_BYTES + SLIP_BACKGROUND_STRIP_LEFT_OFFSET));
+		SlipDraw3D_WriteLE32(stripCornerPointers + 2 * SLIP_BACKGROUND_STRIP_CORNER_POINTER_BYTES,
+		                     currentStripAddress + (SLIP_BACKGROUND_STRIP_BYTES + SLIP_BACKGROUND_STRIP_RIGHT_OFFSET));
+		SlipDraw3D_WriteLE32(stripCornerPointers + 3 * SLIP_BACKGROUND_STRIP_CORNER_POINTER_BYTES,
+		                     currentStripAddress + SLIP_BACKGROUND_STRIP_RIGHT_OFFSET);
 		stripShade = SlipBytes_ReadLE16(stripTable + stripOffset);
-		stripMaterialColor = (initialMaterialColor & 0xffff0000u) | (uint32_t)stripShade;
+		stripMaterialColor = (initialMaterialColor & SLIP_DRAW3D_UPPER_WORD_MASK) | (uint32_t)stripShade;
 		returnVisitCountBefore = returnVisitCount;
 
 		if (!SlipDraw3D_ReturnActiveRing(pool, returnVisits, returnVisitCapacity, &returnActive)) {
@@ -9459,8 +9655,9 @@ int SlipDraw3D_StripDispatchWithPointPointerRing(
 		returnVisitCount += returnActive.visitCount;
 		if (!SlipDraw3D_PointPointerRingWithScreenPointFlags(
 		        pool, stripCornerPointers, sizeof(stripCornerPointers), stripTableBaseAddress, stripTable,
-		        stripTableBytes, 4u, stripMaterialColor, minX, maxX, minY, maxY, depthClipRejected, screenClipRejected,
-		        pointRingVisits + pointRingVisitCount, pointRingVisitCapacity - pointRingVisitCount, &pointRing)) {
+		        stripTableBytes, SLIP_BACKGROUND_STRIP_CORNER_COUNT, stripMaterialColor, minX, maxX, minY, maxY,
+		        depthClipRejected, screenClipRejected, pointRingVisits + pointRingVisitCount,
+		        pointRingVisitCapacity - pointRingVisitCount, &pointRing)) {
 			return 0;
 		}
 		pointRingVisitCount += pointRing.visitCount;
@@ -9498,31 +9695,32 @@ int SlipDraw3D_StripDispatchWithPointPointerRing(
 			}
 		}
 		visit = visits + visitCount;
-		*visit = (SlipDraw3DStripDispatchVisit){currentStripAddress,
-		                                        loopCount,
-		                                        currentStripAddress + 4u,
-		                                        currentStripAddress + 0x10u,
-		                                        currentStripAddress + 0x14u,
-		                                        currentStripAddress + 8u,
-		                                        4u,
-		                                        stripShade,
-		                                        0x0001da30u,
-		                                        true,
-		                                        true,
-		                                        pointRing.carryOut,
-		                                        !pointRing.carryOut,
-		                                        flatDispatch,
-		                                        {0},
-		                                        currentStripAddress + 0x0cu,
-		                                        loopCount - 1u,
-		                                        loopCount != 1u,
-		                                        stripMaterialColor,
-		                                        returnVisitCountBefore,
-		                                        returnVisitCount};
+		*visit = (SlipDraw3DStripDispatchVisit){
+		    currentStripAddress,
+		    loopCount,
+		    currentStripAddress + SLIP_BACKGROUND_STRIP_LEFT_OFFSET,
+		    currentStripAddress + (SLIP_BACKGROUND_STRIP_BYTES + SLIP_BACKGROUND_STRIP_LEFT_OFFSET),
+		    currentStripAddress + (SLIP_BACKGROUND_STRIP_BYTES + SLIP_BACKGROUND_STRIP_RIGHT_OFFSET),
+		    currentStripAddress + SLIP_BACKGROUND_STRIP_RIGHT_OFFSET,
+		    SLIP_BACKGROUND_STRIP_CORNER_COUNT,
+		    stripShade,
+		    SLIP_BACKGROUND_STRIP_CORNER_POINTER_TABLE_DOS_ADDRESS,
+		    true,
+		    true,
+		    pointRing.carryOut,
+		    !pointRing.carryOut,
+		    flatDispatch,
+		    {0},
+		    currentStripAddress + SLIP_BACKGROUND_STRIP_BYTES,
+		    loopCount - 1u,
+		    loopCount != 1u,
+		    stripMaterialColor,
+		    returnVisitCountBefore,
+		    returnVisitCount};
 		if (flatDispatch.pointCount <= SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT) {
 			memcpy(visit->flatPoints, flatPoints, (size_t)flatDispatch.pointCount * sizeof(flatPoints[0]));
 		}
-		stripOffset += 0x0cu;
+		stripOffset += SLIP_BACKGROUND_STRIP_BYTES;
 		--loopCount;
 		++visitCount;
 	}
@@ -9531,7 +9729,7 @@ int SlipDraw3D_StripDispatchWithPointPointerRing(
 	                                    stripTableBaseAddress,
 	                                    sourceCount,
 	                                    (uint32_t)sourceCount - 1u,
-	                                    stripTableBaseAddress + 2u,
+	                                    stripTableBaseAddress + SLIP_BACKGROUND_STRIP_TABLE_HEADER_BYTES,
 	                                    visitCount,
 	                                    renderFlags,
 	                                    true,
@@ -9541,10 +9739,10 @@ int SlipDraw3D_StripDispatchWithPointPointerRing(
 }
 
 uint32_t SlipDraw3D_materialCallbackCount;
-static SlipDraw3DMaterialCallback materialCallbacks[32];
+static SlipDraw3DMaterialCallback materialCallbacks[SLIP_DRAW3D_MATERIAL_CALLBACK_CAPACITY];
 
 void SlipDraw3D_RegisterMaterialCallback(SlipDraw3DMaterialCallback callback) {
-	if (SlipDraw3D_materialCallbackCount == 32) {
+	if (SlipDraw3D_materialCallbackCount == SLIP_DRAW3D_MATERIAL_CALLBACK_CAPACITY) {
 		return;
 	}
 	for (uint32_t i = 0; i < SlipDraw3D_materialCallbackCount; ++i) {

@@ -1,6 +1,13 @@
 #include "material_residency.h"
+#include "texture_resize.h"
 
-enum { SLIP_MATERIAL_MINIMUM_MEMORY_BUDGET = 0x1f40u };
+enum {
+	SLIP_MATERIAL_MINIMUM_MEMORY_BUDGET = 8000,
+	SLIP_MATERIAL_SMALL_TEXTURE_BYTES = 2000,
+	/* Q30 area ratio -> Q62 square-root input -> Q31 root -> Q30 dimension scale. */
+	SLIP_MATERIAL_SQRT_OUTPUT_SHIFT = 1,
+	SLIP_MATERIAL_SQRT_INPUT_SHIFT = SLIP_TEXTURE_RESIZE_SCALE_FRACTION_BITS + 2 * SLIP_MATERIAL_SQRT_OUTPUT_SHIFT
+};
 
 void SlipMaterial_SetLimits(SlipMaterialResidency *state, uint32_t memoryBudget, uint32_t maximumTextureSize,
                             uint32_t maximumTextureFrame) {
@@ -26,7 +33,7 @@ void SlipMaterial_ReleaseTextures(SlipMaterialResidency *state, const SlipMateri
 		uint32_t remaining = state->table->count;
 		SlipDraw3DMaterialRecord *record = state->table->records;
 		do {
-			for (unsigned frame = 0; frame < 4; ++frame) {
+			for (unsigned frame = 0; frame < SLIP_DRAW3D_MATERIAL_FRAME_COUNT; ++frame) {
 				const uint16_t handle = (uint16_t)record->textureHandles[frame];
 				if (handle != 0) {
 					calls->release(calls->context, handle);
@@ -80,7 +87,7 @@ void SlipMaterial_MakeResident(SlipMaterialResidency *state, const SlipMaterialR
 	calls->setReclaim(calls->context, 0);
 	SlipMaterial_ReleaseTextures(state, calls);
 	calls->loadFrames(calls->context);
-	state->scale = 0x40000000;
+	state->scale = SLIP_TEXTURE_RESIZE_SCALE_ONE_Q30;
 	if (state->table != NULL) {
 		uint32_t largeBytes = 0, smallBytes = 0;
 		uint32_t remaining = state->table->count, index = 0;
@@ -88,7 +95,7 @@ void SlipMaterial_MakeResident(SlipMaterialResidency *state, const SlipMaterialR
 			const uint16_t handle = calls->frame(calls->context, &index);
 			if (handle != 0) {
 				const uint32_t bytes = calls->allocationSize(calls->context, handle);
-				if (bytes <= 2000)
+				if (bytes <= SLIP_MATERIAL_SMALL_TEXTURE_BYTES)
 					smallBytes += bytes;
 				else if (bytes <= state->maximumTextureSize)
 					largeBytes += bytes;
@@ -97,8 +104,10 @@ void SlipMaterial_MakeResident(SlipMaterialResidency *state, const SlipMaterialR
 		} while (--remaining != 0);
 		const uint32_t available = state->memoryBudget - smallBytes;
 		if (available < largeBytes) {
-			const uint32_t ratio = (uint32_t)(((uint64_t)available << 30) / largeBytes);
-			state->scale = calls->squareRoot(calls->context, (uint64_t)ratio << 32) >> 1;
+			const uint32_t ratio =
+			    (uint32_t)(((uint64_t)available << SLIP_TEXTURE_RESIZE_SCALE_FRACTION_BITS) / largeBytes);
+			state->scale = calls->squareRoot(calls->context, (uint64_t)ratio << SLIP_MATERIAL_SQRT_INPUT_SHIFT) >>
+			               SLIP_MATERIAL_SQRT_OUTPUT_SHIFT;
 			calls->resetFrames(calls->context);
 		}
 		for (;;) {
@@ -116,14 +125,14 @@ void SlipMaterial_MakeResident(SlipMaterialResidency *state, const SlipMaterialR
 				uint16_t candidate = 0;
 				uint32_t bytes;
 				SlipMaterial_LargestResident(state, calls, &candidate, &bytes);
-				if (bytes == 0 || bytes < 2000) {
+				if (bytes == 0 || bytes < SLIP_MATERIAL_SMALL_TEXTURE_BYTES) {
 					calls->release(calls->context, handle);
 					calls->setFrame(calls->context, materialIndex, 0);
 					break;
 				}
-				(void)calls->resize(calls->context, candidate, 0x20000000);
+				(void)calls->resize(calls->context, candidate, SLIP_TEXTURE_RESIZE_SCALE_HALF_Q30);
 			}
-			if (loaded && state->scale != 0x40000000)
+			if (loaded && state->scale != SLIP_TEXTURE_RESIZE_SCALE_ONE_Q30)
 				calls->protect(calls->context, handle);
 		}
 	}

@@ -23,5 +23,5 @@ int32_t SlipRenderer_MinimumDepth(SlipRendererState *state, uint16_t countAndFla
 			minimum = depth;
 	} while (--remaining != 0);
 	const int64_t product = (int64_t)(int32_t)state->projection.inverseProjectionScale * minimum;
-	return (int32_t)(uint32_t)((uint64_t)product >> 16);
+	return (int32_t)(uint32_t)((uint64_t)product >> SLIP_DRAW3D_SCALE_FRACTION_BITS);
 }

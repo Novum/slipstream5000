@@ -3,11 +3,33 @@
 #include "joystick_calibration.h"
 
 #include "draw3d.h"
+#include "fixed_point.h"
 #include "frame_timer.h"
 #include "race_collision.h"
 #include "race_effects.h"
 #include "runtime.h"
 #include "track_view_render.h"
+
+enum {
+	SLIP_RACE_CLOUD_PRODUCT_SHIFT = SLIP_RACE_CLOUD_PHASE_FRACTION_BITS - SLIP_Q14_FRACTION_BITS,
+	SLIP_RACE_CLOUD_FINE_SCROLL_RATE_SHIFT = 3,
+	SLIP_RACE_TOKYO_MAXIMUM_VIEW_DEPTH = 0x00260000,
+	SLIP_RACE_SINGLE_PLAYER_STARTING_BONUS = 750,
+	SLIP_RACE_MULTIPLAYER_STARTING_BONUS = 3000,
+	SLIP_RACE_ALL_POWERUPS_PRIMARY_WEAPON = 4,
+	SLIP_RACE_ALL_POWERUPS_SECONDARY_WEAPON = 7,
+	SLIP_RACE_ALL_POWERUPS_AMMO = 9,
+	SLIP_RACE_ALL_POWERUPS_BONUS = 9999,
+	SLIP_RACE_DRIVER_SHUFFLE_MINIMUM = 20,
+	SLIP_RACE_DRIVER_SHUFFLE_RANDOM_RANGE = 50,
+	/* The original shuffle selects among the first nine entries. */
+	SLIP_RACE_DRIVER_SHUFFLE_INDEX_COUNT = SLIP_RACE_RACER_COUNT - 1,
+	SLIP_RACE_PLAYER_SLOT_TYPE = 0x0d,
+	SLIP_RACE_AI_SLOT_TYPE = 0x15,
+	SLIP_RACE_DEBRIS_BUDGET_INTERVAL_MS = 1000,
+	SLIP_RACE_DEBRIS_BUDGET_PER_INTERVAL = 4,
+	SLIP_RACE_EFFECT_EMITTER_POOL_BASE_TOKEN = 0x08000000u
+};
 
 uint32_t SlipRace_drawPageToggle;
 SlipRacePlayerControl SlipRace_controls;
@@ -52,12 +74,12 @@ const char *const SlipRace_trackNames[SLIP_RACE_TRACK_COUNT] = {"CHICAGO.TRK", "
                                                                 "EGYPT.TRK",   "NEWYORK.TRK"};
 
 void SlipRace_SetDefaultViewDepth(void) {
-	SlipDraw3D_SetMaximumDepth(0x7fffffffu);
+	SlipDraw3D_SetMaximumDepth(INT32_MAX);
 	SlipDraw3D_SetDepthFade(0, 0, 0);
 }
 
 void SlipRace_SetTokyoViewDepth(void) {
-	SlipDraw3D_SetMaximumDepth(0x00260000u);
+	SlipDraw3D_SetMaximumDepth(SLIP_RACE_TOKYO_MAXIMUM_VIEW_DEPTH);
 	SlipDraw3D_SetDepthFade(0, 0, 0);
 }
 
@@ -71,11 +93,11 @@ void SlipRace_ApplyViewDepth(SlipRaceTrackId track) {
 
 static const uint16_t SlipRace_playerStartIndex[SLIP_RACE_TRACK_COUNT] = {0, 5, 1, 6, 2, 7, 3, 8, 4, 9};
 
-static const uint32_t SlipRace_initialPowerup[11] = {0, 4, 4, 7, 5, 2, 2, 3, 1, 8, 2};
+static const uint32_t SlipRace_initialPowerup[SLIP_RACE_DRIVER_TABLE_COUNT] = {0, 4, 4, 7, 5, 2, 2, 3, 1, 8, 2};
 
-static const uint32_t SlipRace_initialPowerupCount[11] = {0, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6};
+static const uint32_t SlipRace_initialPowerupCount[SLIP_RACE_DRIVER_TABLE_COUNT] = {0, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6};
 
-static const uint16_t SlipRace_aiClass[11] = {0, 0, 0, 1, 1, 1, 2, 2, 3, 3, 3};
+static const uint16_t SlipRace_aiClass[SLIP_RACE_DRIVER_TABLE_COUNT] = {0, 0, 0, 1, 1, 1, 2, 2, 3, 3, 3};
 
 SlipRaceFindRacer SlipRace_FindRacer(SlipRaceRacerTable *racerTable, uint16_t driver) {
 	uint32_t remaining = racerTable->racerCount;
@@ -103,24 +125,25 @@ static void SlipRace_InitializeRacerState(SlipRaceRacerState *racerState) {
 	racerState->secondaryWeaponAmmo = 0;
 	racerState->powerupRecord = 0;
 	racerState->powerupFlags = 0;
-	racerState->bonusScore = SlipRace_gameMode == 0 ? 0x02eeu : 0x0bb8u;
+	racerState->bonusScore = SlipRace_gameMode == SLIP_RACE_GAME_SINGLE_PLAYER ? SLIP_RACE_SINGLE_PLAYER_STARTING_BONUS
+	                                                                           : SLIP_RACE_MULTIPLAYER_STARTING_BONUS;
 	if (SlipRace_allPowerups != 0) {
-		racerState->primaryWeaponIndex = 4;
-		racerState->primaryWeaponAmmo = 9;
-		racerState->secondaryWeaponIndex = 7;
-		racerState->secondaryWeaponAmmo = 9;
-		racerState->bonusScore = 9999;
+		racerState->primaryWeaponIndex = SLIP_RACE_ALL_POWERUPS_PRIMARY_WEAPON;
+		racerState->primaryWeaponAmmo = SLIP_RACE_ALL_POWERUPS_AMMO;
+		racerState->secondaryWeaponIndex = SLIP_RACE_ALL_POWERUPS_SECONDARY_WEAPON;
+		racerState->secondaryWeaponAmmo = SLIP_RACE_ALL_POWERUPS_AMMO;
+		racerState->bonusScore = SLIP_RACE_ALL_POWERUPS_BONUS;
 	}
 }
 
 static void SlipRace_InitializePlayerOne(SlipRaceRacerState *racerState, uint16_t driver, uint16_t position) {
 	racerState->tuningIndex = driver;
 	racerState->championshipPoints = 0;
-	racerState->racerType = 0;
+	racerState->racerType = SLIP_RACER_PLAYER_ONE;
 	racerState->racePosition = position;
 	racerState->previousRacePosition = position;
 	racerState->championshipPosition = position;
-	racerState->propulsionProfileIndex = 3;
+	racerState->propulsionProfileIndex = SLIP_RACE_PROPULSION_PLAYER_PROFILE;
 	SlipRace_ClearRacerMotion(racerState);
 	SlipRace_InitializeRacerState(racerState);
 }
@@ -128,8 +151,9 @@ static void SlipRace_InitializePlayerOne(SlipRaceRacerState *racerState, uint16_
 static void SlipRace_InitializePlayerTwo(SlipRaceRacerState *racerState, uint16_t driver, uint16_t position) {
 	racerState->tuningIndex = driver;
 	racerState->championshipPoints = 0;
-	racerState->propulsionProfileIndex = 3;
-	racerState->racerType = SlipRace_gameMode == 1 ? 1u : 3u;
+	racerState->propulsionProfileIndex = SLIP_RACE_PROPULSION_PLAYER_PROFILE;
+	racerState->racerType =
+	    SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN ? SLIP_RACER_PLAYER_TWO : SLIP_RACER_LINKED_PLAYER;
 	racerState->racePosition = position;
 	racerState->previousRacePosition = position;
 	racerState->championshipPosition = position;
@@ -159,15 +183,15 @@ void SlipRace_BuildRacerTable(SlipRaceRacerTable *racerTable, uint16_t playerOne
 	for (driverIndex = 0; driverIndex < SLIP_RACE_RACER_COUNT; ++driverIndex) {
 		shuffledDrivers[driverIndex] = (uint16_t)(driverIndex + 1u);
 	}
-	shuffleCount = SlipRandom_Range(50u) + 20u;
+	shuffleCount = SlipRandom_Range(SLIP_RACE_DRIVER_SHUFFLE_RANDOM_RANGE) + SLIP_RACE_DRIVER_SHUFFLE_MINIMUM;
 	do {
 		uint32_t firstIndex;
 		uint32_t secondIndex;
 		uint16_t swappedDriver;
 
 		do {
-			firstIndex = SlipRandom_Range(9u);
-			secondIndex = SlipRandom_Range(9u);
+			firstIndex = SlipRandom_Range(SLIP_RACE_DRIVER_SHUFFLE_INDEX_COUNT);
+			secondIndex = SlipRandom_Range(SLIP_RACE_DRIVER_SHUFFLE_INDEX_COUNT);
 		} while (secondIndex == firstIndex);
 		swappedDriver = shuffledDrivers[secondIndex];
 		shuffledDrivers[secondIndex] = shuffledDrivers[firstIndex];
@@ -175,7 +199,8 @@ void SlipRace_BuildRacerTable(SlipRaceRacerTable *racerTable, uint16_t playerOne
 		--shuffleCount;
 	} while (shuffleCount != 0);
 
-	if ((SlipRace_gameMode == 0 || SlipRace_gameMode == 1) || SlipRace_secondPlayerEnabled != 0) {
+	if ((SlipRace_gameMode == SLIP_RACE_GAME_SINGLE_PLAYER || SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN) ||
+	    SlipRace_secondPlayerEnabled != 0) {
 		SlipRace_InitializePlayerOne(racerState, playerOne, remainingRacers);
 		++racerState;
 		if (--remainingRacers == 0)
@@ -201,8 +226,8 @@ void SlipRace_BuildRacerTable(SlipRaceRacerTable *racerTable, uint16_t playerOne
 		uint16_t driver;
 
 		racerState->championshipPoints = 0;
-		racerState->racerType = 2;
-		racerState->bonusScore = 0x02eeu;
+		racerState->racerType = SLIP_RACER_COMPUTER;
+		racerState->bonusScore = SLIP_RACE_SINGLE_PLAYER_STARTING_BONUS;
 		racerState->racePosition = remainingRacers;
 		racerState->previousRacePosition = remainingRacers;
 		racerState->championshipPosition = remainingRacers;
@@ -244,9 +269,9 @@ bool SlipRace_CreatePlayer(uint32_t alternateStartEnabled, const SlipRaceRacerSt
 	*result = (SlipRaceCreatePlayer){0};
 
 	SlipRace_alternateStartEnabled = alternateStartEnabled;
-	SlipRace_playerSlotType = 0x0du;
-	if (racerState->racerType == 2u) {
-		SlipRace_playerSlotType = 0x15u;
+	SlipRace_playerSlotType = SLIP_RACE_PLAYER_SLOT_TYPE;
+	if (racerState->racerType == SLIP_RACER_COMPUTER) {
+		SlipRace_playerSlotType = SLIP_RACE_AI_SLOT_TYPE;
 	}
 
 	racePositionIndex = racerState->racePosition;
@@ -256,8 +281,9 @@ bool SlipRace_CreatePlayer(uint32_t alternateStartEnabled, const SlipRaceRacerSt
 			return false;
 		}
 	} else {
-		if (racePositionIndex >= 10u || !SlipTrack_StartRecord(context->trkBase, context->trkBytes,
-		                                                       SlipRace_playerStartIndex[racePositionIndex], &start)) {
+		if (racePositionIndex >= SLIP_RACE_RACER_COUNT ||
+		    !SlipTrack_StartRecord(context->trkBase, context->trkBytes, SlipRace_playerStartIndex[racePositionIndex],
+		                           &start)) {
 			return false;
 		}
 	}
@@ -273,21 +299,21 @@ bool SlipRace_CreatePlayer(uint32_t alternateStartEnabled, const SlipRaceRacerSt
 		return false;
 	}
 	if (fill.carryOut) {
-		SlipRuntime_error = 7;
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
 		result->creationFailed = true;
 		return true;
 	}
 	objectOffset = (uint16_t)fill.objectOffset;
 	result->objectOffset = objectOffset;
 
-	if (!SlipObject_SetActorHandle(objectOffset, 4u, &setSlot) ||
+	if (!SlipObject_SetActorHandle(objectOffset, SLIP_OBJECT_FLAG_RACER, &setSlot) ||
 	    !SlipArticSlot_Create(objectOffset, resourceHandle, artPayload, artPayloadBytes, articPool,
 	                          context->objectTable, context->objectTableBytes, findResource, findResourceUser,
 	                          &createArtic)) {
 		return false;
 	}
 	if (createArtic.creationFailed) {
-		SlipRuntime_error = 7;
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
 		result->creationFailed = true;
 		return true;
 	}
@@ -295,8 +321,8 @@ bool SlipRace_CreatePlayer(uint32_t alternateStartEnabled, const SlipRaceRacerSt
 	if (!SlipObject_SetDrawCallback(objectOffset, TrackView_ExecuteArticDrawCallback, 0, &setCallback)) {
 		return false;
 	}
-	if (SlipRaceCollision_CreateBody(objectOffset, 7u)) {
-		SlipRuntime_error = 7;
+	if (SlipRaceCollision_CreateBody(objectOffset, SLIP_COLLISION_BODY_RACER)) {
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
 		result->creationFailed = true;
 		return true;
 	}
@@ -325,7 +351,7 @@ bool SlipRace_CreatePlayer(uint32_t alternateStartEnabled, const SlipRaceRacerSt
 		return false;
 	}
 	if (addSlot.carryOut) {
-		SlipRuntime_error = 7;
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
 		result->creationFailed = true;
 		return true;
 	}
@@ -349,22 +375,23 @@ SlipRaceControlBindings SlipRace_GetControlBindings(void) {
 void SlipRace_UpdateGlobals(void) {
 	const uint16_t frameStepQ14 = (uint16_t)SlipFrameTimer_Step();
 	const int32_t cloudScrollProduct = (int32_t)(int16_t)SlipRace_cloudScrollStep * (int32_t)(int16_t)frameStepQ14;
-	const uint32_t cloudScrollIncrement = (uint32_t)cloudScrollProduct << 2;
+	const uint32_t cloudScrollIncrement = (uint32_t)cloudScrollProduct << SLIP_RACE_CLOUD_PRODUCT_SHIFT;
 
 	SlipRace_cloudScrollPhase += cloudScrollIncrement;
-	SlipRace_cloudScrollFinePhase += (uint32_t)((int32_t)cloudScrollIncrement >> 3);
+	SlipRace_cloudScrollFinePhase +=
+	    (uint32_t)((int32_t)cloudScrollIncrement >> SLIP_RACE_CLOUD_FINE_SCROLL_RATE_SHIFT);
 }
 
 void SlipRace_UpdateTimedEffects(void) {
 	uint32_t debrisBudgetElapsedMilliseconds = SlipFrameTimer_delta + SlipRace_debrisBudgetClock;
 
-	if ((int32_t)debrisBudgetElapsedMilliseconds > 1000) {
+	if ((int32_t)debrisBudgetElapsedMilliseconds > SLIP_RACE_DEBRIS_BUDGET_INTERVAL_MS) {
 		debrisBudgetElapsedMilliseconds = 0;
-		SlipRace_debrisBudget = 4;
+		SlipRace_debrisBudget = SLIP_RACE_DEBRIS_BUDGET_PER_INTERVAL;
 	}
 	SlipRace_debrisBudgetClock = debrisBudgetElapsedMilliseconds;
 
-	SlipTimedEffects_Tick(&SlipRaceEffects_creationTemplate, 0x08000000u);
+	SlipTimedEffects_Tick(&SlipRaceEffects_creationTemplate, SLIP_RACE_EFFECT_EMITTER_POOL_BASE_TOKEN);
 }
 
 void SlipRace_UpdateTrackFrameState(const SlipRacePlayerHostBindings *context) {
@@ -400,7 +427,8 @@ void SlipRace_ResetControlHistory(void) {
 	(void)SlipInput_ReadMotion();
 }
 
-void SlipRace_PreCameraInput(const bool inputHeld1[256], bool inputPressed[256], SlipRacePlayerControl *controls) {
+void SlipRace_PreCameraInput(const bool inputHeld1[SLIP_INPUT_CODE_COUNT], bool inputPressed[SLIP_INPUT_CODE_COUNT],
+                             SlipRacePlayerControl *controls) {
 	SlipRaceControlBindings bindings;
 
 	SlipRace_activeReverseAccelerator = SlipRace_GetReverseAccelerator();
@@ -429,8 +457,9 @@ void SlipRace_PreCameraInput(const bool inputHeld1[256], bool inputPressed[256],
 	}
 }
 
-void SlipRace_ReadControls(const SlipRaceControlBinding *binding, const bool inputHeld1[256], bool inputPressed[256],
-                           SlipRaceControlHistory *history, SlipRacePlayerControl *controls) {
+void SlipRace_ReadControls(const SlipRaceControlBinding *binding, const bool inputHeld1[SLIP_INPUT_CODE_COUNT],
+                           bool inputPressed[SLIP_INPUT_CODE_COUNT], SlipRaceControlHistory *history,
+                           SlipRacePlayerControl *controls) {
 	uint32_t actions = 0;
 	uint32_t directions = 0;
 	SlipInputCode inputCode;
@@ -451,7 +480,7 @@ void SlipRace_ReadControls(const SlipRaceControlBinding *binding, const bool inp
 		inputPressed[inputCode] = false;
 	}
 
-	if (binding->movementControl == 0) {
+	if (binding->movementControl == SLIP_MOVEMENT_KEYBOARD) {
 		inputCode = binding->left;
 		if (inputHeld1[inputCode]) {
 			directions |= SLIP_CONTROL_LEFT;
@@ -474,13 +503,15 @@ void SlipRace_ReadControls(const SlipRaceControlBinding *binding, const bool inp
 		history->pitch = axes.pitch;
 		controls->steering = axes.steering;
 		controls->pitch = axes.pitch;
-	} else if (binding->movementControl == 1 || binding->movementControl == 2) {
+	} else if (binding->movementControl == SLIP_MOVEMENT_JOYSTICK_ONE ||
+	           binding->movementControl == SLIP_MOVEMENT_JOYSTICK_TWO) {
 
-		const SlipJoystickAxesExit exit = SlipJoystick_ReadAxes(binding->movementControl - 1u, JOYSTICK_DEAD_ZONE,
-		                                                        &controls->steering, &controls->pitch);
+		const SlipJoystickAxesExit exit =
+		    SlipJoystick_ReadAxes(binding->movementControl - SLIP_MOVEMENT_JOYSTICK_ONE, JOYSTICK_DEAD_ZONE,
+		                          &controls->steering, &controls->pitch);
 		if (exit != SLIP_JOYSTICK_AXES_RETURN)
 			SlipJoystick_ReportUnsupportedDivide(exit);
-	} else if (binding->movementControl == 3) {
+	} else if (binding->movementControl == SLIP_MOVEMENT_MOUSE) {
 		SlipInputMotion motion = SlipInput_ReadMotion();
 		int16_t steering =
 		    (int16_t)(uint16_t)((uint16_t)history->steering + ((uint32_t)(uint16_t)motion.x << MOUSE_STEERING_SHIFT));

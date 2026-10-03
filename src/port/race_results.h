@@ -6,7 +6,22 @@
 #include "race_championship.h"
 #include "sprite.h"
 #include "string_table.h"
-extern const char *const SlipRaceResults_driverNames[11];
+
+enum {
+	SLIP_RACE_RESULTS_DRIVER_NAME_COUNT = SLIP_RACE_RACER_COUNT + 1,
+	SLIP_RACE_RESULTS_BUTTON_COUNT = 2,
+	SLIP_RACE_RESULTS_PANEL_TEXT_INSET_Y = 4,
+	SLIP_CHAMPIONSHIP_FINAL_PANEL_TEXT_INSET_Y = 5,
+	SLIP_RACE_RESULTS_TABLE_LEFT = 20,
+	SLIP_RACE_RESULTS_TABLE_RIGHT = 300,
+	SLIP_RACE_RESULTS_TABLE_TOP = 40,
+	SLIP_RACE_RESULTS_ROW_SPACING = 13,
+	SLIP_RACE_RESULTS_DRIVER_NAME_X = 40,
+	SLIP_RACE_RESULTS_TIME_X = 240,
+	SLIP_RACE_RESULTS_POINTS_X = 250
+};
+
+extern const char *const SlipRaceResults_driverNames[SLIP_RACE_RESULTS_DRIVER_NAME_COUNT];
 
 typedef struct SlipRaceResultsAssets {
 	uint16_t backgroundResource, inactiveResource;
@@ -25,7 +40,7 @@ typedef struct SlipRaceResultsRect {
 	int16_t left, top, right, bottom;
 } SlipRaceResultsRect;
 
-extern const SlipRaceResultsRect SlipRaceResults_buttons[2];
+extern const SlipRaceResultsRect SlipRaceResults_buttons[SLIP_RACE_RESULTS_BUTTON_COUNT];
 
 typedef enum SlipRaceResultsAction {
 	SLIP_RESULTS_WAIT,
@@ -34,13 +49,13 @@ typedef enum SlipRaceResultsAction {
 } SlipRaceResultsAction;
 
 uint32_t SlipRaceResults_HitTest(int16_t x, int16_t y);
-SlipRaceResultsAction SlipRaceResults_ReadInput(uint32_t hoveredButton, bool pressed[256]);
+SlipRaceResultsAction SlipRaceResults_ReadInput(uint32_t hoveredButton, bool pressed[SLIP_INPUT_CODE_COUNT]);
 void SlipRaceResults_DrawRacePanel(const SlipSprite *sprite, const SlipFont *font, const SlipRaceResultsRect *rect,
                                    const char *label, uint8_t *framebuffer, int pitch);
 void SlipRaceResults_DrawFrame(const SlipRaceRacerTable *racers, const SlipSprite *background,
                                const SlipSprite *inactive, const SlipFont *computerFont, const SlipFont *localFont,
-                               const char *const buttonLabels[2], const char *title, uint32_t hoveredButton,
-                               uint8_t *framebuffer, int pitch);
+                               const char *const buttonLabels[SLIP_RACE_RESULTS_BUTTON_COUNT], const char *title,
+                               uint32_t hoveredButton, uint8_t *framebuffer, int pitch);
 
 void SlipRaceResults_DrawRow(const SlipRaceRacerState *racer, const SlipFont *font, uint8_t *framebuffer, int pitch,
                              uint16_t y);
@@ -53,8 +68,8 @@ void SlipChampionship_DrawRows(const SlipRaceRacerTable *racers, const SlipFont 
                                const SlipFont *localFont, uint8_t *framebuffer, int pitch);
 void SlipChampionship_DrawFrame(const SlipRaceRacerTable *racers, const SlipSprite *background,
                                 const SlipSprite *inactive, const SlipFont *computerFont, const SlipFont *localFont,
-                                const char *const labels[2], const char *title, uint32_t hoveredButton,
-                                uint8_t *framebuffer, int pitch);
+                                const char *const labels[SLIP_RACE_RESULTS_BUTTON_COUNT], const char *title,
+                                uint32_t hoveredButton, uint8_t *framebuffer, int pitch);
 
 void SlipRaceResults_DrawFinalPanel(const SlipSprite *sprite, const SlipFont *font, const SlipRaceResultsRect *rect,
                                     const char *label, uint8_t *framebuffer, int pitch);
@@ -66,6 +81,6 @@ void SlipChampionshipFinal_DrawFrame(const SlipRaceRacerTable *racers, const Sli
                                      const SlipSprite *inactive, const SlipFont *computerFont,
                                      const SlipFont *localFont, const char *title, const char *button,
                                      uint32_t hoveredButton, uint8_t *framebuffer, int pitch);
-bool SlipChampionshipFinal_ReadInput(uint32_t hoveredButton, bool pressed[256]);
+bool SlipChampionshipFinal_ReadInput(uint32_t hoveredButton, bool pressed[SLIP_INPUT_CODE_COUNT]);
 
 #endif

@@ -8,14 +8,34 @@
 #include "track_world.h"
 
 enum {
+	SLIP_COLLISION_BODY_TRACK_ENABLED = 1,
+	SLIP_COLLISION_BODY_CONTACTS_ENABLED = 2,
+	SLIP_COLLISION_BODY_TARGETING_ENABLED = 4,
+	SLIP_COLLISION_BODY_PROJECTILE = SLIP_COLLISION_BODY_TRACK_ENABLED | SLIP_COLLISION_BODY_CONTACTS_ENABLED,
+	SLIP_COLLISION_BODY_RACER = SLIP_COLLISION_BODY_PROJECTILE | SLIP_COLLISION_BODY_TARGETING_ENABLED
+};
+
+enum {
 	SLIP_COLLISION_CONTACT_NONE = 0,
 	SLIP_COLLISION_CONTACT_BODY = 1,
 	SLIP_COLLISION_CONTACT_TRACK = 3,
 	SLIP_COLLISION_NO_CONTACT_TIME = UINT16_MAX,
-	SLIP_COLLISION_SUBSTEP_LIMIT = 32
+	SLIP_COLLISION_SUBSTEP_LIMIT = 32,
+	SLIP_COLLISION_BODY_BYTES = 88
 };
 
 enum { SLIP_COLLISION_VERTEX_COUNT = 32, SLIP_COLLISION_VERTEX_DOS_BYTES = 28 };
+
+/* Each box face stores four corner indices, an enabled flag and a Q14 normal. */
+enum {
+	SLIP_COLLISION_BOX_FACE_COUNT = 6,
+	SLIP_COLLISION_FACE_CORNER_COUNT = 4,
+	SLIP_COLLISION_FACE_ENABLED_INDEX = SLIP_COLLISION_FACE_CORNER_COUNT,
+	SLIP_COLLISION_FACE_NORMAL_X_INDEX = SLIP_COLLISION_FACE_ENABLED_INDEX + 1,
+	SLIP_COLLISION_FACE_NORMAL_Y_INDEX = SLIP_COLLISION_FACE_NORMAL_X_INDEX + 1,
+	SLIP_COLLISION_FACE_NORMAL_Z_INDEX = SLIP_COLLISION_FACE_NORMAL_Y_INDEX + 1,
+	SLIP_COLLISION_FACE_VALUE_COUNT = SLIP_COLLISION_FACE_NORMAL_Z_INDEX + 1
+};
 
 typedef struct SlipRaceCollisionBody {
 	uint32_t movementDistance;
@@ -41,7 +61,7 @@ typedef struct SlipRaceCollisionBody {
 	uint32_t excludedBodyOffset;
 } SlipRaceCollisionBody;
 
-typedef char SlipRaceCollisionBodySize[(sizeof(SlipRaceCollisionBody) == 0x58) ? 1 : -1];
+typedef char SlipRaceCollisionBodySize[(sizeof(SlipRaceCollisionBody) == SLIP_COLLISION_BODY_BYTES) ? 1 : -1];
 typedef char SlipRaceCollisionBodyContactOffset[(offsetof(SlipRaceCollisionBody, contactPosition) == 0x2c) ? 1 : -1];
 typedef char SlipRaceCollisionBodyCounterOffset[(offsetof(SlipRaceCollisionBody, repeatedContacts) == 0x42) ? 1 : -1];
 typedef char SlipRaceCollisionBodyNormalOffset[(offsetof(SlipRaceCollisionBody, normalX) == 0x4c) ? 1 : -1];
@@ -96,7 +116,7 @@ typedef struct SlipRaceCollisionWorkspace {
 	int16_t velocityY;
 	int16_t velocityZ;
 	SlipRaceCollisionBounds targetBounds;
-	int32_t corners[8][3];
+	int32_t corners[SLIP_TRACK_BOUNDING_CORNER_COUNT][SLIP_TRACK_CORNER_COORDINATE_COUNT];
 } SlipRaceCollisionWorkspace;
 
 typedef char
@@ -219,7 +239,7 @@ extern SlipRaceCollisionWorkspace SlipRaceCollision_workspace;
 #define SlipRaceCollision_velocityX (SlipRaceCollision_workspace.velocityX)
 #define SlipRaceCollision_velocityY (SlipRaceCollision_workspace.velocityY)
 #define SlipRaceCollision_velocityZ (SlipRaceCollision_workspace.velocityZ)
-extern SlipRaceCollisionCornerState SlipRaceCollision_cornerState[8];
+extern SlipRaceCollisionCornerState SlipRaceCollision_cornerState[SLIP_TRACK_BOUNDING_CORNER_COUNT];
 extern uint32_t SlipRaceCollision_inverseVelocity;
 extern uint8_t *SlipRaceCollision_sourceBody;
 extern uint8_t *SlipRaceCollision_targetBody;
@@ -237,7 +257,7 @@ extern uint8_t *SlipRaceCollision_physicsTable;
 extern uint32_t SlipRaceCollision_activeBodyOffset;
 extern uint32_t SlipRaceCollision_freeBodyOffset;
 extern uint16_t SlipRaceCollision_bodyCount;
-extern int32_t SlipRaceCollision_faces[6][8];
+extern int32_t SlipRaceCollision_faces[SLIP_COLLISION_BOX_FACE_COUNT][SLIP_COLLISION_FACE_VALUE_COUNT];
 extern uint32_t SlipRaceCollision_faceCommon;
 extern uint32_t SlipRaceCollision_faceCombined;
 extern uint32_t SlipRaceCollision_frameStep;

@@ -3,6 +3,14 @@
 #include "config_menu_draw.h"
 #include "race.h"
 
+/* The confirmation button is shared by conflict and calibration screens. */
+enum {
+	SLIP_CONTROL_CONFIRM_BUTTON_LEFT = 83,
+	SLIP_CONTROL_CONFIRM_BUTTON_TOP = 75,
+	SLIP_CONTROL_CONFIRM_BUTTON_RIGHT = 141,
+	SLIP_CONTROL_CONFIRM_BUTTON_BOTTOM = 90
+};
+
 typedef struct SlipConfigControlsState {
 	uint32_t player;
 	SlipRaceControlBinding *controlBinding;
@@ -13,7 +21,7 @@ typedef struct SlipConfigControlsState {
 } SlipConfigControlsState;
 
 extern SlipConfigControlsState SlipConfigControls_state;
-extern uint8_t SlipConfigControls_usedInputs[256];
+extern uint8_t SlipConfigControls_usedInputs[SLIP_INPUT_CODE_COUNT];
 
 typedef struct SlipConfigControlsCalls {
 	const SlipConfigMenuCalls *menu;
@@ -64,6 +72,13 @@ typedef struct SlipConfigConflictState {
 	uint32_t selection;
 	uint16_t background, workingSprite, inactiveBackground;
 } SlipConfigConflictState;
+
+typedef enum SlipJoystickCalibrationOperation {
+	SLIP_JOYSTICK_CALIBRATION_INITIALIZE = 0,
+	SLIP_JOYSTICK_CALIBRATION_RESET_RANGE = 1,
+	SLIP_JOYSTICK_CALIBRATION_SAMPLE_RANGE = 2,
+	SLIP_JOYSTICK_CALIBRATION_FINISH = 3
+} SlipJoystickCalibrationOperation;
 
 typedef struct SlipJoystickCalibration {
 	uint16_t centerX, centerY;

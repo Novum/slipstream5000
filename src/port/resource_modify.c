@@ -12,7 +12,7 @@ SlipResourceModifyResult SlipResource_Modify(uint16_t source, const SlipResource
 			uint32_t destination;
 			SlipResourceHandle *destinationRecord;
 			if (!SlipResource_NewHandle(&destination, &destinationRecord, handles)) {
-				SlipRuntime_error = 8;
+				SlipRuntime_error = SLIP_RUNTIME_ERROR_HANDLES_EXHAUSTED;
 				return (SlipResourceModifyResult){.exit = SLIP_RESOURCE_MODIFY_DISPLACED_RETURN,
 				                                  .record = sourceRecord};
 			}

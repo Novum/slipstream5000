@@ -1,7 +1,9 @@
 #include "affine.h"
+#include "byte_order.h"
 #include "perspective.h"
 #include "resource_host.h"
 #include "software.h"
+#include "sprite_format.h"
 
 static SlipSprite textureSprite;
 static SlipResourcePayload texturePayload;
@@ -28,7 +30,7 @@ static void SlipRendererHost_BuildTextureRows(void *context, const SlipSprite *t
 static void SlipRendererHost_DrawAffineSpan(void *context, const RasterAffineDrawState *state, int32_t scanline) {
 	(void)context;
 	/* Keep the complete transparency word from the serialized texture header. */
-	const uint16_t transparent = (uint16_t)((uint16_t)state->texture->data[8] | (uint16_t)state->texture->data[9] << 8);
+	const uint16_t transparent = SlipBytes_ReadLE16(state->texture->data + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 	RasterTexturedSpanCoreState span = {.screenRow = g_screenRowPtrs[scanline],
 	                                    .screenRowBytes = (size_t)g_screenPitch,
 	                                    .spanLeftX = state->left.x,
@@ -64,7 +66,7 @@ static void DrawOpaqueAffine(void *context, RasterTexturedPoint *points, uint32_
 static void SlipRendererHost_DrawPerspectiveSpan(void *context, const RasterPerspectiveDrawState *state,
                                                  int32_t scanline) {
 	(void)context;
-	const uint16_t transparent = (uint16_t)((uint16_t)state->texture->data[8] | (uint16_t)state->texture->data[9] << 8);
+	const uint16_t transparent = SlipBytes_ReadLE16(state->texture->data + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
 	RasterTexturedSpanDispatchState span = {.screenRow = g_screenRowPtrs[scanline],
 	                                        .screenRowBytes = (size_t)g_screenPitch,
 	                                        .scanlineIndex = (uint32_t)scanline,

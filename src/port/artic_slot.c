@@ -1,5 +1,7 @@
 #include "artic_slot.h"
+#include "actor_format.h"
 #include "actor_resources.h"
+#include "actor_tags.h"
 #include "byte_order.h"
 
 #include "runtime.h"
@@ -9,7 +11,12 @@
 
 uint32_t SlipArticSlot_initialized;
 
-enum { ARTIC_OBJECT_RELEASE_SERVER = 1u };
+enum {
+	ARTIC_OBJECT_RELEASE_SERVER = SLIP_OBJECT_RELEASE_SERVER_ID,
+	SLIP_ARTIC_PART_CAPACITY = SLIP_ACTOR_DEFAULT_PART_CAPACITY,
+	SLIP_ARTIC_ACTOR_STRIDE = SLIP_ACTOR_RECORD_DOS_BYTES,
+	SLIP_ARTIC_PART_ADDRESS_BYTES = sizeof(uint32_t)
+};
 
 static SlipArticSlotPool *installedPool;
 
@@ -63,19 +70,19 @@ static uint8_t *SlipArticSlot_Pointer(const SlipArticSlotPool *pool, uint32_t re
 void SlipArticSlot_PreloadResources(const uint8_t *payload, SlipArticSlotFindResource loadResource, void *user) {
 	const SlipActorResourceCalls calls = {.context = user, .load = loadResource};
 	SlipActorResources_preloadPayload = payload;
-	SlipActor_PreloadNode(payload + SlipBytes_ReadLE32(payload + 0x20), &calls);
+	SlipActor_PreloadNode(payload + SlipBytes_ReadLE32(payload + SLIP_ART_ROOT_PART_OFFSET), &calls);
 }
 
 void SlipArticSlot_ReleaseResources(const uint8_t *payload, SlipArticSlotFindResource findResource,
                                     SlipArticSlotReleaseResource releaseResource, void *user) {
 	const SlipActorResourceCalls calls = {.context = user, .find = findResource, .release = releaseResource};
 	SlipActorResources_releasePayload = payload;
-	SlipActor_ReleaseNode(payload + SlipBytes_ReadLE32(payload + 0x20), &calls);
+	SlipActor_ReleaseNode(payload + SlipBytes_ReadLE32(payload + SLIP_ART_ROOT_PART_OFFSET), &calls);
 }
 
 uint32_t SlipArticSlot_PoolBytes(uint16_t actorCount) {
-	const uint32_t actorBytes = (uint32_t)(uint16_t)(actorCount + 2u) * 0x00d8u;
-	const uint32_t partBytes = (uint32_t)(0x0050u + 1u) * 0x0160u;
+	const uint32_t actorBytes = (uint32_t)(uint16_t)(actorCount + 2u) * SLIP_ARTIC_ACTOR_STRIDE;
+	const uint32_t partBytes = (SLIP_ARTIC_PART_CAPACITY + 1u) * sizeof(SlipArticPartRecord);
 
 	return actorBytes + partBytes;
 }
@@ -83,7 +90,7 @@ uint32_t SlipArticSlot_PoolBytes(uint16_t actorCount) {
 static bool SlipArticSlot_InitializePoolWithCalls(uint16_t actorCount, uint8_t *allocation, size_t allocationBytes,
                                                   uint32_t allocationAddress, const SlipArticSlotResourceCalls *calls,
                                                   SlipArticSlotPool *result) {
-	const uint32_t actorBytes = (uint32_t)(uint16_t)(actorCount + 2u) * 0x00d8u;
+	const uint32_t actorBytes = (uint32_t)(uint16_t)(actorCount + 2u) * SLIP_ARTIC_ACTOR_STRIDE;
 	const uint32_t requiredBytes = SlipArticSlot_PoolBytes(actorCount);
 	uint8_t *activeSentinel;
 	uint8_t *actorRecord;
@@ -112,8 +119,8 @@ static bool SlipArticSlot_InitializePoolWithCalls(uint16_t actorCount, uint8_t *
 	                              allocationAddress,
 	                              allocation,
 	                              allocationAddress,
-	                              allocation + 0x00d8u,
-	                              allocationAddress + 0x00d8u,
+	                              allocation + SLIP_ARTIC_ACTOR_STRIDE,
+	                              allocationAddress + SLIP_ARTIC_ACTOR_STRIDE,
 	                              allocation + actorBytes,
 	                              allocationAddress + actorBytes,
 	                              actorCount,
@@ -126,7 +133,7 @@ static bool SlipArticSlot_InitializePoolWithCalls(uint16_t actorCount, uint8_t *
 	active->previous = result->activeSentinelAddress;
 	actorRecord = result->actorFreeSentinel;
 	for (i = 0; i < actorCount; ++i) {
-		uint8_t *const nextAddress = actorRecord + 0x00d8u;
+		uint8_t *const nextAddress = actorRecord + SLIP_ARTIC_ACTOR_STRIDE;
 		SlipArticActorHeader *const actor = (void *)actorRecord;
 		SlipArticActorHeader *const next = (void *)nextAddress;
 		actor->next = SlipArticSlot_AddressFromPointer(result, nextAddress);
@@ -138,8 +145,8 @@ static bool SlipArticSlot_InitializePoolWithCalls(uint16_t actorCount, uint8_t *
 	    SlipArticSlot_AddressFromPointer(result, actorRecord);
 
 	partRecord = result->partFreeSentinel;
-	for (i = 0; i < 0x50u; ++i) {
-		uint8_t *const nextAddress = partRecord + 0x0160u;
+	for (i = 0; i < SLIP_ARTIC_PART_CAPACITY; ++i) {
+		uint8_t *const nextAddress = partRecord + sizeof(SlipArticPartRecord);
 		SlipArticPartHeader *const part = (void *)partRecord;
 		SlipArticPartHeader *const next = (void *)nextAddress;
 		part->nextSibling = SlipArticSlot_AddressFromPointer(result, nextAddress);
@@ -253,7 +260,7 @@ static uint32_t SlipArticSlot_ObjectEvent(uint32_t events, uint32_t payload, uin
 	(void)flags;
 	(void)data;
 	(void)frame;
-	if (object == 0 || (events & ARTIC_OBJECT_RELEASE_SERVER) == 0 || SlipArticSlot_initialized == 0)
+	if (object == 0 || (events & SLIP_OBJECT_SERVER_EVENT_FREE) == 0 || SlipArticSlot_initialized == 0)
 		return events;
 	SlipArticActorHeader *const sentinel = (void *)installedPool->activeSentinel;
 	uint32_t actorAddress = sentinel->next;
@@ -356,13 +363,13 @@ static bool SlipArticSlot_BodyFromOffset(const uint8_t *payload, size_t payloadB
 
 static uint16_t SlipArticSlot_FindBodyResource(const uint8_t *resourceName, SlipArticSlotFindResource findResource,
                                                void *findResourceUser) {
-	char name[13];
+	char name[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 	uint32_t resourceHandle;
 
 	if (resourceName[0] == 0)
 		return 0;
-	memcpy(name, resourceName, 12u);
-	name[12] = '\0';
+	memcpy(name, resourceName, SLIP_RESOURCE_NAME_BYTES);
+	name[SLIP_RESOURCE_NAME_BYTES] = '\0';
 	if (findResource == NULL || !findResource(findResourceUser, name, &resourceHandle)) {
 		SlipArticSlot_initialized = 0;
 		SlipRuntime_Fatal("ArticSlotInit - one of the body shapes is missing");
@@ -387,33 +394,39 @@ bool SlipArticSlot_InitializeParts(SlipArticSlotPool *pool, uint32_t actorAddres
 		uint32_t resourceCount;
 		uint32_t entryIndexOrPointCount;
 
-		if (!SlipArticSlot_BodyRange(payload, payloadBytes, body, 0x1d0u)) {
+		if (!SlipArticSlot_BodyRange(payload, payloadBytes, body, SLIP_ART_PART_POINTS_OFFSET)) {
 			return false;
 		}
-		childOffset = SlipBytes_ReadLE32(body + 0x04u);
+		childOffset = SlipBytes_ReadLE32(body + SLIP_ART_PART_CHILD_OFFSET);
 		SlipArticSlot_AllocatePart(pool, parentAddress, &allocate);
 		partRecord = allocate.partRecord;
 		partAddress = allocate.partAddress;
-		SlipArticSlot_Write16(partRecord + 0x10au, 0);
-		SlipArticSlot_Write32(partRecord + 0x08u, 0);
-		SlipArticSlot_Write32(partRecord + 0x24u, 0);
-		SlipArticSlot_Write32(partRecord + 0x28u, 0);
-		SlipArticSlot_Write32(partRecord + 0x2cu, 0);
+		SlipArticSlot_Write16(partRecord + offsetof(SlipArticPartRecord, angle), 0);
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, header.firstChild), 0);
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, header.worldPosition.x), 0);
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, header.worldPosition.y), 0);
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, header.worldPosition.z), 0);
 
-		for (entryIndexOrPointCount = 0; entryIndexOrPointCount < 8u; ++entryIndexOrPointCount) {
-			SlipArticSlot_Write16(partRecord + 0x3cu + entryIndexOrPointCount * 2u,
-			                      SlipArticSlot_FindBodyResource(body + 0x1cu + entryIndexOrPointCount * 0x0eu,
+		for (entryIndexOrPointCount = 0; entryIndexOrPointCount < SLIP_ART_LOD_COUNT; ++entryIndexOrPointCount) {
+			SlipArticSlot_Write16(partRecord + offsetof(SlipArticPartRecord, header.shapes) +
+			                          entryIndexOrPointCount * sizeof(uint16_t),
+			                      SlipArticSlot_FindBodyResource(body + SLIP_ART_PART_SHAPE_NAMES_OFFSET +
+			                                                         entryIndexOrPointCount * SLIP_ART_SHAPE_NAME_BYTES,
 			                                                     findResource, findResourceUser));
 		}
-		for (entryIndexOrPointCount = 0; entryIndexOrPointCount < 8u; ++entryIndexOrPointCount) {
-			SlipArticSlot_Write16(partRecord + 0x4cu + entryIndexOrPointCount * 2u,
-			                      SlipArticSlot_FindBodyResource(body + 0x8cu + entryIndexOrPointCount * 0x0eu,
+		for (entryIndexOrPointCount = 0; entryIndexOrPointCount < SLIP_ART_LOD_COUNT; ++entryIndexOrPointCount) {
+			SlipArticSlot_Write16(partRecord + offsetof(SlipArticPartRecord, header.replayShapes) +
+			                          entryIndexOrPointCount * sizeof(uint16_t),
+			                      SlipArticSlot_FindBodyResource(body + SLIP_ART_PART_REPLAY_SHAPE_NAMES_OFFSET +
+			                                                         entryIndexOrPointCount * SLIP_ART_SHAPE_NAME_BYTES,
 			                                                     findResource, findResourceUser));
 		}
 
 		resourceCount = 0;
-		for (entryIndexOrPointCount = 0; entryIndexOrPointCount < 4u; ++entryIndexOrPointCount) {
-			const uint8_t *const destructionShapeRecord = body + 0xfcu + entryIndexOrPointCount * 0x1au;
+		for (entryIndexOrPointCount = 0; entryIndexOrPointCount < SLIP_ART_DESTRUCTION_COUNT;
+		     ++entryIndexOrPointCount) {
+			const uint8_t *const destructionShapeRecord =
+			    body + SLIP_ART_PART_DESTRUCTION_OFFSET + entryIndexOrPointCount * SLIP_ART_NAMED_SHAPE_BYTES;
 			const uint16_t destructionShapeHandle =
 			    SlipArticSlot_FindBodyResource(destructionShapeRecord, findResource, findResourceUser);
 			SlipArticDebrisEntry *const destination =
@@ -422,15 +435,19 @@ bool SlipArticSlot_InitializeParts(SlipArticSlotPool *pool, uint32_t actorAddres
 			if (destructionShapeHandle != 0)
 				++resourceCount;
 			destination->shape = destructionShapeHandle;
-			destination->position.x = (int32_t)SlipBytes_ReadLE32(destructionShapeRecord + 0x0eu);
-			destination->position.y = (int32_t)SlipBytes_ReadLE32(destructionShapeRecord + 0x12u);
-			destination->position.z = (int32_t)SlipBytes_ReadLE32(destructionShapeRecord + 0x16u);
+			destination->position.x =
+			    (int32_t)SlipBytes_ReadLE32(destructionShapeRecord + SLIP_ART_NAMED_SHAPE_POSITION_OFFSET);
+			destination->position.y = (int32_t)SlipBytes_ReadLE32(
+			    destructionShapeRecord + (SLIP_ART_NAMED_SHAPE_POSITION_OFFSET + SLIP_ART_POSITION_Y_OFFSET));
+			destination->position.z = (int32_t)SlipBytes_ReadLE32(
+			    destructionShapeRecord + (SLIP_ART_NAMED_SHAPE_POSITION_OFFSET + SLIP_ART_POSITION_Z_OFFSET));
 		}
 		((SlipArticPartHeader *)(void *)partRecord)->destructionCount = (uint16_t)resourceCount;
 
 		resourceCount = 0;
-		for (entryIndexOrPointCount = 0; entryIndexOrPointCount < 4u; ++entryIndexOrPointCount) {
-			const uint8_t *const debrisShapeRecord = body + 0x164u + entryIndexOrPointCount * 0x1au;
+		for (entryIndexOrPointCount = 0; entryIndexOrPointCount < SLIP_ART_DEBRIS_COUNT; ++entryIndexOrPointCount) {
+			const uint8_t *const debrisShapeRecord =
+			    body + SLIP_ART_PART_DEBRIS_OFFSET + entryIndexOrPointCount * SLIP_ART_NAMED_SHAPE_BYTES;
 			const uint16_t debrisShapeHandle =
 			    SlipArticSlot_FindBodyResource(debrisShapeRecord, findResource, findResourceUser);
 			SlipArticDebrisEntry *const destination =
@@ -439,30 +456,43 @@ bool SlipArticSlot_InitializeParts(SlipArticSlotPool *pool, uint32_t actorAddres
 			if (debrisShapeHandle != 0)
 				++resourceCount;
 			destination->shape = debrisShapeHandle;
-			destination->position.x = (int32_t)SlipBytes_ReadLE32(debrisShapeRecord + 0x0eu);
-			destination->position.y = (int32_t)SlipBytes_ReadLE32(debrisShapeRecord + 0x12u);
-			destination->position.z = (int32_t)SlipBytes_ReadLE32(debrisShapeRecord + 0x16u);
+			destination->position.x =
+			    (int32_t)SlipBytes_ReadLE32(debrisShapeRecord + SLIP_ART_NAMED_SHAPE_POSITION_OFFSET);
+			destination->position.y = (int32_t)SlipBytes_ReadLE32(
+			    debrisShapeRecord + (SLIP_ART_NAMED_SHAPE_POSITION_OFFSET + SLIP_ART_POSITION_Y_OFFSET));
+			destination->position.z = (int32_t)SlipBytes_ReadLE32(
+			    debrisShapeRecord + (SLIP_ART_NAMED_SHAPE_POSITION_OFFSET + SLIP_ART_POSITION_Z_OFFSET));
 		}
 		((SlipArticPartHeader *)(void *)partRecord)->debrisCount = (uint16_t)resourceCount;
-		SlipArticSlot_Write32(partRecord + 0xe0u, SlipBytes_ReadLE32(body + 0x0cu));
-		SlipArticSlot_Write32(partRecord + 0x14u, SlipBytes_ReadLE32(body + 0x10u));
-		SlipArticSlot_Write32(partRecord + 0x18u, SlipBytes_ReadLE32(body + 0x14u));
-		SlipArticSlot_Write32(partRecord + 0x1cu, SlipBytes_ReadLE32(body + 0x18u));
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, rotationCallbackOffset),
+		                      SlipBytes_ReadLE32(body + SLIP_ART_PART_ROTATION_CALLBACK_OFFSET));
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, header.localPosition.x),
+		                      SlipBytes_ReadLE32(body + SLIP_ART_PART_POSITION_OFFSET));
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, header.localPosition.y),
+		                      SlipBytes_ReadLE32(body + (SLIP_ART_PART_POSITION_OFFSET + SLIP_ART_POSITION_Y_OFFSET)));
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, header.localPosition.z),
+		                      SlipBytes_ReadLE32(body + (SLIP_ART_PART_POSITION_OFFSET + SLIP_ART_POSITION_Z_OFFSET)));
 
-		entryIndexOrPointCount = SlipBytes_ReadLE32(body + 0x1ccu);
-		if (entryIndexOrPointCount > 5u)
-			entryIndexOrPointCount = 5u;
-		SlipArticSlot_Write32(partRecord + 0x10cu, entryIndexOrPointCount);
+		entryIndexOrPointCount = SlipBytes_ReadLE32(body + SLIP_ART_PART_POINT_COUNT_OFFSET);
+		if (entryIndexOrPointCount > SLIP_ART_POINT_CAPACITY)
+			entryIndexOrPointCount = SLIP_ART_POINT_CAPACITY;
+		SlipArticSlot_Write32(partRecord + offsetof(SlipArticPartRecord, namedPointCount), entryIndexOrPointCount);
 		if (entryIndexOrPointCount != 0) {
 			if (!SlipArticSlot_BodyRange(payload, payloadBytes, body,
-			                             0x1d0u + (size_t)entryIndexOrPointCount * 0x10u)) {
+			                             SLIP_ART_PART_POINTS_OFFSET +
+			                                 (size_t)entryIndexOrPointCount * SLIP_ART_POINT_BYTES)) {
 				return false;
 			}
-			memcpy(partRecord + 0x110u, body + 0x1d0u, (size_t)entryIndexOrPointCount * 0x10u);
+			memcpy(partRecord + offsetof(SlipArticPartRecord, namedPoints), body + SLIP_ART_PART_POINTS_OFFSET,
+			       (size_t)entryIndexOrPointCount * SLIP_ART_POINT_BYTES);
 		}
 		SlipArticSlot_Write32(partRecord, SlipBytes_ReadLE32(body));
-		SlipArticSlot_Write32(actorRecord + 0x30u + SlipBytes_ReadLE32(actorRecord + 0x74u) * 4u, partAddress);
-		SlipArticSlot_Write32(actorRecord + 0x74u, SlipBytes_ReadLE32(actorRecord + 0x74u) + 1u);
+		SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, parts) +
+		                          SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, partCount)) *
+		                              SLIP_ARTIC_PART_ADDRESS_BYTES,
+		                      partAddress);
+		SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, partCount),
+		                      SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, partCount)) + 1u);
 
 		if (childOffset != 0) {
 			const uint8_t *childBody;
@@ -474,7 +504,7 @@ bool SlipArticSlot_InitializeParts(SlipArticSlotPool *pool, uint32_t actorAddres
 			}
 		}
 		{
-			const uint32_t siblingOffset = SlipBytes_ReadLE32(body + 0x08u);
+			const uint32_t siblingOffset = SlipBytes_ReadLE32(body + SLIP_ART_PART_SIBLING_OFFSET);
 
 			if (siblingOffset == 0)
 				break;
@@ -500,7 +530,7 @@ bool SlipArticSlot_Create(uint16_t object, uint16_t resourceHandle, const uint8_
 	uint32_t bodyOffset;
 	const uint8_t *body;
 
-	if (result == NULL || pool == NULL || payloadFrom == NULL || payloadBytesFrom < 0x68u) {
+	if (result == NULL || pool == NULL || payloadFrom == NULL || payloadBytesFrom < SLIP_ART_HEADER_BYTES) {
 		return false;
 	}
 	if (pool->resourceCalls != NULL)
@@ -509,7 +539,7 @@ bool SlipArticSlot_Create(uint16_t object, uint16_t resourceHandle, const uint8_
 		return false;
 	}
 	if (allocate.allocationFailed) {
-		SlipRuntime_error = 7;
+		SlipRuntime_error = SLIP_RUNTIME_ERROR_CAPACITY_EXHAUSTED;
 		if (pool->resourceCalls != NULL)
 			pool->resourceCalls->unlock(pool->resourceCalls->context, resourceHandle);
 		*result = (SlipArticSlotCreate){NULL, 0, true};
@@ -518,41 +548,52 @@ bool SlipArticSlot_Create(uint16_t object, uint16_t resourceHandle, const uint8_
 
 	actorRecord = allocate.actorRecord;
 	actorAddress = allocate.actorAddress;
-	SlipArticSlot_Write16(actorRecord + 0xc0u, object);
-	SlipArticSlot_Write16(actorRecord + 0xc2u, resourceHandle);
-	SlipArticSlot_Write32(actorRecord + 0x74u, 0);
-	SlipArticSlot_Write32(actorRecord + 0x78u, 0);
+	SlipArticSlot_Write16(actorRecord + offsetof(SlipArticActorHeader, owner), object);
+	SlipArticSlot_Write16(actorRecord + offsetof(SlipArticActorHeader, resource), resourceHandle);
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, partCount), 0);
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, cachedPartTag), 0);
 	if (!SlipObject_SetDrawData(objectTable, objectTableBytes, object, actorAddress, &setSlot) ||
 	    !SlipObject_Position(objectTable, objectTableBytes, object, &objectPosition)) {
 		return false;
 	}
-	SlipArticSlot_Write32(actorRecord + 0x08u, objectPosition.positionX - 1u);
-	SlipArticSlot_Write32(actorRecord + 0x0cu, objectPosition.positionY);
-	SlipArticSlot_Write32(actorRecord + 0x10u, objectPosition.positionZ);
-	SlipArticSlot_Write32(actorRecord + 0xbcu, SlipBytes_ReadLE32(payloadFrom + 0x24u));
-	SlipArticSlot_Write32(actorRecord + 0x14u, SlipBytes_ReadLE32(payloadFrom + 0x04u));
-	SlipArticSlot_Write32(actorRecord + 0x18u, SlipBytes_ReadLE32(payloadFrom + 0x08u));
-	SlipArticSlot_Write32(actorRecord + 0x1cu, SlipBytes_ReadLE32(payloadFrom + 0x0cu));
-	SlipArticSlot_Write32(actorRecord + 0x20u, SlipBytes_ReadLE32(payloadFrom + 0x10u));
-	SlipArticSlot_Write32(actorRecord + 0x24u, SlipBytes_ReadLE32(payloadFrom + 0x14u));
-	SlipArticSlot_Write32(actorRecord + 0x28u, SlipBytes_ReadLE32(payloadFrom + 0x18u));
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, cachedPosition.x),
+	                      objectPosition.positionX - 1u);
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, cachedPosition.y), objectPosition.positionY);
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, cachedPosition.z), objectPosition.positionZ);
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, childrenInSortTree),
+	                      SlipBytes_ReadLE32(payloadFrom + SLIP_ART_SORT_CHILDREN_OFFSET));
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, minimum.x),
+	                      SlipBytes_ReadLE32(payloadFrom + SLIP_ART_MINIMUM_OFFSET));
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, minimum.y),
+	                      SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MINIMUM_OFFSET + SLIP_ART_POSITION_Y_OFFSET)));
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, minimum.z),
+	                      SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MINIMUM_OFFSET + SLIP_ART_POSITION_Z_OFFSET)));
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, maximum.x),
+	                      SlipBytes_ReadLE32(payloadFrom + SLIP_ART_MAXIMUM_OFFSET));
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, maximum.y),
+	                      SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MAXIMUM_OFFSET + SLIP_ART_POSITION_Y_OFFSET)));
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, maximum.z),
+	                      SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MAXIMUM_OFFSET + SLIP_ART_POSITION_Z_OFFSET)));
 
-	radiusX = (int32_t)(0u - SlipBytes_ReadLE32(payloadFrom + 0x04u));
-	if (radiusX < (int32_t)SlipBytes_ReadLE32(payloadFrom + 0x10u)) {
-		radiusX = (int32_t)SlipBytes_ReadLE32(payloadFrom + 0x10u);
+	radiusX = (int32_t)(0u - SlipBytes_ReadLE32(payloadFrom + SLIP_ART_MINIMUM_OFFSET));
+	if (radiusX < (int32_t)SlipBytes_ReadLE32(payloadFrom + SLIP_ART_MAXIMUM_OFFSET)) {
+		radiusX = (int32_t)SlipBytes_ReadLE32(payloadFrom + SLIP_ART_MAXIMUM_OFFSET);
 	}
-	radiusY = (int32_t)(0u - SlipBytes_ReadLE32(payloadFrom + 0x08u));
-	if (radiusY < (int32_t)SlipBytes_ReadLE32(payloadFrom + 0x14u)) {
-		radiusY = (int32_t)SlipBytes_ReadLE32(payloadFrom + 0x14u);
+	radiusY = (int32_t)(0u - SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MINIMUM_OFFSET + SLIP_ART_POSITION_Y_OFFSET)));
+	if (radiusY < (int32_t)SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MAXIMUM_OFFSET + SLIP_ART_POSITION_Y_OFFSET))) {
+		radiusY = (int32_t)SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MAXIMUM_OFFSET + SLIP_ART_POSITION_Y_OFFSET));
 	}
-	radiusZ = (int32_t)(0u - SlipBytes_ReadLE32(payloadFrom + 0x0cu));
-	if (radiusZ < (int32_t)SlipBytes_ReadLE32(payloadFrom + 0x18u)) {
-		radiusZ = (int32_t)SlipBytes_ReadLE32(payloadFrom + 0x18u);
+	radiusZ = (int32_t)(0u - SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MINIMUM_OFFSET + SLIP_ART_POSITION_Z_OFFSET)));
+	if (radiusZ < (int32_t)SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MAXIMUM_OFFSET + SLIP_ART_POSITION_Z_OFFSET))) {
+		radiusZ = (int32_t)SlipBytes_ReadLE32(payloadFrom + (SLIP_ART_MAXIMUM_OFFSET + SLIP_ART_POSITION_Z_OFFSET));
 	}
-	SlipArticSlot_Write32(actorRecord + 0x2cu, SlipView3D_VectorLength(radiusX, radiusY, radiusZ));
-	memcpy(actorRecord + 0x7cu, payloadFrom + 0x28u, 0x20u);
-	memcpy(actorRecord + 0x9cu, payloadFrom + 0x48u, 0x20u);
-	bodyOffset = SlipBytes_ReadLE32(payloadFrom + 0x20u);
+	SlipArticSlot_Write32(actorRecord + offsetof(SlipArticActorHeader, radius),
+	                      SlipView3D_VectorLength(radiusX, radiusY, radiusZ));
+	memcpy(actorRecord + offsetof(SlipArticActorHeader, lodDistances), payloadFrom + SLIP_ART_LOD_DISTANCES_OFFSET,
+	       SLIP_ART_LOD_COUNT * SLIP_ART_DISTANCE_BYTES);
+	memcpy(actorRecord + offsetof(SlipArticActorHeader, replayLodDistances),
+	       payloadFrom + SLIP_ART_REPLAY_LOD_DISTANCES_OFFSET, SLIP_ART_LOD_COUNT * SLIP_ART_DISTANCE_BYTES);
+	bodyOffset = SlipBytes_ReadLE32(payloadFrom + SLIP_ART_ROOT_PART_OFFSET);
 	if (bodyOffset >= payloadBytesFrom)
 		return false;
 	body = payloadFrom + bodyOffset;
@@ -575,6 +616,8 @@ static uint8_t *SlipArticSlot_PointerFromAddress(uint8_t *base, size_t bytes, ui
 	}
 	return base + offset;
 }
+
+enum { SLIP_ARTIC_ROTATION_CALLBACK_INDEX_SHIFT = 2 };
 
 typedef enum SlipArticSlotRotation {
 	SLIP_ARTIC_SLOT_ROTATION_NONE,
@@ -645,7 +688,8 @@ static void SlipArticSlot_RebuildChildren(uint8_t *partRecord, uint8_t *artData,
 				    (int32_t)((uint32_t)(int32_t)(int16_t)transformed.x + (uint32_t)parent->header.worldPosition.x),
 				    (int32_t)((uint32_t)(int32_t)(int16_t)transformed.y + (uint32_t)parent->header.worldPosition.y),
 				    (int32_t)((uint32_t)(int32_t)(int16_t)transformed.z + (uint32_t)parent->header.worldPosition.z)};
-				rotation = (SlipArticSlotRotation)(child->rotationCallbackOffset >> 2);
+				rotation =
+				    (SlipArticSlotRotation)(child->rotationCallbackOffset >> SLIP_ARTIC_ROTATION_CALLBACK_INDEX_SHIFT);
 				SlipArticSlot_ApplyRotation(rotation, maths, (int16_t)child->angle, &child->worldMatrix);
 			}
 			SlipArticSlot_RebuildChildren(childRecord, artData, artDataBytes, artDataAddress, maths);
@@ -671,7 +715,7 @@ bool SlipArticSlot_TestOwner(uint16_t object, const SlipObject *objectTable, siz
 		return false;
 	}
 	slotOffset = actorAddress - slotPoolAddress;
-	if (slotPool == NULL || (size_t)slotOffset + 0xc2u > slotPoolBytes) {
+	if (slotPool == NULL || (size_t)slotOffset + offsetof(SlipArticActorHeader, resource) > slotPoolBytes) {
 		return false;
 	}
 	actorRecord = slotPool + slotOffset;
@@ -703,7 +747,7 @@ bool SlipArticSlot_SelectDebris(uint16_t object, uint32_t destruction, const Sli
 	}
 	if (count == 0)
 		return false;
-	const uint16_t index = (uint16_t)(((uint32_t)(uint16_t)SlipRandom_Next() * count) >> 16);
+	const uint16_t index = (uint16_t)(((uint32_t)(uint16_t)SlipRandom_Next() * count) >> SLIP_RANDOM_SAMPLE_BITS);
 	selected->shape = entries[index].shape;
 	selected->position = entries[index].position;
 	return true;
@@ -722,10 +766,13 @@ bool SlipArticSlot_GetMainBounds(uint16_t object, const SlipObject *objectTable,
 	if (!zeroFlag) {
 		return false;
 	}
-	*result = (SlipArticSlotMainBounds){
-	    (int32_t)SlipBytes_ReadLE32(actorRecord + 0x14u), (int32_t)SlipBytes_ReadLE32(actorRecord + 0x18u),
-	    (int32_t)SlipBytes_ReadLE32(actorRecord + 0x1cu), (int32_t)SlipBytes_ReadLE32(actorRecord + 0x20u),
-	    (int32_t)SlipBytes_ReadLE32(actorRecord + 0x24u), (int32_t)SlipBytes_ReadLE32(actorRecord + 0x28u)};
+	*result =
+	    (SlipArticSlotMainBounds){(int32_t)SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, minimum.x)),
+	                              (int32_t)SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, minimum.y)),
+	                              (int32_t)SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, minimum.z)),
+	                              (int32_t)SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, maximum.x)),
+	                              (int32_t)SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, maximum.y)),
+	                              (int32_t)SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, maximum.z))};
 	return true;
 }
 
@@ -747,17 +794,19 @@ bool SlipArticSlot_GetMainShape(uint16_t object, uint16_t shapeIndex, const Slip
 		*selectionFailed = true;
 		return true;
 	}
-	mainPartAddress = SlipBytes_ReadLE32(actorRecord + 0x30u);
+	mainPartAddress = SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, parts));
 	if (mainPartAddress < slotPoolAddress) {
 		return false;
 	}
 	mainOffset = mainPartAddress - slotPoolAddress;
 	if ((size_t)mainOffset > slotPoolBytes ||
-	    slotPoolBytes - (size_t)mainOffset < (size_t)0x3eu + (size_t)shapeIndex * 2u) {
+	    slotPoolBytes - (size_t)mainOffset <
+	        (offsetof(SlipArticPartHeader, shapes) + sizeof(uint16_t)) + (size_t)shapeIndex * sizeof(uint16_t)) {
 		return false;
 	}
 	mainPart = slotPool + mainOffset;
-	*axOut = SlipBytes_ReadLE16(mainPart + 0x3cu + (size_t)shapeIndex * 2u);
+	*axOut = SlipBytes_ReadLE16(mainPart + offsetof(SlipArticPartRecord, header.shapes) +
+	                            (size_t)shapeIndex * sizeof(uint16_t));
 	*selectionFailed = false;
 	return true;
 }
@@ -774,7 +823,7 @@ bool SlipArticSlot_GetExtent(uint16_t object, const SlipObject *objectTable, siz
 	if (!zeroFlag) {
 		SlipRuntime_Fatal("ArticSlotGetExtent - this slot is not an artic slot");
 	}
-	*extentOut = (int32_t)SlipBytes_ReadLE32(actorRecord + 0x2cu);
+	*extentOut = (int32_t)SlipBytes_ReadLE32(actorRecord + offsetof(SlipArticActorHeader, radius));
 	return true;
 }
 
@@ -852,14 +901,14 @@ bool SlipArticSlot_SelectPart(uint32_t partTag, uint16_t object, const SlipObjec
 		return true;
 	}
 	SlipArticActorHeader *const actor = (void *)actorRecord;
-	if (partTag == 0x6d61696eu) {
+	if (partTag == SLIP_ACTOR_PART_MAIN) {
 		selectedPartAddress = actor->parts[0];
 		selectedHost = SlipArticSlot_PointerFromAddress(artData, artDataBytes, artDataAddress, selectedPartAddress);
 		*result = (SlipArticSlotPart){selectedHost, selectedPartAddress, false};
 		return true;
 	}
 	if (partTag == actor->cachedPartTag) {
-		selectedPartAddress = actor->parts[16];
+		selectedPartAddress = actor->parts[SLIP_ACTOR_CACHED_PART_INDEX];
 		selectedHost = SlipArticSlot_PointerFromAddress(artData, artDataBytes, artDataAddress, selectedPartAddress);
 		*result = (SlipArticSlotPart){selectedHost, selectedPartAddress, false};
 		return true;
@@ -874,7 +923,7 @@ bool SlipArticSlot_SelectPart(uint32_t partTag, uint16_t object, const SlipObjec
 			    SlipArticSlot_PointerFromAddress(artData, artDataBytes, artDataAddress, candidateAddress);
 
 			if (partTag == ((const SlipArticPartHeader *)(const void *)candidateRecord)->tag) {
-				actor->parts[16] = candidateAddress;
+				actor->parts[SLIP_ACTOR_CACHED_PART_INDEX] = candidateAddress;
 				actor->cachedPartTag = partTag;
 				*result = (SlipArticSlotPart){candidateRecord, candidateAddress, false};
 				return true;
@@ -920,15 +969,17 @@ bool SlipArticSlot_Position(uint32_t partTag, uint32_t pointTag, uint16_t object
 	                           artDataBytes, artDataAddress, maths)) {
 		return false;
 	}
-	remaining = SlipBytes_ReadLE32(selectedPartResult.partRecord + 0x10cu);
-	entry = selectedPartResult.partRecord + 0x110u;
+	remaining = SlipBytes_ReadLE32(selectedPartResult.partRecord + offsetof(SlipArticPartRecord, namedPointCount));
+	entry = selectedPartResult.partRecord + offsetof(SlipArticPartRecord, namedPoints);
 	while (remaining != 0) {
 		if (pointTag == SlipBytes_ReadLE32(entry)) {
-			*result = (SlipArticSlotPosition){SlipBytes_ReadLE32(entry + 0x04u), SlipBytes_ReadLE32(entry + 0x08u),
-			                                  SlipBytes_ReadLE32(entry + 0x0cu), false};
+			*result =
+			    (SlipArticSlotPosition){SlipBytes_ReadLE32(entry + offsetof(SlipArticNamedPoint, position.x)),
+			                            SlipBytes_ReadLE32(entry + offsetof(SlipArticNamedPoint, position.y)),
+			                            SlipBytes_ReadLE32(entry + offsetof(SlipArticNamedPoint, position.z)), false};
 			return true;
 		}
-		entry += 0x10u;
+		entry += sizeof(SlipArticNamedPoint);
 		--remaining;
 	}
 	*result = (SlipArticSlotPosition){0, 0, 0, true};
@@ -1003,10 +1054,10 @@ bool SlipArticSlot_SetAngle(uint32_t partTag, uint16_t angle, uint16_t object, c
 	if (selectedPartResult.selectionFailed) {
 		return true;
 	}
-	previousAngle = SlipBytes_ReadLE16(selectedPartResult.partRecord + 0x10au);
-	SlipArticSlot_Write16(selectedPartResult.partRecord + 0x10au, angle);
+	previousAngle = SlipBytes_ReadLE16(selectedPartResult.partRecord + offsetof(SlipArticPartRecord, angle));
+	SlipArticSlot_Write16(selectedPartResult.partRecord + offsetof(SlipArticPartRecord, angle), angle);
 	if (previousAngle != angle) {
-		SlipArticSlot_Write16(selectedPartResult.partRecord + 0x108u, 0u);
+		SlipArticSlot_Write16(selectedPartResult.partRecord + offsetof(SlipArticPartRecord, matrixValid), 0u);
 	}
 	return true;
 }

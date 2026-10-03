@@ -2,6 +2,8 @@
 #define SLIPSTREAM5000_RESOURCE_PLATFORM_H
 #include "resource_setup.h"
 
+enum { SLIP_RESOURCE_EXTENDED_REGION_CAPACITY = 16, SLIP_RESOURCE_CONVENTIONAL_REGION_CAPACITY = 16 };
+
 /* DPMI allocation identifiers are opaque API tokens, not native addresses.
  * The platform binding supplies a separate typed view of each region header. */
 typedef struct SlipResourceExtendedAllocation {
@@ -26,9 +28,9 @@ typedef struct SlipResourceMemoryServices {
 	uint16_t (*freeConventional)(void *, uint16_t selector);
 } SlipResourceMemoryServices;
 
-extern uint32_t SlipResource_extendedHandles[16];
+extern uint32_t SlipResource_extendedHandles[SLIP_RESOURCE_EXTENDED_REGION_CAPACITY];
 extern uint16_t SlipResource_extendedCount;
-extern uint16_t SlipResource_conventionalSelectors[16];
+extern uint16_t SlipResource_conventionalSelectors[SLIP_RESOURCE_CONVENTIONAL_REGION_CAPACITY];
 extern uint16_t SlipResource_conventionalCount;
 extern uint32_t SlipResource_allocationRetries;
 extern uint32_t SlipResource_requestedAllocationBytes;

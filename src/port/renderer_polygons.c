@@ -118,7 +118,7 @@ void SlipRenderer_ReturnActivePolygons(SlipRendererState *state) {
 	SlipRendererPolygon *current = state->activePolygons;
 	if (current != NULL) {
 		SlipRendererPolygon *next;
-		do {
+		for (;;) {
 			next = current->next;
 			SlipRendererPolygon *const following = current->next;
 			SlipRendererPolygon *const previous = current->previous;
@@ -134,7 +134,7 @@ void SlipRenderer_ReturnActivePolygons(SlipRendererState *state) {
 			current = next;
 			if (current == returned)
 				break;
-		} while (true);
+		}
 		state->activePolygons = NULL;
 	}
 }
@@ -199,7 +199,7 @@ bool SlipRenderer_BuildTexturedRing(SlipRendererState *state, uint16_t countAndF
                                     const uint8_t *serializedIndices, const SlipRendererTexturedRingCalls *calls) {
 	if (calls->reject(calls->ring.context, countAndFlags, serializedIndices))
 		return true;
-	uint32_t coordinateOffset = (uint32_t)countAndFlags << 1;
+	uint32_t coordinateOffset = (uint32_t)countAndFlags * SLIP_SERIALIZED_INDEX_BYTES;
 	if ((countAndFlags & SLIP_PRIMITIVE_VERTEX_NORMALS) != 0)
 		coordinateOffset <<= 2;
 	uint32_t count = countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;
@@ -389,18 +389,18 @@ bool SlipRenderer_PrepareClipEdges(SlipRendererState *state, uint32_t planeMask,
 	}
 	SlipRendererPolygon *cursor = inside;
 	SlipRendererPolygon *following;
-	do {
+	for (;;) {
 		following = cursor->next;
 		if ((cursor->point.flags & planeMask) != 0)
 			break;
 		cursor = following;
-	} while (true);
-	do {
+	}
+	for (;;) {
 		following = cursor->next;
 		if ((cursor->point.flags & planeMask) == 0)
 			break;
 		cursor = following;
-	} while (true);
+	}
 	if (cursor != inside)
 		return true;
 	SlipRendererPolygon *previous = outside->previous;
@@ -705,7 +705,7 @@ void SlipRenderer_DrawUnclippedMaterial(SlipRendererState *state, SlipDraw3DMate
 		const uint8_t *serializedNormals = serializedIndices + count * SLIP_SERIALIZED_INDEX_BYTES;
 		uint32_t remaining = count;
 		RasterTexturedPoint *destination = state->points;
-		do {
+		for (;;) {
 			const uint16_t index =
 			    (uint16_t)((uint16_t)serializedIndices[0] | (uint16_t)serializedIndices[1] << SLIP_BYTE_BITS);
 			SlipDraw3DVertexRecord *const vertex = state->activeVertices + index;
@@ -731,7 +731,7 @@ void SlipRenderer_DrawUnclippedMaterial(SlipRendererState *state, SlipDraw3DMate
 			++destination;
 			serializedIndices += SLIP_SERIALIZED_INDEX_BYTES;
 			serializedNormals += SLIP_SERIALIZED_NORMAL_BYTES;
-		} while (true);
+		}
 		calls->raster.shaded(calls->raster.context, state->points, count);
 	} else {
 		const uint32_t count = countAndFlags & SLIP_PRIMITIVE_VERTEX_COUNT_MASK;

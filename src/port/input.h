@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define SLIP_INPUT_CODE_COUNT 256
+
 typedef enum SlipInputCode {
 	SLIP_INPUT_SCAN_NONE = -1,
 	SLIP_INPUT_SCAN_ESCAPE = 0x01,
@@ -47,14 +49,38 @@ typedef enum SlipInputCode {
 	SLIP_INPUT_SCAN_B = 0x30,
 	SLIP_INPUT_SCAN_N = 0x31,
 	SLIP_INPUT_SCAN_M = 0x32,
+	SLIP_INPUT_SCAN_KEYPAD_DIVIDE = 0x35,
 	SLIP_INPUT_SCAN_RIGHT_SHIFT = 0x36,
+	SLIP_INPUT_SCAN_KEYPAD_MULTIPLY = 0x37,
 	SLIP_INPUT_SCAN_ALT = 0x38,
 	SLIP_INPUT_SCAN_SPACE = 0x39,
+	SLIP_INPUT_SCAN_CAPS_LOCK = 0x3a,
+	SLIP_INPUT_SCAN_F1 = 0x3b,
+	SLIP_INPUT_SCAN_F2 = 0x3c,
+	SLIP_INPUT_SCAN_F3 = 0x3d,
+	SLIP_INPUT_SCAN_F4 = 0x3e,
+	SLIP_INPUT_SCAN_F5 = 0x3f,
+	SLIP_INPUT_SCAN_F6 = 0x40,
+	SLIP_INPUT_SCAN_F7 = 0x41,
+	SLIP_INPUT_SCAN_F8 = 0x42,
+	SLIP_INPUT_SCAN_F9 = 0x43,
+	SLIP_INPUT_SCAN_F10 = 0x44,
+	SLIP_INPUT_SCAN_NUM_LOCK = 0x45,
+	SLIP_INPUT_SCAN_HOME = 0x47,
 	SLIP_INPUT_SCAN_UP = 0x48,
+	SLIP_INPUT_SCAN_PAGE_UP = 0x49,
+	SLIP_INPUT_SCAN_KEYPAD_MINUS = 0x4a,
 	SLIP_INPUT_SCAN_LEFT = 0x4b,
+	SLIP_INPUT_SCAN_KEYPAD_CENTER = 0x4c,
 	SLIP_INPUT_SCAN_RIGHT = 0x4d,
+	SLIP_INPUT_SCAN_KEYPAD_PLUS = 0x4e,
+	SLIP_INPUT_SCAN_END = 0x4f,
 	SLIP_INPUT_SCAN_DOWN = 0x50,
+	SLIP_INPUT_SCAN_PAGE_DOWN = 0x51,
+	SLIP_INPUT_SCAN_INSERT = 0x52,
 	SLIP_INPUT_SCAN_DELETE = 0x53,
+	SLIP_INPUT_SCAN_F11 = 0x57,
+	SLIP_INPUT_SCAN_F12 = 0x58,
 	SLIP_INPUT_MOUSE_LEFT = 0x80,
 	SLIP_INPUT_MOUSE_RIGHT = 0x81,
 	SLIP_INPUT_JOYSTICK_1_BUTTON_1 = 0x82,
@@ -89,12 +115,14 @@ typedef struct SlipInputBiosCalls {
 
 extern uint32_t SlipInput_biosMode;
 void SlipInput_SetBiosMode(uint32_t mode);
-uint8_t SlipInput_ReadCharacter(bool pressed[256], const bool held[256], const SlipInputBiosCalls *bios);
+uint8_t SlipInput_ReadCharacter(bool pressed[SLIP_INPUT_CODE_COUNT], const bool held[SLIP_INPUT_CODE_COUNT],
+                                const SlipInputBiosCalls *bios);
 
 typedef struct SlipInputBiosQueueCalls {
 	void *context;
 	void (*clear)(void *);
 } SlipInputBiosQueueCalls;
 
-bool SlipInput_InterceptScan(uint8_t scan, bool pressed[256], bool held[256], const SlipInputBiosQueueCalls *bios);
+bool SlipInput_InterceptScan(uint8_t scan, bool pressed[SLIP_INPUT_CODE_COUNT], bool held[SLIP_INPUT_CODE_COUNT],
+                             const SlipInputBiosQueueCalls *bios);
 #endif

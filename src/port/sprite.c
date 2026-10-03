@@ -1,6 +1,8 @@
 #include "sprite.h"
 #include "byte_order.h"
+#include "random_sequence.h"
 #include "raster/overlay.h"
+#include "sprite_format.h"
 
 #include "raster/raster.h"
 #include "vga_dac.h"
@@ -8,26 +10,28 @@
 #include <stddef.h>
 #include <string.h>
 
+enum { SLIP_SPRITE_DISSOLVE_INITIAL_SEED = 0x5a4a };
+
 int SlipSprite_FromPayload(const SlipResourcePayload *payload, SlipSprite *sprite) {
 	uint16_t transparent;
 	size_t pixelBytes;
 
-	if (payload == NULL || payload->data == NULL || payload->size < 16) {
+	if (payload == NULL || payload->data == NULL || payload->size < SLIP_SPRITE_HEADER_BYTES) {
 		return 0;
 	}
 
 	sprite->data = payload->data;
-	sprite->pixels = payload->data + 16;
-	sprite->width = SlipBytes_ReadLE16(payload->data + 0);
-	sprite->height = SlipBytes_ReadLE16(payload->data + 2);
-	sprite->x = SlipBytes_ReadLEI16(payload->data + 4);
-	sprite->y = SlipBytes_ReadLEI16(payload->data + 6);
-	transparent = SlipBytes_ReadLE16(payload->data + 8);
-	sprite->transparentColor = transparent == 0xffffu ? -1 : (int)(transparent & 0xffu);
-	sprite->paletteOffset = SlipBytes_ReadLE16(payload->data + 14);
+	sprite->pixels = payload->data + SLIP_SPRITE_HEADER_BYTES;
+	sprite->width = SlipBytes_ReadLE16(payload->data + SLIP_SPRITE_WIDTH_OFFSET);
+	sprite->height = SlipBytes_ReadLE16(payload->data + SLIP_SPRITE_HEIGHT_OFFSET);
+	sprite->x = SlipBytes_ReadLEI16(payload->data + SLIP_SPRITE_X_OFFSET);
+	sprite->y = SlipBytes_ReadLEI16(payload->data + SLIP_SPRITE_Y_OFFSET);
+	transparent = SlipBytes_ReadLE16(payload->data + SLIP_SPRITE_TRANSPARENT_COLOUR_OFFSET);
+	sprite->transparentColor = transparent == SLIP_SPRITE_NO_TRANSPARENT_COLOUR ? -1 : (int)(transparent & UINT8_MAX);
+	sprite->paletteOffset = SlipBytes_ReadLE16(payload->data + SLIP_SPRITE_PALETTE_OFFSET);
 
 	pixelBytes = (size_t)sprite->width * (size_t)sprite->height;
-	return sprite->width != 0 && sprite->height != 0 && payload->size >= 16 + pixelBytes;
+	return sprite->width != 0 && sprite->height != 0 && payload->size >= SLIP_SPRITE_HEADER_BYTES + pixelBytes;
 }
 
 void SlipSprite_ApplyPalette(const SlipSprite *sprite) {
@@ -40,9 +44,9 @@ void SlipSprite_ApplyPalette(const SlipSprite *sprite) {
 	}
 
 	p = sprite->data + sprite->paletteOffset;
-	start = SlipBytes_ReadLE16(p + 0);
-	count = SlipBytes_ReadLE16(p + 2);
-	p += 4;
+	start = SlipBytes_ReadLE16(p + SLIP_PALETTE_START_OFFSET);
+	count = SlipBytes_ReadLE16(p + SLIP_PALETTE_COUNT_OFFSET);
+	p += SLIP_PALETTE_HEADER_BYTES;
 
 	SlipVgaDac_WriteRange(start, count, p);
 }
@@ -67,18 +71,18 @@ void SlipSprite_Draw(const SlipSprite *sprite, uint8_t *dst, int dstPitch, int x
 void SlipSprite_DrawDissolve(const SlipSprite *sprite, uint8_t *dst, int dstPitch, int x, int y, uint16_t level) {
 	int right, bottom, copyWidth, copyHeight;
 	int sourceX = 0, sourceY = 0;
-	uint16_t random = 0x5a4a;
+	uint16_t random = SLIP_SPRITE_DISSOLVE_INITIAL_SEED;
 	const uint8_t *src;
 
 	if (sprite == NULL || sprite->pixels == NULL || dst == NULL || dstPitch <= 0)
 		return;
 
-	if (x == 0x7fff) {
+	if (x == SLIP_SPRITE_USE_STORED_POSITION) {
 		x = sprite->x;
 		y = sprite->y;
 	}
 
-	if (level == 0xffffu) {
+	if (level == UINT16_MAX) {
 		SlipSprite_DrawClipped(sprite, dst, dstPitch, x, y);
 		return;
 	}
@@ -113,7 +117,7 @@ void SlipSprite_DrawDissolve(const SlipSprite *sprite, uint8_t *dst, int dstPitc
 			const uint16_t incremented = (uint16_t)(random + 1u);
 			random = (uint16_t)(incremented >> 1);
 			if ((incremented & 1u) != 0)
-				random ^= 0xb400u;
+				random ^= SLIP_RANDOM_LFSR_FEEDBACK_MASK;
 			if (random < level) {
 				out[col] = sourceRow[col];
 				RasterOverlay_MarkWritten(out + col, 1);
@@ -135,7 +139,7 @@ void SlipSprite_DrawClipped(const SlipSprite *sprite, uint8_t *dst, int dstPitch
 		return;
 	}
 
-	if ((uint16_t)x == 0x7fff) {
+	if ((uint16_t)x == SLIP_SPRITE_USE_STORED_POSITION) {
 		x = sprite->x;
 		y = sprite->y;
 	}

@@ -3,6 +3,7 @@
 #include "renderer_lifecycle.h"
 #include "runtime.h"
 #include "sprite.h"
+#include "sprite_format.h"
 #include <stdlib.h>
 
 struct SlipResourceStorageNode {
@@ -34,6 +35,14 @@ struct SlipResourceStorageNode {
 	SlipResourceStorageNode *next;
 };
 
+/* Offsets of the original resource list sentinels relative to the bound DOS image. */
+enum {
+	SLIP_RESOURCE_FREE_BLOCKS_IMAGE_OFFSET = 0x242d4,
+	SLIP_RESOURCE_ALLOCATED_BLOCKS_IMAGE_OFFSET = 0x242f4,
+	SLIP_RESOURCE_HEADER_WORD_BITS = 16,
+	SLIP_RESOURCE_HEADER_LINK_COUNT = 4
+};
+
 static bool hasImageBase;
 static uint32_t imageBase;
 
@@ -46,24 +55,22 @@ static uint32_t SlipResourceStorage_BlockAbiAddress(const SlipResourceBlock *blo
 	if (block == NULL)
 		return 0;
 	if (block == &SlipResource_freeBlocks)
-		return hasImageBase ? imageBase + 0x242d4u : (uint32_t)(uintptr_t)block;
+		return hasImageBase ? imageBase + SLIP_RESOURCE_FREE_BLOCKS_IMAGE_OFFSET : (uint32_t)(uintptr_t)block;
 	if (block == &SlipResource_allocatedBlocks)
-		return hasImageBase ? imageBase + 0x242f4u : (uint32_t)(uintptr_t)block;
+		return hasImageBase ? imageBase + SLIP_RESOURCE_ALLOCATED_BLOCKS_IMAGE_OFFSET : (uint32_t)(uintptr_t)block;
 	const SlipResourceStorageNode *const node = (const SlipResourceStorageNode *)block;
 	return node->storage->hasLinearAddress ? node->storage->linearAddress + node->blockOffset
 	                                       : (uint32_t)(uintptr_t)(node->storage->bytes + node->blockOffset);
 }
 
 void SlipResourceStorage_HeaderMatrix(const SlipResourceBlock *block, SlipView3DMatrix *matrix) {
-	enum { DOS_WORD_BITS = 16, DOS_HEADER_LINKS = 4 };
-
-	const uint32_t links[DOS_HEADER_LINKS] = {SlipResourceStorage_BlockAbiAddress(block->next),
-	                                          SlipResourceStorage_BlockAbiAddress(block->previous),
-	                                          SlipResourceStorage_BlockAbiAddress(block->physicalPrevious),
-	                                          SlipResourceStorage_BlockAbiAddress(block->physicalNext)};
-	for (unsigned link = 0; link < DOS_HEADER_LINKS; ++link) {
+	const uint32_t links[SLIP_RESOURCE_HEADER_LINK_COUNT] = {
+	    SlipResourceStorage_BlockAbiAddress(block->next), SlipResourceStorage_BlockAbiAddress(block->previous),
+	    SlipResourceStorage_BlockAbiAddress(block->physicalPrevious),
+	    SlipResourceStorage_BlockAbiAddress(block->physicalNext)};
+	for (unsigned link = 0; link < SLIP_RESOURCE_HEADER_LINK_COUNT; ++link) {
 		matrix->m[link * 2] = (int16_t)(uint16_t)links[link];
-		matrix->m[link * 2 + 1] = (int16_t)(uint16_t)(links[link] >> DOS_WORD_BITS);
+		matrix->m[link * 2 + 1] = (int16_t)(uint16_t)(links[link] >> SLIP_RESOURCE_HEADER_WORD_BITS);
 	}
 	matrix->m[8] = (int16_t)(uint16_t)block->capacityBytes;
 }
@@ -118,11 +125,13 @@ uint32_t SlipResourceStorage_BlockOffset(const SlipResourceBlock *block) {
 	return ((const SlipResourceStorageNode *)block)->blockOffset;
 }
 
+enum { SLIP_RESOURCE_PERSPECTIVE_TABLE_CAPACITY = 512 };
+
 RasterPerspectiveEntry *SlipResourceStorage_PerspectiveTable(SlipResourceBlock *block) {
 	SlipResourceStorageNode *const node = (SlipResourceStorageNode *)block;
 	if (node->perspectiveTable == NULL) {
 
-		node->perspectiveTable = malloc(512 * sizeof(*node->perspectiveTable));
+		node->perspectiveTable = malloc(SLIP_RESOURCE_PERSPECTIVE_TABLE_CAPACITY * sizeof(*node->perspectiveTable));
 		if (node->perspectiveTable == NULL)
 			SlipRuntime_Fatal("Cannot allocate native perspective table records");
 	}
@@ -155,7 +164,7 @@ uint8_t *SlipResourceStorage_Payload(SlipResourceBlock *block) {
 SlipSprite *SlipResourceStorage_GeneratedSprite(SlipResourceBlock *block) {
 	SlipResourceStorageNode *const node = (SlipResourceStorageNode *)block;
 
-	node->generatedSprite.pixels = SlipResourceStorage_Payload(block) + 16;
+	node->generatedSprite.pixels = SlipResourceStorage_Payload(block) + SLIP_SPRITE_HEADER_BYTES;
 	return &node->generatedSprite;
 }
 
@@ -351,7 +360,8 @@ bool SlipResourceStorage_HandleTable(void *context, uint32_t bytes, SlipResource
 		return false;
 	SlipResourceStorageNode *const node = (SlipResourceStorageNode *)allocation->block;
 
-	SlipResourceHandle *const records = realloc(node->handles, (bytes / 16u) * sizeof(*records));
+	SlipResourceHandle *const records =
+	    realloc(node->handles, (bytes / SLIP_RESOURCE_DOS_HANDLE_BYTES) * sizeof(*records));
 	if (records == NULL)
 		SlipRuntime_Fatal("Cannot allocate native resource handle views");
 	node->handles = records;
@@ -365,7 +375,8 @@ bool SlipResourceStorage_NameTable(void *context, uint32_t bytes, SlipResourceNa
 		return false;
 	SlipResourceStorageNode *const node = (SlipResourceStorageNode *)allocation->block;
 
-	SlipResourceNameEntry *const entries = realloc(node->names, (bytes / 5u) * sizeof(*entries));
+	SlipResourceNameEntry *const entries =
+	    realloc(node->names, (bytes / SLIP_RESOURCE_NAME_ENTRY_MINIMUM_BYTES) * sizeof(*entries));
 	if (entries == NULL)
 		SlipRuntime_Fatal("Cannot allocate native resource name views");
 	node->names = entries;

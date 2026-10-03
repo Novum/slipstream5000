@@ -11,17 +11,17 @@ int32_t HmiDigital_StartSample(HmiDigitalDriver *driver, const HmiDigitalSampleD
 	uint32_t voiceIndex;
 	HmiDigitalVoice *voice;
 
-	if (driver->version >= 0xe106u) {
+	if (driver->version >= HMI_DIGITAL_UNSUPPORTED_START_VERSION) {
 		return 0;
 	}
 
 	for (voiceIndex = 0; voiceIndex < HMI_DIGITAL_VOICE_COUNT; ++voiceIndex) {
 		voice = &driver->voices[voiceIndex];
-		if ((voice->flags & 0x8000u) == 0) {
+		if ((voice->flags & HMI_DIGITAL_ACTIVE) == 0) {
 			voice->sampleBase = descriptor->sampleData;
 			voice->sampleCursor = descriptor->sampleData;
 			voice->loopBase = descriptor->sampleData + descriptor->loopStart;
-			if ((descriptor->flags & 0x0040u) == 0) {
+			if ((descriptor->flags & HMI_DIGITAL_LOOP_SEGMENT) == 0) {
 				voice->initialSegmentBytes = descriptor->sampleLength;
 				voice->remainingSegmentBytes = descriptor->sampleLength;
 			} else {
@@ -33,7 +33,7 @@ int32_t HmiDigital_StartSample(HmiDigitalDriver *driver, const HmiDigitalSampleD
 			}
 			voice->volume = descriptor->volume;
 			voice->sampleID = descriptor->sampleID;
-			voice->flags = descriptor->flags | 0xa000u;
+			voice->flags = descriptor->flags | HMI_DIGITAL_START_FLAGS;
 			voice->channel = descriptor->channel;
 			voice->callbackOffset = descriptor->callbackOffset;
 			voice->callbackSelector = descriptor->callbackSelector;
@@ -64,13 +64,13 @@ uint32_t HmiDigital_StopSample(HmiDigitalDriver *driver, uint32_t voiceIndex) {
 	HmiDigitalVoice *voice;
 
 	if (voiceIndex >= HMI_DIGITAL_VOICE_COUNT) {
-		return 10;
+		return HMI_DIGITAL_ERROR_INVALID_HANDLE;
 	}
 	voice = &driver->voices[voiceIndex];
-	if ((voice->flags & 0x8000u) == 0 || (voice->flags & 0x1000u) != 0) {
+	if ((voice->flags & HMI_DIGITAL_ACTIVE) == 0 || (voice->flags & HMI_DIGITAL_DRAINING) != 0) {
 		return 0;
 	}
-	voice->flags &= 0x7fffu;
+	voice->flags &= HMI_DIGITAL_ACTIVE_CLEAR_MASK;
 	voice->sampleID = 0;
 	return 0;
 }
@@ -79,7 +79,7 @@ int32_t HmiDigital_SetVolume(HmiDigitalDriver *driver, uint32_t voiceIndex, int1
 	HmiDigitalVoice *const voice = &driver->voices[voiceIndex];
 	int32_t previous;
 
-	if ((voice->flags & 0x8000u) == 0) {
+	if ((voice->flags & HMI_DIGITAL_ACTIVE) == 0) {
 		return 0;
 	}
 	previous = voice->volume;
@@ -91,7 +91,7 @@ uint32_t HmiDigital_SetPlaybackRate(HmiDigitalDriver *driver, uint32_t voiceInde
 	HmiDigitalVoice *const voice = &driver->voices[voiceIndex];
 	uint32_t previous;
 
-	if ((voice->flags & 0x8000u) == 0) {
+	if ((voice->flags & HMI_DIGITAL_ACTIVE) == 0) {
 		return 0;
 	}
 	previous = voice->playbackRateQ16;
@@ -104,7 +104,7 @@ uint32_t HmiDigital_ActiveVoiceCount(const HmiDigitalDriver *driver) {
 	uint32_t voiceIndex;
 
 	for (voiceIndex = 0; voiceIndex < HMI_DIGITAL_VOICE_COUNT; ++voiceIndex) {
-		if ((driver->voices[voiceIndex].flags & 0x8000u) != 0) {
+		if ((driver->voices[voiceIndex].flags & HMI_DIGITAL_ACTIVE) != 0) {
 			++count;
 		}
 	}
@@ -113,10 +113,10 @@ uint32_t HmiDigital_ActiveVoiceCount(const HmiDigitalDriver *driver) {
 
 uint32_t HmiDigital_VoiceStatus(const HmiDigitalDriver *driver, uint32_t voiceIndex) {
 	if (voiceIndex >= HMI_DIGITAL_VOICE_COUNT) {
-		return 10;
+		return HMI_DIGITAL_ERROR_INVALID_HANDLE;
 	}
-	if ((driver->voices[voiceIndex].flags & 0x8000u) == 0) {
-		return 1;
+	if ((driver->voices[voiceIndex].flags & HMI_DIGITAL_ACTIVE) == 0) {
+		return HMI_DIGITAL_STATUS_STOPPED;
 	}
 	return 0;
 }

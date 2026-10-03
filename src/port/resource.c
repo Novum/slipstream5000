@@ -1,4 +1,5 @@
 #include "resource.h"
+#include "archive_format.h"
 #include "host_file.h"
 
 #include <stdio.h>
@@ -6,23 +7,20 @@
 #include <string.h>
 
 enum {
-	SLIP_RES_KEY_SIZE = 16,
-	SLIP_RES_PACKED_NAME_SIZE = 12,
-	SLIP_RES_ENTRY_SIZE = 28,
-	SLIP_RES_EXTENSION_LENGTH = 3,
+	/* DispatchLoaded can scan three extension bytes beyond a dotless name. */
+	SLIP_RES_RESIDENT_NAME_BUFFER_BYTES = SLIP_RESOURCE_NAME_BUFFER_BYTES + SLIP_RESOURCE_EXTENSION_BYTES,
+	SLIP_RES_EXTENSION_LENGTH = SLIP_RESOURCE_EXTENSION_BYTES,
 	SLIP_RES_EXTENSION_CHARACTER_BITS = 8
 };
 
 #define SLIP_RES_EXTENSION_SPACE_PADDING UINT32_C(0x20202020)
 
-#define SLIP_RES_COUNT_ENCRYPTED UINT32_C(0x80000000)
-
-static const uint8_t kIndexXorKey[SLIP_RES_KEY_SIZE] = {'S', 'O', 'F', 'T', 'W', 'A', 'R', 'E',
-                                                        'R', 'E', 'F', 'I', 'N', 'E', 'R', 'Y'};
+static const uint8_t kIndexXorKey[SLIP_ARCHIVE_INDEX_NAME_BYTES] = {'S', 'O', 'F', 'T', 'W', 'A', 'R', 'E',
+                                                                    'R', 'E', 'F', 'I', 'N', 'E', 'R', 'Y'};
 
 uint8_t SlipResource_Uppercase(uint8_t character) {
 	if (character >= 'a' && character <= 'z') {
-		character -= 0x20u;
+		character -= 'a' - 'A';
 	}
 	return character;
 }
@@ -36,20 +34,20 @@ uint32_t SlipResource_ExtensionKey(uint32_t extension) {
 	return key;
 }
 
-static void SlipResource_PackResourceName(const char *name, uint8_t packed[SLIP_RES_PACKED_NAME_SIZE]) {
+static void SlipResource_PackResourceName(const char *name, uint8_t packed[SLIP_RESOURCE_NAME_BYTES]) {
 	size_t i;
 	size_t out = 0;
 	const char *const dot = strchr(name, '.');
 
-	memset(packed, ' ', SLIP_RES_PACKED_NAME_SIZE);
-	for (i = 0; name[i] != '\0' && name + i != dot && out < 8; ++i) {
+	memset(packed, ' ', SLIP_RESOURCE_NAME_BYTES);
+	for (i = 0; name[i] != '\0' && name + i != dot && out < SLIP_RESOURCE_BASE_NAME_BYTES; ++i) {
 		packed[out++] = SlipResource_Uppercase((uint8_t)name[i]);
 	}
 
 	if (dot != NULL) {
-		out = 8;
+		out = SLIP_RESOURCE_BASE_NAME_BYTES;
 		packed[out++] = '.';
-		for (i = 1; dot[i] != '\0' && out < SLIP_RES_PACKED_NAME_SIZE; ++i) {
+		for (i = 1; dot[i] != '\0' && out < SLIP_RESOURCE_NAME_BYTES; ++i) {
 			packed[out++] = SlipResource_Uppercase((uint8_t)dot[i]);
 		}
 	}
@@ -75,7 +73,7 @@ void SlipResource_ReleaseSequence(SlipResourcePayload *payloads, uint16_t count)
 }
 
 typedef struct SlipResourceNameRecord {
-	char name[16];
+	char name[SLIP_RES_RESIDENT_NAME_BUFFER_BYTES];
 	SlipResourcePayload payload;
 	SlipResourceHandle handle;
 	SlipResourceBlock block;
@@ -84,7 +82,7 @@ typedef struct SlipResourceNameRecord {
 static SlipResourceNameRecord **g_resourceNameRecords;
 static size_t g_resourceNameRecordCount;
 
-SlipResourceCallback SlipResource_callbacks[32];
+SlipResourceCallback SlipResource_callbacks[SLIP_RESOURCE_CALLBACK_CAPACITY];
 uint32_t SlipResource_callbackCount;
 
 uint32_t SlipResource_visitExtension;
@@ -121,7 +119,7 @@ void SlipResource_DispatchLoaded(SlipResourceHandle *record, const char *name, s
 	if (record->nameOffset == UINT32_MAX)
 		return;
 	const char *character = name;
-	for (unsigned i = 0; i < SLIP_RES_PACKED_NAME_SIZE; ++i) {
+	for (unsigned i = 0; i < SLIP_RESOURCE_NAME_BYTES; ++i) {
 		if (*character++ == '.')
 			break;
 	}
@@ -162,9 +160,9 @@ const SlipResourceResidentCalls SlipResource_cachedResidentCalls = {
 
 static SlipResourcePayload *SlipResource_NameTableFind(const char *name) {
 
-	char normalized[13] = {0};
+	char normalized[SLIP_RESOURCE_NAME_BUFFER_BYTES] = {0};
 	size_t i;
-	for (i = 0; i < 12 && name[i] != '\0'; ++i) {
+	for (i = 0; i < SLIP_RESOURCE_NAME_BYTES && name[i] != '\0'; ++i) {
 		normalized[i] = (char)SlipResource_Uppercase((uint8_t)name[i]);
 	}
 
@@ -180,7 +178,7 @@ static int SlipResource_NameTableAdd(const char *name, const SlipResourcePayload
 	SlipResourceNameRecord *entry;
 	SlipResourceNameRecord **records;
 
-	if (strlen(name) > 12) {
+	if (strlen(name) > SLIP_RESOURCE_NAME_BYTES) {
 		return 0;
 	}
 	records =
@@ -214,12 +212,11 @@ static int SlipResource_NameTableAdd(const char *name, const SlipResourcePayload
 
 int SlipResource_LoadWildcardSequence(const char *const *archives, size_t archiveCount, const char *pattern,
                                       uint32_t firstIndex, uint16_t count, SlipResourcePayload *payloads) {
-	char expandedName[14];
+	char expandedName[SLIP_RESOURCE_WILDCARD_BUFFER_BYTES];
 	size_t sourceIndex = 0;
 	size_t destinationIndex = 0;
 	size_t wildcardIndex;
 	uint16_t wildcardDigits = 1;
-	uint16_t remaining = count;
 	uint32_t sequenceIndex = firstIndex;
 
 	if (archives == NULL || archiveCount == 0 || pattern == NULL || payloads == NULL || count == 0) {
@@ -227,7 +224,7 @@ int SlipResource_LoadWildcardSequence(const char *const *archives, size_t archiv
 	}
 	while (pattern[sourceIndex] != '*') {
 		expandedName[destinationIndex++] = pattern[sourceIndex++];
-		if (destinationIndex == 13u) {
+		if (destinationIndex == SLIP_RESOURCE_NAME_BUFFER_BYTES) {
 			return 0;
 		}
 	}
@@ -241,7 +238,7 @@ int SlipResource_LoadWildcardSequence(const char *const *archives, size_t archiv
 		expandedName[destinationIndex++] = pattern[sourceIndex];
 	} while (pattern[sourceIndex++] != '\0');
 
-	do {
+	for (uint16_t entryIndex = 0; entryIndex < count; ++entryIndex) {
 		uint32_t value = sequenceIndex;
 		uint32_t divisor = 1;
 		uint16_t digit;
@@ -261,16 +258,15 @@ int SlipResource_LoadWildcardSequence(const char *const *archives, size_t archiv
 		}
 		++payloads;
 		++sequenceIndex;
-		--remaining;
-	} while (remaining != 0);
+	}
 	return 1;
 }
 
 static int SlipResource_LoadPayload(const char *resPath, const char *name, SlipResourcePayload *payload) {
 	FILE *fp;
-	uint8_t packedName[SLIP_RES_PACKED_NAME_SIZE];
-	uint8_t tail[4];
-	uint8_t countBytes[4];
+	uint8_t packedName[SLIP_RESOURCE_NAME_BYTES];
+	uint8_t tail[SLIP_ARCHIVE_INDEX_OFFSET_BYTES];
+	uint8_t countBytes[sizeof(uint32_t)];
 	uint32_t indexOffset;
 	uint32_t countWord;
 	uint32_t count;
@@ -287,7 +283,8 @@ static int SlipResource_LoadPayload(const char *resPath, const char *name, SlipR
 		return 0;
 	}
 
-	if (fseek(fp, -4, SEEK_END) != 0 || fread(tail, 1, sizeof(tail), fp) != sizeof(tail)) {
+	if (fseek(fp, -(long)SLIP_ARCHIVE_INDEX_OFFSET_BYTES, SEEK_END) != 0 ||
+	    fread(tail, 1, sizeof(tail), fp) != sizeof(tail)) {
 		fclose(fp);
 		return 0;
 	}
@@ -300,12 +297,12 @@ static int SlipResource_LoadPayload(const char *resPath, const char *name, SlipR
 	}
 	countWord = (uint32_t)countBytes[0] | ((uint32_t)countBytes[1] << 8) | ((uint32_t)countBytes[2] << 16) |
 	            ((uint32_t)countBytes[3] << 24);
-	encrypted = (countWord & SLIP_RES_COUNT_ENCRYPTED) != 0;
-	count = countWord & ~SLIP_RES_COUNT_ENCRYPTED;
+	encrypted = (countWord & SLIP_ARCHIVE_COUNT_ENCRYPTED) != 0;
+	count = countWord & ~SLIP_ARCHIVE_COUNT_ENCRYPTED;
 
 	for (i = 0; i < count; ++i) {
-		uint8_t entry[SLIP_RES_ENTRY_SIZE];
-		uint8_t keyed[SLIP_RES_KEY_SIZE];
+		uint8_t entry[SLIP_ARCHIVE_ENTRY_BYTES];
+		uint8_t keyed[SLIP_ARCHIVE_INDEX_NAME_BYTES];
 		uint32_t offset;
 		uint32_t size;
 		uint32_t j;
@@ -315,21 +312,25 @@ static int SlipResource_LoadPayload(const char *resPath, const char *name, SlipR
 			return 0;
 		}
 
-		memcpy(keyed, entry + 4, sizeof(keyed));
+		memcpy(keyed, entry + SLIP_ARCHIVE_ENTRY_NAME_OFFSET, sizeof(keyed));
 		if (encrypted) {
 			for (j = 0; j < sizeof(keyed); ++j) {
 				keyed[j] ^= kIndexXorKey[j];
 			}
 		}
 
-		if (memcmp(keyed, packedName, SLIP_RES_PACKED_NAME_SIZE) != 0) {
+		if (memcmp(keyed, packedName, SLIP_RESOURCE_NAME_BYTES) != 0) {
 			continue;
 		}
 
-		offset = (uint32_t)entry[20] | ((uint32_t)entry[21] << 8) | ((uint32_t)entry[22] << 16) |
-		         ((uint32_t)entry[23] << 24);
-		size = (uint32_t)entry[24] | ((uint32_t)entry[25] << 8) | ((uint32_t)entry[26] << 16) |
-		       ((uint32_t)entry[27] << 24);
+		offset = (uint32_t)entry[SLIP_ARCHIVE_ENTRY_PAYLOAD_OFFSET] |
+		         ((uint32_t)entry[SLIP_ARCHIVE_ENTRY_PAYLOAD_OFFSET + 1] << 8) |
+		         ((uint32_t)entry[SLIP_ARCHIVE_ENTRY_PAYLOAD_OFFSET + 2] << 16) |
+		         ((uint32_t)entry[SLIP_ARCHIVE_ENTRY_PAYLOAD_OFFSET + 3] << 24);
+		size = (uint32_t)entry[SLIP_ARCHIVE_ENTRY_PAYLOAD_SIZE_OFFSET] |
+		       ((uint32_t)entry[SLIP_ARCHIVE_ENTRY_PAYLOAD_SIZE_OFFSET + 1] << 8) |
+		       ((uint32_t)entry[SLIP_ARCHIVE_ENTRY_PAYLOAD_SIZE_OFFSET + 2] << 16) |
+		       ((uint32_t)entry[SLIP_ARCHIVE_ENTRY_PAYLOAD_SIZE_OFFSET + 3] << 24);
 		payload->data = (uint8_t *)malloc(size);
 		if (payload->data == NULL) {
 			fclose(fp);

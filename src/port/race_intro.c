@@ -4,6 +4,21 @@
 
 #include <string.h>
 
+/* Serialized ANN command fields, excluding any inline program bytes. */
+enum {
+	SLIP_ANN_OPCODE_BYTES = sizeof(uint16_t),
+	SLIP_ANN_PAYLOAD_OFFSET = SLIP_ANN_OPCODE_BYTES,
+	SLIP_ANN_CAPTION_TAG_BYTES = sizeof(uint32_t),
+	SLIP_ANN_SPEECH_HANDLE_OFFSET = SLIP_ANN_PAYLOAD_OFFSET + SLIP_ANN_CAPTION_TAG_BYTES,
+	SLIP_ANN_WAIT_TRACK_BYTES = SLIP_ANN_OPCODE_BYTES + SLIP_RACE_INTRO_TRACK_NAME_BYTES,
+	SLIP_ANN_DELAY_BYTES = SLIP_ANN_OPCODE_BYTES + sizeof(uint16_t),
+	SLIP_ANN_SPEECH_BYTES = SLIP_ANN_SPEECH_HANDLE_OFFSET + sizeof(uint16_t),
+	SLIP_ANN_INLINE_HEADER_BYTES = SLIP_ANN_OPCODE_BYTES + sizeof(uint16_t),
+	SLIP_ANN_CAPTION_BYTES = SLIP_ANN_OPCODE_BYTES + SLIP_ANN_CAPTION_TAG_BYTES,
+	SLIP_ANN_WAIT_PROGRESS_BYTES = SLIP_ANN_OPCODE_BYTES + sizeof(uint32_t),
+	SLIP_ANN_PRELOAD_MEMORY_RESERVE_BYTES = 0x110000u
+};
+
 /* ANN commands use unaligned little-endian readers; caption tags follow the
  * original byte-swap sequence below. */
 static uint32_t SlipRaceIntro_CaptionTag(const uint8_t *p) {
@@ -12,18 +27,24 @@ static uint32_t SlipRaceIntro_CaptionTag(const uint8_t *p) {
 }
 
 static bool SlipRaceIntro_CommandSize(const uint8_t *script, size_t bytes, size_t cursor, size_t *size) {
-	static const uint8_t sizes[] = {10, 4, 8, 0, 4, 6, 6};
+	static const uint8_t sizes[] = {[SLIP_INTRO_WAIT_TRACK] = SLIP_ANN_WAIT_TRACK_BYTES,
+	                                [SLIP_INTRO_DELAY] = SLIP_ANN_DELAY_BYTES,
+	                                [SLIP_INTRO_SPEECH] = SLIP_ANN_SPEECH_BYTES,
+	                                [SLIP_INTRO_END] = 0,
+	                                [SLIP_INTRO_INLINE] = SLIP_ANN_INLINE_HEADER_BYTES,
+	                                [SLIP_INTRO_CAPTION] = SLIP_ANN_CAPTION_BYTES,
+	                                [SLIP_INTRO_WAIT_PROGRESS] = SLIP_ANN_WAIT_PROGRESS_BYTES};
 	uint16_t opcode;
-	if (cursor > bytes || bytes - cursor < 2)
+	if (cursor > bytes || bytes - cursor < SLIP_ANN_OPCODE_BYTES)
 		return false;
 	opcode = SlipBytes_ReadLE16(script + cursor);
-	if (opcode >= sizeof(sizes))
+	if (opcode >= sizeof(sizes) / sizeof(sizes[0]))
 		return false;
 	*size = sizes[opcode];
 	if (bytes - cursor < *size)
 		return false;
 	if (opcode == SLIP_INTRO_INLINE) {
-		*size += SlipBytes_ReadLE16(script + cursor + 2);
+		*size += SlipBytes_ReadLE16(script + cursor + SLIP_ANN_PAYLOAD_OFFSET);
 		if (bytes - cursor < *size)
 			return false;
 	}
@@ -35,14 +56,15 @@ static bool SlipRaceIntro_PreloadInternal(uint8_t *script, size_t scriptBytes, u
                                           uint16_t scriptResource) {
 	static const char speechLanguagePrefixes[] = {'E', 'F', 'G'};
 	uint32_t total = 0;
-	if (script == NULL || resources == NULL || languageIndex >= 3 || resources->sampleSize == NULL ||
-	    resources->load == NULL)
+	if (script == NULL || resources == NULL ||
+	    languageIndex >= sizeof(speechLanguagePrefixes) / sizeof(speechLanguagePrefixes[0]) ||
+	    resources->sampleSize == NULL || resources->load == NULL)
 		return false;
 
 	for (unsigned pass = 0; pass < 2; ++pass) {
 		if (scriptResource != 0)
 			script = SlipResourceHost_LockWritable(NULL, scriptResource);
-		size_t cursor = 16;
+		size_t cursor = SLIP_RACE_INTRO_SCRIPT_HEADER_BYTES;
 		for (;;) {
 			size_t size;
 			if (!SlipRaceIntro_CommandSize(script, scriptBytes, cursor, &size))
@@ -51,21 +73,22 @@ static bool SlipRaceIntro_PreloadInternal(uint8_t *script, size_t scriptBytes, u
 				break;
 			if (SlipBytes_ReadLE16(script + cursor) == SLIP_INTRO_SPEECH) {
 
-				char name[9] = "????.SMP";
-				memcpy(name, script + cursor + 2, 4);
+				char name[] = "????.SMP";
+				memcpy(name, script + cursor + SLIP_ANN_PAYLOAD_OFFSET, SLIP_ANN_CAPTION_TAG_BYTES);
 				name[0] = speechLanguagePrefixes[languageIndex];
 				if (pass == 0) {
 					uint32_t sampleBytes;
 					if (!resources->sampleSize(resources->context, name, &sampleBytes))
 						return false;
 					total += sampleBytes;
-					script[cursor + 6] = script[cursor + 7] = 0;
+					script[cursor + SLIP_ANN_SPEECH_HANDLE_OFFSET] =
+					    script[cursor + SLIP_ANN_SPEECH_HANDLE_OFFSET + 1] = 0;
 				} else {
 					uint16_t handle;
 					if (!resources->load(resources->context, name, &handle))
 						return false;
-					script[cursor + 6] = (uint8_t)handle;
-					script[cursor + 7] = (uint8_t)(handle >> 8);
+					script[cursor + SLIP_ANN_SPEECH_HANDLE_OFFSET] = (uint8_t)handle;
+					script[cursor + SLIP_ANN_SPEECH_HANDLE_OFFSET + 1] = (uint8_t)(handle >> 8);
 				}
 			}
 			cursor += size;
@@ -76,7 +99,7 @@ static bool SlipRaceIntro_PreloadInternal(uint8_t *script, size_t scriptBytes, u
 				availableMemory = SlipResource_freeBytes + SlipResource_cachedBytes;
 		}
 
-		if (pass == 0 && availableMemory < (uint32_t)(total + 0x110000u))
+		if (pass == 0 && availableMemory < (uint32_t)(total + SLIP_ANN_PRELOAD_MEMORY_RESERVE_BYTES))
 			return true;
 	}
 	return true;
@@ -93,7 +116,7 @@ bool SlipRaceIntro_PreloadResource(uint16_t resource, uint16_t language, const S
 }
 
 bool SlipRaceIntro_Release(const uint8_t *script, size_t scriptBytes, const SlipRaceIntroResources *resources) {
-	size_t cursor = 16;
+	size_t cursor = SLIP_RACE_INTRO_SCRIPT_HEADER_BYTES;
 	if (script == NULL || resources == NULL || resources->release == NULL)
 		return false;
 	for (;;) {
@@ -103,8 +126,9 @@ bool SlipRaceIntro_Release(const uint8_t *script, size_t scriptBytes, const Slip
 		if (size == 0)
 			return true;
 
-		if (SlipBytes_ReadLE16(script + cursor) == SLIP_INTRO_SPEECH && SlipBytes_ReadLE16(script + cursor + 6) != 0)
-			resources->release(resources->context, SlipBytes_ReadLE16(script + cursor + 6));
+		if (SlipBytes_ReadLE16(script + cursor) == SLIP_INTRO_SPEECH &&
+		    SlipBytes_ReadLE16(script + cursor + SLIP_ANN_SPEECH_HANDLE_OFFSET) != 0)
+			resources->release(resources->context, SlipBytes_ReadLE16(script + cursor + SLIP_ANN_SPEECH_HANDLE_OFFSET));
 		cursor += size;
 	}
 }
@@ -134,32 +158,32 @@ SlipRaceIntroScriptResult SlipRaceIntro_Step(SlipRaceIntroScript *state, const u
 		const uint8_t *command;
 		uint16_t opcode;
 		size_t size;
-		if (cursor > scriptBytes || scriptBytes - cursor < 2)
+		if (cursor > scriptBytes || scriptBytes - cursor < SLIP_ANN_OPCODE_BYTES)
 			return SLIP_RACE_INTRO_SCRIPT_INVALID;
 		command = script + cursor;
 		opcode = SlipBytes_ReadLE16(command);
 
 		switch (opcode) {
 		case SLIP_INTRO_WAIT_TRACK:
-			size = 10;
+			size = SLIP_ANN_WAIT_TRACK_BYTES;
 			break;
 		case SLIP_INTRO_DELAY:
-			size = 4;
+			size = SLIP_ANN_DELAY_BYTES;
 			break;
 		case SLIP_INTRO_SPEECH:
-			size = 8;
+			size = SLIP_ANN_SPEECH_BYTES;
 			break;
 		case SLIP_INTRO_END:
-			size = 2;
+			size = SLIP_ANN_OPCODE_BYTES;
 			break;
 		case SLIP_INTRO_INLINE:
-			size = 4;
+			size = SLIP_ANN_INLINE_HEADER_BYTES;
 			break;
 		case SLIP_INTRO_CAPTION:
-			size = 6;
+			size = SLIP_ANN_CAPTION_BYTES;
 			break;
 		case SLIP_INTRO_WAIT_PROGRESS:
-			size = 6;
+			size = SLIP_ANN_WAIT_PROGRESS_BYTES;
 			break;
 		default:
 			return SLIP_RACE_INTRO_SCRIPT_FINISHED;
@@ -169,7 +193,7 @@ SlipRaceIntroScriptResult SlipRaceIntro_Step(SlipRaceIntroScript *state, const u
 		switch (opcode) {
 		case SLIP_INTRO_INLINE:
 
-			size += SlipBytes_ReadLE16(command + 2);
+			size += SlipBytes_ReadLE16(command + SLIP_ANN_PAYLOAD_OFFSET);
 			if (scriptBytes - cursor < size)
 				return SLIP_RACE_INTRO_SCRIPT_INVALID;
 			cursor += size;
@@ -188,41 +212,42 @@ SlipRaceIntroScriptResult SlipRaceIntro_Step(SlipRaceIntroScript *state, const u
 			}
 			if (opcode == SLIP_INTRO_END)
 				return SLIP_RACE_INTRO_SCRIPT_FINISHED;
-			/* Fall through: both 2 and 5 publish a caption and reset the HUD. */
+			/* Speech and caption commands both publish a caption and reset the HUD. */
 		case SLIP_INTRO_CAPTION:
 			if (host->resetConsole == NULL)
 				return SLIP_RACE_INTRO_SCRIPT_INVALID;
-			state->caption = SlipRaceIntro_CaptionTag(command + 2);
+			state->caption = SlipRaceIntro_CaptionTag(command + SLIP_ANN_PAYLOAD_OFFSET);
 			host->resetConsole(host->context);
-			if (opcode == SLIP_INTRO_SPEECH && SlipBytes_ReadLE16(command + 6) != 0) {
+			if (opcode == SLIP_INTRO_SPEECH && SlipBytes_ReadLE16(command + SLIP_ANN_SPEECH_HANDLE_OFFSET) != 0) {
 
 				if (host->play == NULL)
 					return SLIP_RACE_INTRO_SCRIPT_INVALID;
-				state->voice = host->play(host->context, SlipBytes_ReadLE16(command + 6), NULL);
+				state->voice =
+				    host->play(host->context, SlipBytes_ReadLE16(command + SLIP_ANN_SPEECH_HANDLE_OFFSET), NULL);
 			}
 			cursor += size;
 			continue;
 		case SLIP_INTRO_DELAY:
 
-			state->delay = SlipBytes_ReadLE16(command + 2);
-			cursor += 4;
+			state->delay = SlipBytes_ReadLE16(command + SLIP_ANN_PAYLOAD_OFFSET);
+			cursor += SLIP_ANN_DELAY_BYTES;
 			break;
 		case SLIP_INTRO_WAIT_PROGRESS: {
 			int32_t progress;
 
 			if (host->raceProgress == NULL || !host->raceProgress(host->context, &progress))
 				return SLIP_RACE_INTRO_SCRIPT_INVALID;
-			if (progress <= (int32_t)SlipBytes_ReadLE32(command + 2))
-				cursor += 6;
+			if (progress <= (int32_t)SlipBytes_ReadLE32(command + SLIP_ANN_PAYLOAD_OFFSET))
+				cursor += SLIP_ANN_WAIT_PROGRESS_BYTES;
 			break;
 		}
 		case SLIP_INTRO_WAIT_TRACK: {
-			uint8_t name[8];
+			uint8_t name[SLIP_RACE_INTRO_TRACK_NAME_BYTES];
 
 			if (host->trackName == NULL || !host->trackName(host->context, name))
 				return SLIP_RACE_INTRO_SCRIPT_INVALID;
-			if (memcmp(command + 2, name, sizeof(name)) == 0)
-				cursor += 10;
+			if (memcmp(command + SLIP_ANN_PAYLOAD_OFFSET, name, sizeof(name)) == 0)
+				cursor += SLIP_ANN_WAIT_TRACK_BYTES;
 			break;
 		}
 		}
@@ -247,7 +272,7 @@ SlipRaceIntroScriptResult SlipRaceIntro_StepPresenter(SlipRaceIntroScript *state
 	size_t cursor = state->cursor;
 	for (;;) {
 		size_t size;
-		if (cursor > bytes || bytes - cursor < 2)
+		if (cursor > bytes || bytes - cursor < SLIP_ANN_OPCODE_BYTES)
 			return SLIP_RACE_INTRO_SCRIPT_INVALID;
 		const uint16_t opcode = SlipBytes_ReadLE16(script + cursor);
 		if (opcode > SLIP_INTRO_WAIT_PROGRESS)
@@ -271,26 +296,28 @@ SlipRaceIntroScriptResult SlipRaceIntro_StepPresenter(SlipRaceIntroScript *state
 			if (language == 0) {
 				if (queue == NULL)
 					return SLIP_RACE_INTRO_SCRIPT_INVALID;
-				queue(host->context, command + 4, SlipBytes_ReadLE16(command + 2));
+				queue(host->context, command + SLIP_ANN_INLINE_HEADER_BYTES,
+				      SlipBytes_ReadLE16(command + SLIP_ANN_PAYLOAD_OFFSET));
 			}
 			cursor += size;
 			break;
 		case SLIP_INTRO_CAPTION:
 		case SLIP_INTRO_SPEECH:
-			state->caption = SlipRaceIntro_CaptionTag(command + 2);
+			state->caption = SlipRaceIntro_CaptionTag(command + SLIP_ANN_PAYLOAD_OFFSET);
 			if (host->resetConsole == NULL)
 				return SLIP_RACE_INTRO_SCRIPT_INVALID;
 			host->resetConsole(host->context);
-			if (opcode == SLIP_INTRO_SPEECH && SlipBytes_ReadLE16(command + 6) != 0) {
+			if (opcode == SLIP_INTRO_SPEECH && SlipBytes_ReadLE16(command + SLIP_ANN_SPEECH_HANDLE_OFFSET) != 0) {
 				if (host->play == NULL)
 					return SLIP_RACE_INTRO_SCRIPT_INVALID;
-				state->voice = host->play(host->context, SlipBytes_ReadLE16(command + 6), speechBytes);
+				state->voice =
+				    host->play(host->context, SlipBytes_ReadLE16(command + SLIP_ANN_SPEECH_HANDLE_OFFSET), speechBytes);
 			}
 			cursor += size;
 			break;
 		case SLIP_INTRO_DELAY:
-			state->delay = SlipBytes_ReadLE16(command + 2);
-			state->cursor = cursor + 4;
+			state->delay = SlipBytes_ReadLE16(command + SLIP_ANN_PAYLOAD_OFFSET);
+			state->cursor = cursor + SLIP_ANN_DELAY_BYTES;
 			return SLIP_RACE_INTRO_SCRIPT_YIELD;
 		case SLIP_INTRO_WAIT_TRACK:
 		case SLIP_INTRO_WAIT_PROGRESS:

@@ -88,14 +88,16 @@ void Raster_DrawPerspective(RasterPerspectiveDrawState *state, uint16_t texture,
 			state->right.endDepthSum += state->right.endDepthStep;
 			const uint32_t leftFraction = (uint32_t)state->left.xFraction + (uint16_t)state->left.xStep;
 			state->left.xFraction = (uint16_t)leftFraction;
-			state->left.x = (int32_t)(((uint32_t)state->left.x & ~(uint32_t)UINT16_MAX) |
-			                          (uint16_t)((uint32_t)state->left.x + ((uint32_t)state->left.xStep >> 16) +
-			                                     (leftFraction >> 16)));
+			state->left.x =
+			    (int32_t)(((uint32_t)state->left.x & ~(uint32_t)UINT16_MAX) |
+			              (uint16_t)((uint32_t)state->left.x + ((uint32_t)state->left.xStep >> RASTER_FRACTION_BITS) +
+			                         (leftFraction >> RASTER_FRACTION_BITS)));
 			const uint32_t rightFraction = (uint32_t)state->right.xFraction + (uint16_t)state->right.xStep;
 			state->right.xFraction = (uint16_t)rightFraction;
-			state->right.x = (int32_t)(((uint32_t)state->right.x & ~(uint32_t)UINT16_MAX) |
-			                           (uint16_t)((uint32_t)state->right.x + ((uint32_t)state->right.xStep >> 16) +
-			                                      (rightFraction >> 16)));
+			state->right.x =
+			    (int32_t)(((uint32_t)state->right.x & ~(uint32_t)UINT16_MAX) |
+			              (uint16_t)((uint32_t)state->right.x + ((uint32_t)state->right.xStep >> RASTER_FRACTION_BITS) +
+			                         (rightFraction >> RASTER_FRACTION_BITS)));
 			if (--state->left.remainingScanlines == 0 &&
 			    Raster_StepPerspectiveLeft(&state->left, state->begin, state->end, scanline, bottom))
 				break;
@@ -112,7 +114,7 @@ void Raster_DrawPerspective(RasterPerspectiveDrawState *state, uint16_t texture,
 	calls->unlock(calls->context, texture);
 }
 
-enum { RASTER_SPAN_EXTENDS_LEFT = 1u, RASTER_SPAN_EXTENDS_RIGHT = 2u, RASTER_SCANLINE_PARITY = 1u };
+enum { RASTER_SCANLINE_PARITY = 1u };
 
 static bool Raster_AdvanceOpaquePerspective(RasterPerspectiveDrawState *state, RasterOpaquePerspectiveState *opaque,
                                             int32_t *scanline) {
@@ -126,12 +128,14 @@ static bool Raster_AdvanceOpaquePerspective(RasterPerspectiveDrawState *state, R
 	state->left.xFraction = (uint16_t)leftFraction;
 	state->left.x =
 	    (int32_t)(((uint32_t)state->left.x & ~(uint32_t)UINT16_MAX) |
-	              (uint16_t)((uint32_t)state->left.x + ((uint32_t)state->left.xStep >> 16) + (leftFraction >> 16)));
+	              (uint16_t)((uint32_t)state->left.x + ((uint32_t)state->left.xStep >> RASTER_FRACTION_BITS) +
+	                         (leftFraction >> RASTER_FRACTION_BITS)));
 	const uint32_t rightFraction = (uint32_t)state->right.xFraction + (uint16_t)state->right.xStep;
 	state->right.xFraction = (uint16_t)rightFraction;
 	state->right.x =
 	    (int32_t)(((uint32_t)state->right.x & ~(uint32_t)UINT16_MAX) |
-	              (uint16_t)((uint32_t)state->right.x + ((uint32_t)state->right.xStep >> 16) + (rightFraction >> 16)));
+	              (uint16_t)((uint32_t)state->right.x + ((uint32_t)state->right.xStep >> RASTER_FRACTION_BITS) +
+	                         (rightFraction >> RASTER_FRACTION_BITS)));
 	if (--state->left.remainingScanlines == 0 &&
 	    Raster_StepPerspectiveLeft(&state->left, state->begin, state->end, *scanline, state->bottom))
 		return true;
@@ -247,9 +251,11 @@ void Raster_DrawOpaquePerspective(RasterPerspectiveDrawState *state, RasterOpaqu
 			const uint32_t rightFraction = (uint32_t)state->right.xFraction + (uint16_t)state->right.xStep;
 
 			opaque->nextScanlineLeft =
-			    (int16_t)((uint32_t)state->left.x + ((uint32_t)state->left.xStep >> 16) + (leftFraction >> 16));
+			    (int16_t)((uint32_t)state->left.x + ((uint32_t)state->left.xStep >> RASTER_FRACTION_BITS) +
+			              (leftFraction >> RASTER_FRACTION_BITS));
 			opaque->nextScanlineRight =
-			    (int16_t)((uint32_t)state->right.x + ((uint32_t)state->right.xStep >> 16) + (rightFraction >> 16));
+			    (int16_t)((uint32_t)state->right.x + ((uint32_t)state->right.xStep >> RASTER_FRACTION_BITS) +
+			              (rightFraction >> RASTER_FRACTION_BITS));
 			if (opaque->nextScanlineRight < (int16_t)state->left.x ||
 			    opaque->nextScanlineLeft > (int16_t)state->right.x) {
 				Raster_DrawOpaquePerspectiveRun(state, opaque, scanline, screenRows, calls);

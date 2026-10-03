@@ -1,7 +1,45 @@
 #include "race_collision.h"
+#include "fixed_point.h"
 #include "runtime.h"
 
 #include <stddef.h>
+
+enum {
+	/* Face table order follows its local-space outward normals. */
+	SLIP_COLLISION_FACE_POSITIVE_Z = 0,
+	SLIP_COLLISION_FACE_NEGATIVE_Z = 1,
+	SLIP_COLLISION_FACE_POSITIVE_X = 2,
+	SLIP_COLLISION_FACE_NEGATIVE_X = 3,
+	SLIP_COLLISION_FACE_POSITIVE_Y = 4,
+	SLIP_COLLISION_FACE_NEGATIVE_Y = 5,
+	SLIP_COLLISION_CORNER_PROJECTED = 1u,
+	SLIP_COLLISION_REPEATED_IMPACT_LIMIT = 2,
+	SLIP_COLLISION_SEARCH_MARGIN_SHIFT = 2,
+	SLIP_COLLISION_REPEATED_CONTACT_LIMIT = 3,
+	SLIP_COLLISION_OUTCODE_MINIMUM_X = 0x02,
+	SLIP_COLLISION_OUTCODE_MAXIMUM_X = 0x04,
+	SLIP_COLLISION_OUTCODE_MINIMUM_Y = 0x08,
+	SLIP_COLLISION_OUTCODE_MAXIMUM_Y = 0x10,
+	SLIP_COLLISION_OUTCODE_MINIMUM_Z = 0x20,
+	SLIP_COLLISION_OUTCODE_MAXIMUM_Z = 0x40,
+	SLIP_COLLISION_OUTCODE_BOX_MASK = SLIP_COLLISION_OUTCODE_MINIMUM_X | SLIP_COLLISION_OUTCODE_MAXIMUM_X |
+	                                  SLIP_COLLISION_OUTCODE_MINIMUM_Y | SLIP_COLLISION_OUTCODE_MAXIMUM_Y |
+	                                  SLIP_COLLISION_OUTCODE_MINIMUM_Z | SLIP_COLLISION_OUTCODE_MAXIMUM_Z,
+	SLIP_COLLISION_OUTCODE_PLANE_SIDE = 0x80,
+	SLIP_COLLISION_OUTCODE_PRESERVED_MASK = UINT8_MAX ^ SLIP_COLLISION_OUTCODE_BOX_MASK,
+	SLIP_COLLISION_OUTCODE_FACE_REJECT_MASK = SLIP_COLLISION_OUTCODE_BOX_MASK | SLIP_COLLISION_OUTCODE_PLANE_SIDE,
+	SLIP_COLLISION_RECIPROCAL_FRACTION_BITS = 30,
+	SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT = SLIP_COLLISION_RECIPROCAL_FRACTION_BITS - SLIP_Q14_FRACTION_BITS,
+	SLIP_COLLISION_RECIPROCAL_ONE = 1u << SLIP_COLLISION_RECIPROCAL_FRACTION_BITS,
+	SLIP_COLLISION_RECIPROCAL_HIGH_SHIFT = 32 - SLIP_COLLISION_RECIPROCAL_FRACTION_BITS,
+	SLIP_COLLISION_CONTACT_PENETRATION_TIME_TOLERANCE = 128,
+	SLIP_COLLISION_FORWARD_FACE_ALIGNMENT_Q14 = SLIP_Q14_ONE - 2,
+	SLIP_COLLISION_STOP_EVENT_TOKEN = 0x1459c,
+	SLIP_COLLISION_BOUNCE_EVENT_TOKEN = 0x1460c,
+	SLIP_COLLISION_PACKED_UPPER_WORD_MASK = 0xffff0000u,
+	SLIP_COLLISION_MINIMUM_AXIS_SPEED = 28,
+	SLIP_COLLISION_FULL_BOX_MINIMUM_RADIUS = SLIP_Q14_ONE
+};
 
 SlipRaceCollisionVertex *SlipRaceCollision_freeList;
 SlipRaceCollisionVertex *SlipRaceCollision_activeList;
@@ -14,7 +52,7 @@ int32_t SlipRaceCollision_relativePositionY;
 int32_t SlipRaceCollision_relativePositionZ;
 uint32_t SlipRaceCollision_velocityLength;
 SlipRaceCollisionWorkspace SlipRaceCollision_workspace;
-SlipRaceCollisionCornerState SlipRaceCollision_cornerState[8];
+SlipRaceCollisionCornerState SlipRaceCollision_cornerState[SLIP_TRACK_BOUNDING_CORNER_COUNT];
 uint32_t SlipRaceCollision_inverseVelocity;
 uint8_t *SlipRaceCollision_sourceBody;
 uint8_t *SlipRaceCollision_targetBody;
@@ -30,11 +68,11 @@ SlipObject *SlipRaceCollision_objectTable;
 size_t SlipRaceCollision_objectTableBytes;
 uint8_t *SlipRaceCollision_physicsTable;
 uint32_t SlipRaceCollision_activeBodyOffset;
-uint32_t SlipRaceCollision_freeBodyOffset = 0x58u;
+uint32_t SlipRaceCollision_freeBodyOffset = SLIP_COLLISION_BODY_BYTES;
 uint16_t SlipRaceCollision_bodyCount;
-int32_t SlipRaceCollision_faces[6][8] = {{0, 1, 2, 3, 0, 0, 0, 0x4000}, {7, 6, 5, 4, 0, 0, 0, -0x4000},
-                                         {3, 2, 6, 7, 0, 0x4000, 0, 0}, {4, 5, 1, 0, 0, -0x4000, 0, 0},
-                                         {5, 6, 2, 1, 0, 0, 0x4000, 0}, {0, 3, 7, 4, 0, 0, -0x4000, 0}};
+int32_t SlipRaceCollision_faces[SLIP_COLLISION_BOX_FACE_COUNT][SLIP_COLLISION_FACE_VALUE_COUNT] = {
+    {0, 1, 2, 3, 0, 0, 0, SLIP_Q14_ONE},  {7, 6, 5, 4, 0, 0, 0, -SLIP_Q14_ONE}, {3, 2, 6, 7, 0, SLIP_Q14_ONE, 0, 0},
+    {4, 5, 1, 0, 0, -SLIP_Q14_ONE, 0, 0}, {5, 6, 2, 1, 0, 0, SLIP_Q14_ONE, 0},  {0, 3, 7, 4, 0, 0, -SLIP_Q14_ONE, 0}};
 uint32_t SlipRaceCollision_faceCommon;
 uint32_t SlipRaceCollision_faceCombined;
 uint32_t SlipRaceCollision_frameStep;
@@ -53,7 +91,7 @@ SlipRaceCollisionPostStep SlipRaceCollision_postStep;
 SlipRaceCollisionTrackQuery SlipRaceCollision_trackQuery;
 SlipRaceCollisionSegmentQuery SlipRaceCollision_segmentQuery;
 SlipRaceCollisionLineOfSight SlipRaceCollision_lineOfSight;
-static SlipRaceCollisionVertex SlipRaceCollision_vertexPool[0x20u];
+static SlipRaceCollisionVertex SlipRaceCollision_vertexPool[SLIP_COLLISION_VERTEX_COUNT];
 
 static uint8_t *SlipRaceCollision_CollisionBodyFromOffset(uint32_t offset) {
 	return SlipRaceCollision_physicsTable + offset;
@@ -125,7 +163,7 @@ bool SlipRaceCollision_TestObjectAgainstBodies(uint16_t object, uint16_t *collis
 	if (bodyOffset == 0)
 		return false;
 	body = SlipRaceCollision_CollisionBodyFromOffset(bodyOffset);
-	if ((((const SlipRaceCollisionBody *)(const void *)body)->flags & 2u) == 0)
+	if ((((const SlipRaceCollisionBody *)(const void *)body)->flags & SLIP_COLLISION_BODY_CONTACTS_ENABLED) == 0)
 		return false;
 	SlipObject_Position(SlipRaceCollision_objectTable, SlipRaceCollision_objectTableBytes, object, &objectPosition);
 	SlipRaceCollision_sourcePositionX = (int32_t)objectPosition.positionX;
@@ -175,7 +213,8 @@ bool SlipRaceCollision_TestBoundsAgainstBodies(uint8_t *body, int32_t boundsMinX
 		otherBody = SlipRaceCollision_CollisionBodyFromOffset(bodyOffset);
 		if (otherBody == SlipRaceCollision_sourceBody)
 			continue;
-		if ((((const SlipRaceCollisionBody *)(const void *)otherBody)->flags & 2u) == 0)
+		if ((((const SlipRaceCollisionBody *)(const void *)otherBody)->flags & SLIP_COLLISION_BODY_CONTACTS_ENABLED) ==
+		    0)
 			continue;
 		otherObject = ((const SlipRaceCollisionBody *)(const void *)otherBody)->objectHandle;
 		SlipObject_Position(SlipRaceCollision_objectTable, SlipRaceCollision_objectTableBytes, otherObject,
@@ -190,7 +229,8 @@ bool SlipRaceCollision_TestBoundsAgainstBodies(uint8_t *body, int32_t boundsMinX
 		                                 (uint32_t)relativePosition.z, &approximate);
 		rejectDistance = (int32_t)(((const SlipRaceCollisionBody *)(const void *)otherBody)->radius +
 		                           SlipRaceCollision_sourceRadius);
-		rejectDistance = (int32_t)((uint32_t)rejectDistance + (uint32_t)(rejectDistance >> 2));
+		rejectDistance =
+		    (int32_t)((uint32_t)rejectDistance + (uint32_t)(rejectDistance >> SLIP_COLLISION_SEARCH_MARGIN_SHIFT));
 		if ((int32_t)approximate.approximateLength > rejectDistance)
 			continue;
 		relativePosition = SlipView3D_TransformPositionByRows(&SlipRaceCollision_sourceMatrix, relativePosition);
@@ -219,7 +259,7 @@ void SlipRaceCollision_RecordTrackContact(uint16_t object, uint16_t contactTime,
 	SlipRaceCollision_firstTime = contactTime;
 	bodyOffset = SlipObject_PhysicsOffset(SlipRaceCollision_objectTable, object);
 	body = (SlipRaceCollisionBody *)(void *)SlipRaceCollision_CollisionBodyFromOffset(bodyOffset);
-	if (contactTime == 0 && body->repeatedContacts != 2) {
+	if (contactTime == 0 && body->repeatedContacts != SLIP_COLLISION_REPEATED_IMPACT_LIMIT) {
 		body->repeatedContacts = (int16_t)((uint16_t)body->repeatedContacts + 1u);
 	}
 	body->contactType = SLIP_COLLISION_CONTACT_TRACK;
@@ -237,7 +277,8 @@ void SlipRaceCollision_QueryResult(uint16_t object, SlipRaceCollisionQuery *resu
 	uint16_t flags = SlipRaceCollision_BodyFlags(object);
 	uint16_t collisionObject;
 
-	if ((flags & 2u) != 0 && SlipRaceCollision_TestObjectAgainstBodies(object, &collisionObject)) {
+	if ((flags & SLIP_COLLISION_BODY_CONTACTS_ENABLED) != 0 &&
+	    SlipRaceCollision_TestObjectAgainstBodies(object, &collisionObject)) {
 		result->objectOrFlags = collisionObject;
 		result->trackHitMask = 0;
 		result->collisionFound = true;
@@ -245,7 +286,7 @@ void SlipRaceCollision_QueryResult(uint16_t object, SlipRaceCollisionQuery *resu
 	}
 	if (SlipRaceCollision_trackQuery != NULL) {
 		flags = SlipRaceCollision_BodyFlags(object);
-		if ((flags & 1u) != 0 && SlipRaceCollision_trackQuery(flags, object)) {
+		if ((flags & SLIP_COLLISION_BODY_TRACK_ENABLED) != 0 && SlipRaceCollision_trackQuery(flags, object)) {
 			result->objectOrFlags = 0;
 			result->trackHitMask = UINT32_MAX;
 			result->collisionFound = true;
@@ -297,24 +338,24 @@ static void SlipRaceCollision_TestSegmentFace(const SlipRaceCollisionBounds *bou
 	if (absoluteDirection == 0) {
 		return;
 	}
-	inverseDirection = 0x40000000u / absoluteDirection;
+	inverseDirection = SLIP_COLLISION_RECIPROCAL_ONE / absoluteDirection;
 	candidateDistance = (uint32_t)SlipRaceCollision_ScaleSegmentComponent(
 	    (int32_t)(maximumPlane ? (uint32_t)origin[planeAxis] - (uint32_t)plane
 	                           : (uint32_t)plane - (uint32_t)origin[planeAxis]),
-	    inverseDirection, 16u);
+	    inverseDirection, SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT);
 	if (candidateDistance > *bestDistance) {
 		return;
 	}
 	firstOtherAxis = (planeAxis + 1u) % 3u;
 	secondOtherAxis = (planeAxis + 2u) % 3u;
-	firstOtherCoordinate =
-	    (int32_t)((uint32_t)SlipRaceCollision_ScaleSegmentComponent(direction[firstOtherAxis], candidateDistance, 14u) +
-	              (uint32_t)origin[firstOtherAxis]);
+	firstOtherCoordinate = (int32_t)((uint32_t)SlipRaceCollision_ScaleSegmentComponent(
+	                                     direction[firstOtherAxis], candidateDistance, SLIP_Q14_FRACTION_BITS) +
+	                                 (uint32_t)origin[firstOtherAxis]);
 	if (firstOtherCoordinate < minimum[firstOtherAxis] || firstOtherCoordinate > maximum[firstOtherAxis]) {
 		return;
 	}
-	secondOtherCoordinate = (int32_t)((uint32_t)SlipRaceCollision_ScaleSegmentComponent(direction[secondOtherAxis],
-	                                                                                    candidateDistance, 14u) +
+	secondOtherCoordinate = (int32_t)((uint32_t)SlipRaceCollision_ScaleSegmentComponent(
+	                                      direction[secondOtherAxis], candidateDistance, SLIP_Q14_FRACTION_BITS) +
 	                                  (uint32_t)origin[secondOtherAxis]);
 	if (secondOtherCoordinate < minimum[secondOtherAxis] || secondOtherCoordinate > maximum[secondOtherAxis]) {
 		return;
@@ -439,19 +480,19 @@ void SlipRaceCollision_FindNearestBody(uint32_t maximumDistance, uint16_t angle,
                                        SlipRaceCollisionNearestBody *result) {
 	const uint16_t sineQ14 = (uint16_t)SlipView3D_SinQ14(maths, (int16_t)angle);
 	const uint16_t cosineQ14 = (uint16_t)SlipView3D_CosQ14(maths, (int16_t)angle);
-	uint32_t expandedMaximumDistance = maximumDistance + (maximumDistance >> 2);
+	uint32_t expandedMaximumDistance = maximumDistance + (maximumDistance >> SLIP_COLLISION_SEARCH_MARGIN_SHIFT);
 	SlipView3DMatrix objectTransformMatrix;
 	SlipView3DMatrix collisionProjectionMatrix;
 	SlipObjectMatrixCopy matrixCopy;
 	SlipObjectPosition objectPosition;
 	SlipView3DVec32 transformedOffset;
 	SlipView3DVec32 origin;
-	uint32_t bestDistance = 0x7fffffffu;
+	uint32_t bestDistance = INT32_MAX;
 	uint16_t selectedObject = 0;
 	uint32_t bodyOffset = SlipRaceCollision_activeBodyOffset;
 
 	if (expandedMaximumDistance < maximumDistance && (int32_t)expandedMaximumDistance < 0) {
-		expandedMaximumDistance = 0x7fffffffu;
+		expandedMaximumDistance = INT32_MAX;
 	}
 	SlipObject_MatrixCopy(SlipRaceCollision_objectTable, SlipRaceCollision_objectTableBytes, object,
 	                      &objectTransformMatrix, &matrixCopy);
@@ -482,7 +523,7 @@ void SlipRaceCollision_FindNearestBody(uint32_t maximumDistance, uint16_t angle,
 			break;
 		}
 		body = SlipRaceCollision_CollisionBodyFromOffset(bodyOffset);
-		if ((((const SlipRaceCollisionBody *)(const void *)body)->flags & 4u) == 0) {
+		if ((((const SlipRaceCollisionBody *)(const void *)body)->flags & SLIP_COLLISION_BODY_TARGETING_ENABLED) == 0) {
 			continue;
 		}
 		candidateObject = ((const SlipRaceCollisionBody *)(const void *)body)->objectHandle;
@@ -535,7 +576,7 @@ void SlipRaceCollision_FindNearestBody(uint32_t maximumDistance, uint16_t angle,
 		selectedObject = candidateObject;
 	}
 
-	if (bestDistance == 0x7fffffffu) {
+	if (bestDistance == INT32_MAX) {
 		*result = (SlipRaceCollisionNearestBody){0, true};
 		return;
 	}
@@ -618,9 +659,9 @@ SlipView3DVec16 SlipRaceCollision_ReflectDirection(uint16_t object, SlipView3DVe
 	const int32_t dot = (int16_t)SlipView3D_DotProductQ14((uint16_t)negativeX, (uint16_t)negativeY, (uint16_t)negativeZ,
 	                                                      (uint16_t)reflectionNormal.x, (uint16_t)reflectionNormal.y,
 	                                                      (uint16_t)reflectionNormal.z, NULL);
-	const int32_t z = (int32_t)(((int64_t)reflectionNormal.z * 2 * dot) >> 14) - negativeZ;
-	const int32_t y = (int32_t)(((int64_t)reflectionNormal.y * 2 * dot) >> 14) - negativeY;
-	const int32_t x = (int32_t)(((int64_t)reflectionNormal.x * 2 * dot) >> 14) - negativeX;
+	const int32_t z = (int32_t)(((int64_t)reflectionNormal.z * 2 * dot) >> SLIP_Q14_FRACTION_BITS) - negativeZ;
+	const int32_t y = (int32_t)(((int64_t)reflectionNormal.y * 2 * dot) >> SLIP_Q14_FRACTION_BITS) - negativeY;
+	const int32_t x = (int32_t)(((int64_t)reflectionNormal.x * 2 * dot) >> SLIP_Q14_FRACTION_BITS) - negativeX;
 	SlipView3DNormalizeVector3D result;
 	(void)SlipView3D_NormalizeVector3D((uint32_t)x, (uint32_t)y, (uint32_t)z, &result);
 	return (SlipView3DVec16){(int16_t)result.unitXQ14, (int16_t)result.unitYQ14, (int16_t)result.unitZQ14};
@@ -674,7 +715,7 @@ void SlipRaceCollision_InitializeBodyLists(void) {
 	activeHead->nextBodyOffset = SlipRaceCollision_activeBodyOffset;
 	activeHead->previousBodyOffset = SlipRaceCollision_activeBodyOffset;
 	do {
-		const uint32_t nextOffset = currentOffset + 0x58u;
+		const uint32_t nextOffset = currentOffset + SLIP_COLLISION_BODY_BYTES;
 		((SlipRaceCollisionBody *)(void *)SlipRaceCollision_CollisionBodyFromOffset(currentOffset))->nextBodyOffset =
 		    nextOffset;
 		((SlipRaceCollisionBody *)(void *)SlipRaceCollision_CollisionBodyFromOffset(nextOffset))->previousBodyOffset =
@@ -689,14 +730,14 @@ void SlipRaceCollision_InitializeBodyLists(void) {
 }
 
 void SlipRaceCollision_AdvanceUncollidableObjects(void) {
-	uint16_t object = 0xffffu;
+	uint16_t object = UINT16_MAX;
 
 	for (;;) {
 		SlipView3DVec32 position;
 		SlipObjectSetPosition setPosition;
 
 		object = SlipObject_Next(object);
-		if (object == 0xffffu)
+		if (object == UINT16_MAX)
 			return;
 		if (SlipObject_PhysicsOffset(SlipRaceCollision_objectTable, object) != 0) {
 			continue;
@@ -751,7 +792,7 @@ uint32_t SlipRaceCollision_RemoveBodyIfFlagged(uint32_t eventCode, uint32_t even
 	(void)eventFlags;
 	(void)dispatchData;
 	(void)dispatchFrame;
-	if (object != 0 && ((uint16_t)eventCode & 0x0001u) != 0) {
+	if (object != 0 && ((uint16_t)eventCode & SLIP_OBJECT_SERVER_EVENT_FREE) != 0) {
 		SlipRaceCollision_RemoveBody(object);
 	}
 	return eventCode;
@@ -790,7 +831,7 @@ void SlipRaceCollision_PrepareBodies(void) {
 		object = body->objectHandle;
 		speed = (uint32_t)SlipObject_Speed(SlipRaceCollision_objectTable, object);
 		intersectionTimeProduct = (uint64_t)SlipRaceCollision_frameStep * speed;
-		body->movementDistance = (uint32_t)(intersectionTimeProduct >> 14);
+		body->movementDistance = (uint32_t)(intersectionTimeProduct >> SLIP_Q14_FRACTION_BITS);
 	}
 }
 
@@ -829,7 +870,7 @@ void SlipRaceCollision_IntegrateBodies(void) {
 		if (speed == 0)
 			continue;
 		intersectionTimeProduct = (uint64_t)SlipRaceCollision_integratedStep * speed;
-		distance = (int32_t)(intersectionTimeProduct >> 14);
+		distance = (int32_t)(intersectionTimeProduct >> SLIP_Q14_FRACTION_BITS);
 		SlipObject_Position(SlipRaceCollision_objectTable, SlipRaceCollision_objectTableBytes, object, &objectPosition);
 		direction = SlipObject_Direction(SlipRaceCollision_objectTable, object);
 		scaled =
@@ -854,7 +895,7 @@ void SlipRaceCollision_FindBodyCollisions(void) {
 		if (bodyOffset == SlipRaceCollision_activeBodyOffset)
 			return;
 		body = (const SlipRaceCollisionBody *)(const void *)SlipRaceCollision_CollisionBodyFromOffset(bodyOffset);
-		if ((body->flags & 2u) == 0) {
+		if ((body->flags & SLIP_COLLISION_BODY_CONTACTS_ENABLED) == 0) {
 			continue;
 		}
 		SlipRaceCollision_sourceBody = SlipRaceCollision_CollisionBodyFromOffset(bodyOffset);
@@ -871,7 +912,7 @@ void SlipRaceCollision_FindBodyCollisions(void) {
 				break;
 			}
 			body = (const SlipRaceCollisionBody *)(const void *)SlipRaceCollision_CollisionBodyFromOffset(bodyOffset);
-			if ((body->flags & 2u) == 0) {
+			if ((body->flags & SLIP_COLLISION_BODY_CONTACTS_ENABLED) == 0) {
 				continue;
 			}
 			if (bodyOffset == SlipRaceCollision_excludedBodyOffset)
@@ -880,7 +921,7 @@ void SlipRaceCollision_FindBodyCollisions(void) {
 			flags = body->flags;
 
 			flags &= body->flags;
-			if ((flags & 2u) == 0) {
+			if ((flags & SLIP_COLLISION_BODY_CONTACTS_ENABLED) == 0) {
 				SlipRuntime_Fatal("Extent Collide not allowed");
 			}
 			if (SlipRaceCollision_TestBodies()) {
@@ -906,9 +947,9 @@ void SlipRaceCollision_DispatchBodyEvents(uint32_t contactTimeWord, uint32_t eve
 		nextBodyOffset = body->nextBodyOffset;
 		if (bodyOffset == SlipRaceCollision_activeBodyOffset)
 			break;
-		contactTimeWord = (contactTimeWord & 0xffff0000u) | body->contactTime;
+		contactTimeWord = (contactTimeWord & SLIP_COLLISION_PACKED_UPPER_WORD_MASK) | body->contactTime;
 		if ((uint16_t)contactTimeWord == SlipRaceCollision_firstTime) {
-			contactTypeWord = (contactTypeWord & 0xffff0000u) | body->contactType;
+			contactTypeWord = (contactTypeWord & SLIP_COLLISION_PACKED_UPPER_WORD_MASK) | body->contactType;
 			if ((uint16_t)contactTypeWord == SLIP_COLLISION_CONTACT_TRACK) {
 				SlipRaceCollision_DispatchTrackContact(bodyOffset, eventFlags);
 			} else if ((uint16_t)contactTypeWord == SLIP_COLLISION_CONTACT_BODY) {
@@ -937,10 +978,12 @@ void SlipRaceCollision_DispatchBodyContact(uint32_t bodyOffset, uint32_t eventFl
 	SlipRaceCollision_stopEvent.impactFlag = body->impactFlag;
 
 	otherObject = body->otherObject;
-	eventResult = SlipObject_DispatchEvent(object, (body->impactFlag & 0xffff0000u) | SLIP_OBJECT_EVENT_COLLISION_STOP,
-	                                       otherObject, 0x0001459cu, eventFlags, bodyOffset, 0x0001459cu);
+	eventResult = SlipObject_DispatchEvent(
+	    object, (body->impactFlag & SLIP_OBJECT_EVENT_UPPER_WORD_MASK) | SLIP_OBJECT_EVENT_COLLISION_STOP, otherObject,
+	    SLIP_COLLISION_STOP_EVENT_TOKEN, eventFlags, bodyOffset, SLIP_COLLISION_STOP_EVENT_TOKEN);
 	if ((uint16_t)eventResult != 0) {
-		SlipObject_Stop(object, eventResult, otherObject, 0x0001459cu, eventFlags, bodyOffset, 0x0001459cu);
+		SlipObject_Stop(object, eventResult, otherObject, SLIP_COLLISION_STOP_EVENT_TOKEN, eventFlags, bodyOffset,
+		                SLIP_COLLISION_STOP_EVENT_TOKEN);
 	}
 }
 
@@ -960,10 +1003,12 @@ void SlipRaceCollision_DispatchTrackContact(uint32_t bodyOffset, uint32_t eventF
 	contactZ = body->contactPosition.z;
 	SlipRaceCollision_bounceEvent.contactPosition.z = (int32_t)contactZ;
 	eventResult = SlipObject_DispatchEvent(
-	    object, ((uint32_t)body->contactPosition.x & 0xffff0000u) | SLIP_OBJECT_EVENT_COLLISION_BOUNCE, 0x0001460cu,
-	    contactZ, eventFlags, bodyOffset, 0x0001460cu);
+	    object,
+	    ((uint32_t)body->contactPosition.x & SLIP_OBJECT_EVENT_UPPER_WORD_MASK) | SLIP_OBJECT_EVENT_COLLISION_BOUNCE,
+	    SLIP_COLLISION_BOUNCE_EVENT_TOKEN, contactZ, eventFlags, bodyOffset, SLIP_COLLISION_BOUNCE_EVENT_TOKEN);
 	if ((uint16_t)eventResult != 0) {
-		SlipObject_Stop(object, eventResult, 0x0001460cu, contactZ, eventFlags, bodyOffset, 0x0001460cu);
+		SlipObject_Stop(object, eventResult, SLIP_COLLISION_BOUNCE_EVENT_TOKEN, contactZ, eventFlags, bodyOffset,
+		                SLIP_COLLISION_BOUNCE_EVENT_TOKEN);
 	}
 }
 
@@ -985,14 +1030,14 @@ void SlipRaceCollision_PrepareRemainingStep(uint32_t eventCode, uint32_t eventPa
 			continue;
 		bodyCounter = body->repeatedContacts;
 		if (body->impactFlag != 0) {
-			if (bodyCounter < 2) {
+			if (bodyCounter < SLIP_COLLISION_REPEATED_IMPACT_LIMIT) {
 				body->repeatedContacts = (int16_t)((uint16_t)bodyCounter + 1u);
 				continue;
 			}
 		} else {
 			bodyCounter = (int16_t)((uint16_t)bodyCounter + 1u);
 			body->repeatedContacts = bodyCounter;
-			if (bodyCounter < 3)
+			if (bodyCounter < SLIP_COLLISION_REPEATED_CONTACT_LIMIT)
 				continue;
 		}
 		object = body->objectHandle;
@@ -1027,7 +1072,7 @@ void SlipRaceCollision_FinalizeBodyCollisions(void) {
 		}
 		collisionType = firstBody->contactType;
 		if (collisionType == SLIP_COLLISION_CONTACT_TRACK) {
-			firstBody->impactFlag = 0xffffffffu;
+			firstBody->impactFlag = UINT32_MAX;
 		}
 		if (collisionType != SLIP_COLLISION_CONTACT_BODY)
 			continue;
@@ -1039,12 +1084,12 @@ void SlipRaceCollision_FinalizeBodyCollisions(void) {
 		SlipRaceCollision_targetBody = SlipRaceCollision_CollisionBodyFromOffset(otherBodyOffset);
 		secondBody = (SlipRaceCollisionBody *)(void *)SlipRaceCollision_targetBody;
 		if (SlipObject_Speed(SlipRaceCollision_objectTable, firstBody->objectHandle) == 0) {
-			secondBody->impactFlag = 0xffffffffu;
+			secondBody->impactFlag = UINT32_MAX;
 			firstBody->impactFlag = 0;
 			continue;
 		}
 		if (SlipObject_Speed(SlipRaceCollision_objectTable, secondBody->objectHandle) == 0) {
-			firstBody->impactFlag = 0xffffffffu;
+			firstBody->impactFlag = UINT32_MAX;
 			secondBody->impactFlag = 0;
 			continue;
 		}
@@ -1055,7 +1100,7 @@ void SlipRaceCollision_FinalizeBodyCollisions(void) {
 		firstBody = (SlipRaceCollisionBody *)(void *)SlipRaceCollision_sourceBody;
 		secondBody = (SlipRaceCollisionBody *)(void *)SlipRaceCollision_targetBody;
 		if (contactFound) {
-			secondBody->impactFlag = 0xffffffffu;
+			secondBody->impactFlag = UINT32_MAX;
 		}
 		firstBody->movementDistance = savedMovementDistance;
 		firstBody->impactFlag = 0;
@@ -1065,24 +1110,24 @@ void SlipRaceCollision_FinalizeBodyCollisions(void) {
 		firstBody = (SlipRaceCollisionBody *)(void *)SlipRaceCollision_sourceBody;
 		secondBody = (SlipRaceCollisionBody *)(void *)SlipRaceCollision_targetBody;
 		if (contactFound) {
-			firstBody->impactFlag = 0xffffffffu;
+			firstBody->impactFlag = UINT32_MAX;
 		}
 		secondBody->movementDistance = savedMovementDistance;
 		if ((firstBody->impactFlag | secondBody->impactFlag) == 0) {
-			firstBody->impactFlag = 0xffffffffu;
-			secondBody->impactFlag = 0xffffffffu;
+			firstBody->impactFlag = UINT32_MAX;
+			secondBody->impactFlag = UINT32_MAX;
 		}
 	}
 }
 
 static int32_t SlipRaceCollision_ScaleDifferenceQ30(int32_t value, uint32_t fraction) {
 	const int64_t product = (int64_t)value * (int64_t)(int32_t)fraction;
-	return (int32_t)((uint64_t)product >> 30);
+	return (int32_t)((uint64_t)product >> SLIP_COLLISION_RECIPROCAL_FRACTION_BITS);
 }
 
 static int32_t SlipRaceCollision_ScaleDirectionQ14(int16_t direction, int32_t magnitude) {
 	const int64_t product = (int64_t)direction * magnitude;
-	return (int32_t)((uint64_t)product >> 14);
+	return (int32_t)((uint64_t)product >> SLIP_Q14_FRACTION_BITS);
 }
 
 void SlipRaceCollision_CopyVertex(const SlipRaceCollisionCopySource *source, SlipRaceCollisionVertex *destination) {
@@ -1100,7 +1145,7 @@ void SlipRaceCollision_SelectContact(void) {
 		do {
 			const int32_t time = vertex->time;
 			if (time < 0) {
-				if (time > -0x80) {
+				if (time > -SLIP_COLLISION_CONTACT_PENETRATION_TIME_TOLERANCE) {
 					SlipRaceCollision_contact.time = 0;
 					return;
 				}
@@ -1152,8 +1197,10 @@ void SlipRaceCollision_InterpolateTime(const SlipRaceCollisionVertex *insideVert
 	const int32_t timeDifference = (int32_t)((uint32_t)insideVertex->time - (uint32_t)intersectionVertex->time);
 	const int64_t timeProduct = (int64_t)timeDifference * (int64_t)(int32_t)fractionQ30;
 	const uint32_t productLow = (uint32_t)timeProduct;
-	const uint32_t scaledTimeDifference = (productLow >> 30) | ((uint32_t)((uint64_t)timeProduct >> 32) << 2);
-	const uint32_t roundingCarry = (productLow >> 29) & 1u;
+	const uint32_t scaledTimeDifference =
+	    (productLow >> SLIP_COLLISION_RECIPROCAL_FRACTION_BITS) |
+	    ((uint32_t)((uint64_t)timeProduct >> 32) << SLIP_COLLISION_RECIPROCAL_HIGH_SHIFT);
+	const uint32_t roundingCarry = (productLow >> (SLIP_COLLISION_RECIPROCAL_FRACTION_BITS - 1)) & 1u;
 
 	intersectionVertex->time = (int32_t)((uint32_t)intersectionVertex->time + scaledTimeDifference + roundingCarry);
 }
@@ -1165,26 +1212,26 @@ uint32_t SlipRaceCollision_CornerOutcode(uint32_t cornerIndex, SlipRaceCollision
 	vertex->x = SlipRaceCollision_corners[cornerIndex][0];
 	vertex->y = SlipRaceCollision_corners[cornerIndex][1];
 	vertex->z = SlipRaceCollision_corners[cornerIndex][2];
-	outcode = vertex->outcode & 0x81u;
+	outcode = vertex->outcode & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 	if (vertex->x < bounds->minX)
-		outcode |= 0x02u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 	if (vertex->x > bounds->maxX)
-		outcode |= 0x04u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 	if (vertex->y < bounds->minY)
-		outcode |= 0x08u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 	if (vertex->y > bounds->maxY)
-		outcode |= 0x10u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 	if (vertex->z < bounds->minZ)
-		outcode |= 0x20u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 	if (vertex->z > bounds->maxZ)
-		outcode |= 0x40u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 	vertex->outcode = outcode;
 	return vertex->outcode;
 }
 
 SlipRaceCollisionOutcodes SlipRaceCollision_AccumulateOutcodes(void) {
 	SlipRaceCollisionVertex *vertex = SlipRaceCollision_activeList;
-	SlipRaceCollisionOutcodes result = {0x7eu, 0};
+	SlipRaceCollisionOutcodes result = {SLIP_COLLISION_OUTCODE_BOX_MASK, 0};
 
 	do {
 		const uint32_t outcode = vertex->outcode;
@@ -1255,15 +1302,15 @@ bool SlipRaceCollision_ClipPolygon(uint32_t combinedOutcode) {
 	SlipRaceCollisionCrossings crossings;
 	SlipRaceCollisionOutcodes outcodes;
 
-	if ((combinedOutcode & 0x02u) != 0) {
-		crossings = SlipRaceCollision_FindCrossings(0x02u);
+	if ((combinedOutcode & SLIP_COLLISION_OUTCODE_MINIMUM_X) != 0) {
+		crossings = SlipRaceCollision_FindCrossings(SLIP_COLLISION_OUTCODE_MINIMUM_X);
 		SlipRaceCollision_InterpolateX(crossings.firstInside, crossings.firstOutside,
 		                               SlipRaceCollision_sourceBounds.minX);
 		SlipRaceCollision_InterpolateX(crossings.secondInside, crossings.secondOutside,
 		                               SlipRaceCollision_sourceBounds.minX);
 	}
-	if ((remainingOutcodes & 0x04u) != 0) {
-		crossings = SlipRaceCollision_FindCrossings(0x04u);
+	if ((remainingOutcodes & SLIP_COLLISION_OUTCODE_MAXIMUM_X) != 0) {
+		crossings = SlipRaceCollision_FindCrossings(SLIP_COLLISION_OUTCODE_MAXIMUM_X);
 		SlipRaceCollision_InterpolateX(crossings.firstInside, crossings.firstOutside,
 		                               SlipRaceCollision_sourceBounds.maxX);
 		SlipRaceCollision_InterpolateX(crossings.secondInside, crossings.secondOutside,
@@ -1271,17 +1318,17 @@ bool SlipRaceCollision_ClipPolygon(uint32_t combinedOutcode) {
 	}
 	outcodes = SlipRaceCollision_AccumulateOutcodes();
 	remainingOutcodes = outcodes.combinedOutcode;
-	if ((outcodes.commonOutcode & 0x7eu) != 0)
+	if ((outcodes.commonOutcode & SLIP_COLLISION_OUTCODE_BOX_MASK) != 0)
 		return true;
-	if ((outcodes.combinedOutcode & 0x08u) != 0) {
-		crossings = SlipRaceCollision_FindCrossings(0x08u);
+	if ((outcodes.combinedOutcode & SLIP_COLLISION_OUTCODE_MINIMUM_Y) != 0) {
+		crossings = SlipRaceCollision_FindCrossings(SLIP_COLLISION_OUTCODE_MINIMUM_Y);
 		SlipRaceCollision_InterpolateY(crossings.firstInside, crossings.firstOutside,
 		                               SlipRaceCollision_sourceBounds.minY);
 		SlipRaceCollision_InterpolateY(crossings.secondInside, crossings.secondOutside,
 		                               SlipRaceCollision_sourceBounds.minY);
 	}
-	if ((remainingOutcodes & 0x10u) != 0) {
-		crossings = SlipRaceCollision_FindCrossings(0x10u);
+	if ((remainingOutcodes & SLIP_COLLISION_OUTCODE_MAXIMUM_Y) != 0) {
+		crossings = SlipRaceCollision_FindCrossings(SLIP_COLLISION_OUTCODE_MAXIMUM_Y);
 		SlipRaceCollision_InterpolateY(crossings.firstInside, crossings.firstOutside,
 		                               SlipRaceCollision_sourceBounds.maxY);
 		SlipRaceCollision_InterpolateY(crossings.secondInside, crossings.secondOutside,
@@ -1289,31 +1336,31 @@ bool SlipRaceCollision_ClipPolygon(uint32_t combinedOutcode) {
 	}
 	outcodes = SlipRaceCollision_AccumulateOutcodes();
 	remainingOutcodes = outcodes.combinedOutcode;
-	if ((outcodes.commonOutcode & 0x7eu) != 0)
+	if ((outcodes.commonOutcode & SLIP_COLLISION_OUTCODE_BOX_MASK) != 0)
 		return true;
-	if ((outcodes.combinedOutcode & 0x20u) != 0) {
-		crossings = SlipRaceCollision_FindCrossings(0x20u);
+	if ((outcodes.combinedOutcode & SLIP_COLLISION_OUTCODE_MINIMUM_Z) != 0) {
+		crossings = SlipRaceCollision_FindCrossings(SLIP_COLLISION_OUTCODE_MINIMUM_Z);
 		SlipRaceCollision_InterpolateZ(crossings.firstInside, crossings.firstOutside,
 		                               SlipRaceCollision_sourceBounds.minZ);
 		SlipRaceCollision_InterpolateZ(crossings.secondInside, crossings.secondOutside,
 		                               SlipRaceCollision_sourceBounds.minZ);
 	}
-	if ((remainingOutcodes & 0x40u) != 0) {
-		crossings = SlipRaceCollision_FindCrossings(0x40u);
+	if ((remainingOutcodes & SLIP_COLLISION_OUTCODE_MAXIMUM_Z) != 0) {
+		crossings = SlipRaceCollision_FindCrossings(SLIP_COLLISION_OUTCODE_MAXIMUM_Z);
 		SlipRaceCollision_InterpolateZ(crossings.firstInside, crossings.firstOutside,
 		                               SlipRaceCollision_sourceBounds.maxZ);
 		SlipRaceCollision_InterpolateZ(crossings.secondInside, crossings.secondOutside,
 		                               SlipRaceCollision_sourceBounds.maxZ);
 	}
 	outcodes = SlipRaceCollision_AccumulateOutcodes();
-	return (outcodes.commonOutcode & 0x7eu) != 0;
+	return (outcodes.commonOutcode & SLIP_COLLISION_OUTCODE_BOX_MASK) != 0;
 }
 
 bool SlipRaceCollision_TestBoxFaces(void) {
 	const int32_t (*corner)[3] = SlipRaceCollision_corners;
-	uint32_t remainingCount = 8u;
-	uint32_t common = 0xffffffffu;
-	const int32_t (*face)[8];
+	uint32_t remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
+	uint32_t common = UINT32_MAX;
+	const int32_t (*face)[SLIP_COLLISION_FACE_VALUE_COUNT];
 	SlipRaceCollisionBounds *const bounds = &SlipRaceCollision_sourceBounds;
 
 	do {
@@ -1321,19 +1368,19 @@ bool SlipRaceCollision_TestBoxFaces(void) {
 		int32_t coordinate = (*corner)[0];
 
 		if (coordinate < bounds->minX)
-			outcode |= 0x02u;
+			outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 		if (coordinate > bounds->maxX)
-			outcode |= 0x04u;
+			outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 		coordinate = (*corner)[1];
 		if (coordinate < bounds->minY)
-			outcode |= 0x08u;
+			outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 		if (coordinate > bounds->maxY)
-			outcode |= 0x10u;
+			outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 		coordinate = (*corner)[2];
 		if (coordinate < bounds->minZ)
-			outcode |= 0x20u;
+			outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 		if (coordinate > bounds->maxZ)
-			outcode |= 0x40u;
+			outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 		if (outcode == 0)
 			return true;
 		common &= outcode;
@@ -1343,14 +1390,14 @@ bool SlipRaceCollision_TestBoxFaces(void) {
 	if (common != 0)
 		return false;
 	face = SlipRaceCollision_faces;
-	remainingCount = 6u;
+	remainingCount = SLIP_COLLISION_BOX_FACE_COUNT;
 	do {
-		uint32_t remainingFaceCorners = 4u;
+		uint32_t remainingFaceCorners = SLIP_COLLISION_FACE_CORNER_COUNT;
 		const int32_t *cornerIndexPointer = *face;
 		SlipRaceCollisionVertex *firstVertex;
 		SlipRaceCollisionVertex *vertex;
 
-		SlipRaceCollision_faceCommon = 0xffffffffu;
+		SlipRaceCollision_faceCommon = UINT32_MAX;
 		SlipRaceCollision_faceCombined = 0;
 		vertex = SlipRaceCollision_AllocateVertex();
 		SlipRaceCollision_activeList = vertex;
@@ -1370,7 +1417,7 @@ bool SlipRaceCollision_TestBoxFaces(void) {
 		} while (remainingFaceCorners != 0);
 		vertex->next = firstVertex;
 		firstVertex->previous = vertex;
-		if ((SlipRaceCollision_faceCommon & 0x7eu) == 0 &&
+		if ((SlipRaceCollision_faceCommon & SLIP_COLLISION_OUTCODE_BOX_MASK) == 0 &&
 		    (SlipRaceCollision_faceCombined == 0 || !SlipRaceCollision_ClipPolygon(SlipRaceCollision_faceCombined))) {
 			SlipRaceCollision_ReleasePolygon();
 			return true;
@@ -1386,14 +1433,14 @@ void SlipRaceCollision_TestMinZ(void) {
 	uint32_t commonFlags;
 	uint32_t remainingCount;
 	uint32_t cornerIndex;
-	int32_t (*face)[8];
+	int32_t (*face)[SLIP_COLLISION_FACE_VALUE_COUNT];
 	SlipRaceCollisionBounds *const bounds = &SlipRaceCollision_sourceBounds;
 
 	if (SlipRaceCollision_deltaZ == 0 || SlipRaceCollision_deltaZ < 0) {
 		return;
 	}
-	commonFlags = 0xffffffffu;
-	remainingCount = 8u;
+	commonFlags = UINT32_MAX;
+	remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	cornerIndex = 0;
 	do {
 		SlipRaceCollisionCornerState *const state = &SlipRaceCollision_cornerState[cornerIndex];
@@ -1403,7 +1450,7 @@ void SlipRaceCollision_TestMinZ(void) {
 		state->originalY = SlipRaceCollision_corners[cornerIndex][1];
 		state->originalZ = SlipRaceCollision_corners[cornerIndex][2];
 		if (state->originalZ > bounds->minZ)
-			flags = 0x80u;
+			flags = SLIP_COLLISION_OUTCODE_PLANE_SIDE;
 		state->flags = flags;
 		commonFlags &= flags;
 		++cornerIndex;
@@ -1411,7 +1458,7 @@ void SlipRaceCollision_TestMinZ(void) {
 	} while (remainingCount != 0);
 	if (commonFlags != 0)
 		return;
-	remainingCount = 8u;
+	remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	cornerIndex = 0;
 	do {
 		int32_t coordinate = SlipRaceCollision_cornerState[cornerIndex].originalZ;
@@ -1425,21 +1472,23 @@ void SlipRaceCollision_TestMinZ(void) {
 	} while (remainingCount != 0);
 	if (remainingCount == 0)
 		return;
-	if ((uint16_t)SlipRaceCollision_velocityZ < 0x1cu)
+	if ((uint16_t)SlipRaceCollision_velocityZ < SLIP_COLLISION_MINIMUM_AXIS_SPEED)
 		return;
-	SlipRaceCollision_inverseVelocity = 0x40000000u / (uint16_t)SlipRaceCollision_velocityZ;
+	SlipRaceCollision_inverseVelocity = SLIP_COLLISION_RECIPROCAL_ONE / (uint16_t)SlipRaceCollision_velocityZ;
 	face = SlipRaceCollision_faces;
-	remainingCount = 6u;
+	remainingCount = SLIP_COLLISION_BOX_FACE_COUNT;
 	do {
-		if ((*face)[4] != 0) {
-			SlipView3DVec16 normal = {(int16_t)(*face)[5], (int16_t)(*face)[6], (int16_t)(*face)[7]};
+		if ((*face)[SLIP_COLLISION_FACE_ENABLED_INDEX] != 0) {
+			SlipView3DVec16 normal = {(int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_X_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Y_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Z_INDEX]};
 			const int16_t normalAlongAxisQ14 =
 			    (int16_t)SlipView3D_ProjectColumn2(&SlipRaceCollision_relativeMatrix, normal);
 
 			if (normalAlongAxisQ14 != 0 && normalAlongAxisQ14 > 0) {
-				uint32_t faceCommon = 0xffffffffu;
+				uint32_t faceCommon = UINT32_MAX;
 				uint32_t faceCombined = 0;
-				uint32_t remainingFaceCorners = 4u;
+				uint32_t remainingFaceCorners = SLIP_COLLISION_FACE_CORNER_COUNT;
 				int32_t *cornerIndexPointer = *face;
 				SlipRaceCollisionVertex *vertex = SlipRaceCollision_AllocateVertex();
 				SlipRaceCollisionVertex *const firstVertex = vertex;
@@ -1453,11 +1502,13 @@ void SlipRaceCollision_TestMinZ(void) {
 					const int64_t intersectionTimeProduct =
 					    (int64_t)distanceToPlane * (int64_t)(int32_t)SlipRaceCollision_inverseVelocity;
 					const uint32_t productLow = (uint32_t)intersectionTimeProduct;
-					int32_t intersectionTime =
-					    (int32_t)((productLow >> 16) | ((uint32_t)((uint64_t)intersectionTimeProduct >> 32) << 16));
+					int32_t intersectionTime = (int32_t)((productLow >> SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT) |
+					                                     ((uint32_t)((uint64_t)intersectionTimeProduct >> 32)
+					                                      << (32 - SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT)));
 					uint32_t outcode;
 
-					intersectionTime = (int32_t)((uint32_t)intersectionTime + ((productLow >> 15) & 1u));
+					intersectionTime = (int32_t)((uint32_t)intersectionTime +
+					                             ((productLow >> (SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT - 1)) & 1u));
 					state->time = intersectionTime;
 					vertex->time = intersectionTime;
 					state->projectedX =
@@ -1470,20 +1521,20 @@ void SlipRaceCollision_TestMinZ(void) {
 					vertex->y = state->projectedY;
 					state->projectedZ = bounds->minZ;
 					vertex->z = bounds->minZ;
-					state->flags |= 1u;
-					outcode = state->flags & 0x81u;
+					state->flags |= SLIP_COLLISION_CORNER_PROJECTED;
+					outcode = state->flags & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 					if (vertex->x < bounds->minX)
-						outcode |= 0x02u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 					if (vertex->x > bounds->maxX)
-						outcode |= 0x04u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 					if (vertex->y < bounds->minY)
-						outcode |= 0x08u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 					if (vertex->y > bounds->maxY)
-						outcode |= 0x10u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 					if (vertex->z < bounds->minZ)
-						outcode |= 0x20u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 					if (vertex->z > bounds->maxZ)
-						outcode |= 0x40u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 					vertex->outcode = outcode;
 					faceCombined |= outcode;
 					faceCommon &= outcode;
@@ -1498,7 +1549,8 @@ void SlipRaceCollision_TestMinZ(void) {
 				} while (remainingFaceCorners != 0);
 				vertex->next = firstVertex;
 				firstVertex->previous = vertex;
-				if ((faceCommon & 0xfeu) == 0 && (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
+				if ((faceCommon & SLIP_COLLISION_OUTCODE_FACE_REJECT_MASK) == 0 &&
+				    (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
 					SlipRaceCollision_SelectContact();
 				}
 			}
@@ -1510,10 +1562,10 @@ void SlipRaceCollision_TestMinZ(void) {
 }
 
 void SlipRaceCollision_TestMaxZ(void) {
-	uint32_t commonFlags = 0xffffffffu;
-	uint32_t remainingCount = 8u;
+	uint32_t commonFlags = UINT32_MAX;
+	uint32_t remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	uint32_t cornerIndex = 0;
-	int32_t (*face)[8];
+	int32_t (*face)[SLIP_COLLISION_FACE_VALUE_COUNT];
 	SlipRaceCollisionBounds *const bounds = &SlipRaceCollision_sourceBounds;
 
 	if (SlipRaceCollision_deltaZ >= 0)
@@ -1526,7 +1578,7 @@ void SlipRaceCollision_TestMaxZ(void) {
 		state->originalY = SlipRaceCollision_corners[cornerIndex][1];
 		state->originalZ = SlipRaceCollision_corners[cornerIndex][2];
 		if (state->originalZ < bounds->maxZ)
-			flags = 0x80u;
+			flags = SLIP_COLLISION_OUTCODE_PLANE_SIDE;
 		state->flags = flags;
 		commonFlags &= flags;
 		++cornerIndex;
@@ -1534,7 +1586,7 @@ void SlipRaceCollision_TestMaxZ(void) {
 	} while (remainingCount != 0);
 	if (commonFlags != 0)
 		return;
-	remainingCount = 8u;
+	remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	cornerIndex = 0;
 	do {
 		int32_t coordinate = SlipRaceCollision_cornerState[cornerIndex].originalZ;
@@ -1550,22 +1602,24 @@ void SlipRaceCollision_TestMaxZ(void) {
 		return;
 	{
 		const int32_t speedAlongAxis = -(int32_t)SlipRaceCollision_velocityZ;
-		if (speedAlongAxis < 0x1c)
+		if (speedAlongAxis < SLIP_COLLISION_MINIMUM_AXIS_SPEED)
 			return;
-		SlipRaceCollision_inverseVelocity = 0x40000000u / (uint32_t)speedAlongAxis;
+		SlipRaceCollision_inverseVelocity = SLIP_COLLISION_RECIPROCAL_ONE / (uint32_t)speedAlongAxis;
 	}
 	face = SlipRaceCollision_faces;
-	remainingCount = 6u;
+	remainingCount = SLIP_COLLISION_BOX_FACE_COUNT;
 	do {
-		if ((*face)[4] != 0) {
-			SlipView3DVec16 normal = {(int16_t)(*face)[5], (int16_t)(*face)[6], (int16_t)(*face)[7]};
+		if ((*face)[SLIP_COLLISION_FACE_ENABLED_INDEX] != 0) {
+			SlipView3DVec16 normal = {(int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_X_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Y_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Z_INDEX]};
 			const int16_t normalAlongAxisQ14 =
 			    (int16_t)SlipView3D_ProjectColumn2(&SlipRaceCollision_relativeMatrix, normal);
 
 			if (normalAlongAxisQ14 < 0) {
-				uint32_t faceCommon = 0xffffffffu;
+				uint32_t faceCommon = UINT32_MAX;
 				uint32_t faceCombined = 0;
-				uint32_t remainingFaceCorners = 4u;
+				uint32_t remainingFaceCorners = SLIP_COLLISION_FACE_CORNER_COUNT;
 				int32_t *cornerIndexPointer = *face;
 				SlipRaceCollisionVertex *vertex = SlipRaceCollision_AllocateVertex();
 				SlipRaceCollisionVertex *const firstVertex = vertex;
@@ -1578,11 +1632,13 @@ void SlipRaceCollision_TestMaxZ(void) {
 					const int64_t intersectionTimeProduct =
 					    (int64_t)distanceToPlane * (int64_t)(int32_t)SlipRaceCollision_inverseVelocity;
 					const uint32_t productLow = (uint32_t)intersectionTimeProduct;
-					int32_t intersectionTime =
-					    (int32_t)((productLow >> 16) | ((uint32_t)((uint64_t)intersectionTimeProduct >> 32) << 16));
+					int32_t intersectionTime = (int32_t)((productLow >> SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT) |
+					                                     ((uint32_t)((uint64_t)intersectionTimeProduct >> 32)
+					                                      << (32 - SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT)));
 					uint32_t outcode;
 
-					intersectionTime = (int32_t)((uint32_t)intersectionTime + ((productLow >> 15) & 1u));
+					intersectionTime = (int32_t)((uint32_t)intersectionTime +
+					                             ((productLow >> (SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT - 1)) & 1u));
 					state->time = intersectionTime;
 					vertex->time = intersectionTime;
 					state->projectedX =
@@ -1595,20 +1651,20 @@ void SlipRaceCollision_TestMaxZ(void) {
 					vertex->y = state->projectedY;
 					state->projectedZ = bounds->maxZ;
 					vertex->z = bounds->maxZ;
-					state->flags |= 1u;
-					outcode = state->flags & 0x81u;
+					state->flags |= SLIP_COLLISION_CORNER_PROJECTED;
+					outcode = state->flags & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 					if (vertex->x < bounds->minX)
-						outcode |= 0x02u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 					if (vertex->x > bounds->maxX)
-						outcode |= 0x04u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 					if (vertex->y < bounds->minY)
-						outcode |= 0x08u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 					if (vertex->y > bounds->maxY)
-						outcode |= 0x10u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 					if (vertex->z < bounds->minZ)
-						outcode |= 0x20u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 					if (vertex->z > bounds->maxZ)
-						outcode |= 0x40u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 					vertex->outcode = outcode;
 					faceCombined |= outcode;
 					faceCommon &= outcode;
@@ -1623,7 +1679,8 @@ void SlipRaceCollision_TestMaxZ(void) {
 				} while (remainingFaceCorners != 0);
 				vertex->next = firstVertex;
 				firstVertex->previous = vertex;
-				if ((faceCommon & 0xfeu) == 0 && (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
+				if ((faceCommon & SLIP_COLLISION_OUTCODE_FACE_REJECT_MASK) == 0 &&
+				    (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
 					SlipRaceCollision_SelectContact();
 				}
 			}
@@ -1638,13 +1695,13 @@ void SlipRaceCollision_TestMinX(void) {
 	uint32_t commonFlags;
 	uint32_t remainingCount;
 	uint32_t cornerIndex;
-	int32_t (*face)[8];
+	int32_t (*face)[SLIP_COLLISION_FACE_VALUE_COUNT];
 	SlipRaceCollisionBounds *const bounds = &SlipRaceCollision_sourceBounds;
 
 	if (SlipRaceCollision_deltaX == 0 || SlipRaceCollision_deltaX < 0)
 		return;
-	commonFlags = 0xffffffffu;
-	remainingCount = 8u;
+	commonFlags = UINT32_MAX;
+	remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	cornerIndex = 0;
 	do {
 		SlipRaceCollisionCornerState *const state = &SlipRaceCollision_cornerState[cornerIndex];
@@ -1654,7 +1711,7 @@ void SlipRaceCollision_TestMinX(void) {
 		state->originalY = SlipRaceCollision_corners[cornerIndex][1];
 		state->originalZ = SlipRaceCollision_corners[cornerIndex][2];
 		if (state->originalX > bounds->minX)
-			flags = 0x80u;
+			flags = SLIP_COLLISION_OUTCODE_PLANE_SIDE;
 		state->flags = flags;
 		commonFlags &= flags;
 		++cornerIndex;
@@ -1662,7 +1719,7 @@ void SlipRaceCollision_TestMinX(void) {
 	} while (remainingCount != 0);
 	if (commonFlags != 0)
 		return;
-	remainingCount = 8u;
+	remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	cornerIndex = 0;
 	do {
 		int32_t coordinate = SlipRaceCollision_cornerState[cornerIndex].originalX;
@@ -1676,21 +1733,23 @@ void SlipRaceCollision_TestMinX(void) {
 	} while (remainingCount != 0);
 	if (remainingCount == 0)
 		return;
-	if ((uint16_t)SlipRaceCollision_velocityX < 0x1cu)
+	if ((uint16_t)SlipRaceCollision_velocityX < SLIP_COLLISION_MINIMUM_AXIS_SPEED)
 		return;
-	SlipRaceCollision_inverseVelocity = 0x40000000u / (uint16_t)SlipRaceCollision_velocityX;
+	SlipRaceCollision_inverseVelocity = SLIP_COLLISION_RECIPROCAL_ONE / (uint16_t)SlipRaceCollision_velocityX;
 	face = SlipRaceCollision_faces;
-	remainingCount = 6u;
+	remainingCount = SLIP_COLLISION_BOX_FACE_COUNT;
 	do {
-		if ((*face)[4] != 0) {
-			SlipView3DVec16 normal = {(int16_t)(*face)[5], (int16_t)(*face)[6], (int16_t)(*face)[7]};
+		if ((*face)[SLIP_COLLISION_FACE_ENABLED_INDEX] != 0) {
+			SlipView3DVec16 normal = {(int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_X_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Y_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Z_INDEX]};
 			const int16_t normalAlongAxisQ14 =
 			    (int16_t)SlipView3D_ProjectColumn0(&SlipRaceCollision_relativeMatrix, normal);
 
 			if (normalAlongAxisQ14 != 0 && normalAlongAxisQ14 > 0) {
-				uint32_t faceCommon = 0xffffffffu;
+				uint32_t faceCommon = UINT32_MAX;
 				uint32_t faceCombined = 0;
-				uint32_t remainingFaceCorners = 4u;
+				uint32_t remainingFaceCorners = SLIP_COLLISION_FACE_CORNER_COUNT;
 				int32_t *cornerIndexPointer = *face;
 				SlipRaceCollisionVertex *vertex = SlipRaceCollision_AllocateVertex();
 				SlipRaceCollisionVertex *const firstVertex = vertex;
@@ -1704,11 +1763,13 @@ void SlipRaceCollision_TestMinX(void) {
 					const int64_t intersectionTimeProduct =
 					    (int64_t)distanceToPlane * (int64_t)(int32_t)SlipRaceCollision_inverseVelocity;
 					const uint32_t productLow = (uint32_t)intersectionTimeProduct;
-					int32_t intersectionTime =
-					    (int32_t)((productLow >> 16) | ((uint32_t)((uint64_t)intersectionTimeProduct >> 32) << 16));
+					int32_t intersectionTime = (int32_t)((productLow >> SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT) |
+					                                     ((uint32_t)((uint64_t)intersectionTimeProduct >> 32)
+					                                      << (32 - SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT)));
 					uint32_t outcode;
 
-					intersectionTime = (int32_t)((uint32_t)intersectionTime + ((productLow >> 15) & 1u));
+					intersectionTime = (int32_t)((uint32_t)intersectionTime +
+					                             ((productLow >> (SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT - 1)) & 1u));
 					state->time = intersectionTime;
 					vertex->time = intersectionTime;
 					state->projectedZ =
@@ -1721,20 +1782,20 @@ void SlipRaceCollision_TestMinX(void) {
 					vertex->y = state->projectedY;
 					state->projectedX = bounds->minX;
 					vertex->x = bounds->minX;
-					state->flags |= 1u;
-					outcode = state->flags & 0x81u;
+					state->flags |= SLIP_COLLISION_CORNER_PROJECTED;
+					outcode = state->flags & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 					if (vertex->x < bounds->minX)
-						outcode |= 0x02u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 					if (vertex->x > bounds->maxX)
-						outcode |= 0x04u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 					if (vertex->y < bounds->minY)
-						outcode |= 0x08u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 					if (vertex->y > bounds->maxY)
-						outcode |= 0x10u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 					if (vertex->z < bounds->minZ)
-						outcode |= 0x20u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 					if (vertex->z > bounds->maxZ)
-						outcode |= 0x40u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 					vertex->outcode = outcode;
 					faceCombined |= outcode;
 					faceCommon &= outcode;
@@ -1749,7 +1810,8 @@ void SlipRaceCollision_TestMinX(void) {
 				} while (remainingFaceCorners != 0);
 				vertex->next = firstVertex;
 				firstVertex->previous = vertex;
-				if ((faceCommon & 0xfeu) == 0 && (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
+				if ((faceCommon & SLIP_COLLISION_OUTCODE_FACE_REJECT_MASK) == 0 &&
+				    (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
 					SlipRaceCollision_SelectContact();
 				}
 			}
@@ -1761,10 +1823,10 @@ void SlipRaceCollision_TestMinX(void) {
 }
 
 void SlipRaceCollision_TestMaxX(void) {
-	uint32_t commonFlags = 0xffffffffu;
-	uint32_t remainingCount = 8u;
+	uint32_t commonFlags = UINT32_MAX;
+	uint32_t remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	uint32_t cornerIndex = 0;
-	int32_t (*face)[8];
+	int32_t (*face)[SLIP_COLLISION_FACE_VALUE_COUNT];
 	SlipRaceCollisionBounds *const bounds = &SlipRaceCollision_sourceBounds;
 
 	if (SlipRaceCollision_deltaX >= 0)
@@ -1777,7 +1839,7 @@ void SlipRaceCollision_TestMaxX(void) {
 		state->originalY = SlipRaceCollision_corners[cornerIndex][1];
 		state->originalZ = SlipRaceCollision_corners[cornerIndex][2];
 		if (state->originalX < bounds->maxX)
-			flags = 0x80u;
+			flags = SLIP_COLLISION_OUTCODE_PLANE_SIDE;
 		state->flags = flags;
 		commonFlags &= flags;
 		++cornerIndex;
@@ -1785,7 +1847,7 @@ void SlipRaceCollision_TestMaxX(void) {
 	} while (remainingCount != 0);
 	if (commonFlags != 0)
 		return;
-	remainingCount = 8u;
+	remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	cornerIndex = 0;
 	do {
 		int32_t coordinate = SlipRaceCollision_cornerState[cornerIndex].originalX;
@@ -1801,22 +1863,24 @@ void SlipRaceCollision_TestMaxX(void) {
 		return;
 	{
 		const int32_t speedAlongAxis = -(int32_t)SlipRaceCollision_velocityX;
-		if (speedAlongAxis < 0x1c)
+		if (speedAlongAxis < SLIP_COLLISION_MINIMUM_AXIS_SPEED)
 			return;
-		SlipRaceCollision_inverseVelocity = 0x40000000u / (uint32_t)speedAlongAxis;
+		SlipRaceCollision_inverseVelocity = SLIP_COLLISION_RECIPROCAL_ONE / (uint32_t)speedAlongAxis;
 	}
 	face = SlipRaceCollision_faces;
-	remainingCount = 6u;
+	remainingCount = SLIP_COLLISION_BOX_FACE_COUNT;
 	do {
-		if ((*face)[4] != 0) {
-			SlipView3DVec16 normal = {(int16_t)(*face)[5], (int16_t)(*face)[6], (int16_t)(*face)[7]};
+		if ((*face)[SLIP_COLLISION_FACE_ENABLED_INDEX] != 0) {
+			SlipView3DVec16 normal = {(int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_X_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Y_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Z_INDEX]};
 			const int16_t normalAlongAxisQ14 =
 			    (int16_t)SlipView3D_ProjectColumn0(&SlipRaceCollision_relativeMatrix, normal);
 
 			if (normalAlongAxisQ14 < 0) {
-				uint32_t faceCommon = 0xffffffffu;
+				uint32_t faceCommon = UINT32_MAX;
 				uint32_t faceCombined = 0;
-				uint32_t remainingFaceCorners = 4u;
+				uint32_t remainingFaceCorners = SLIP_COLLISION_FACE_CORNER_COUNT;
 				int32_t *cornerIndexPointer = *face;
 				SlipRaceCollisionVertex *vertex = SlipRaceCollision_AllocateVertex();
 				SlipRaceCollisionVertex *const firstVertex = vertex;
@@ -1829,11 +1893,13 @@ void SlipRaceCollision_TestMaxX(void) {
 					const int64_t intersectionTimeProduct =
 					    (int64_t)distanceToPlane * (int64_t)(int32_t)SlipRaceCollision_inverseVelocity;
 					const uint32_t productLow = (uint32_t)intersectionTimeProduct;
-					int32_t intersectionTime =
-					    (int32_t)((productLow >> 16) | ((uint32_t)((uint64_t)intersectionTimeProduct >> 32) << 16));
+					int32_t intersectionTime = (int32_t)((productLow >> SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT) |
+					                                     ((uint32_t)((uint64_t)intersectionTimeProduct >> 32)
+					                                      << (32 - SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT)));
 					uint32_t outcode;
 
-					intersectionTime = (int32_t)((uint32_t)intersectionTime + ((productLow >> 15) & 1u));
+					intersectionTime = (int32_t)((uint32_t)intersectionTime +
+					                             ((productLow >> (SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT - 1)) & 1u));
 					state->time = intersectionTime;
 					vertex->time = intersectionTime;
 					state->projectedZ =
@@ -1846,20 +1912,20 @@ void SlipRaceCollision_TestMaxX(void) {
 					vertex->y = state->projectedY;
 					state->projectedX = bounds->maxX;
 					vertex->x = bounds->maxX;
-					state->flags |= 1u;
-					outcode = state->flags & 0x81u;
+					state->flags |= SLIP_COLLISION_CORNER_PROJECTED;
+					outcode = state->flags & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 					if (vertex->x < bounds->minX)
-						outcode |= 0x02u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 					if (vertex->x > bounds->maxX)
-						outcode |= 0x04u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 					if (vertex->y < bounds->minY)
-						outcode |= 0x08u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 					if (vertex->y > bounds->maxY)
-						outcode |= 0x10u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 					if (vertex->z < bounds->minZ)
-						outcode |= 0x20u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 					if (vertex->z > bounds->maxZ)
-						outcode |= 0x40u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 					vertex->outcode = outcode;
 					faceCombined |= outcode;
 					faceCommon &= outcode;
@@ -1874,7 +1940,8 @@ void SlipRaceCollision_TestMaxX(void) {
 				} while (remainingFaceCorners != 0);
 				vertex->next = firstVertex;
 				firstVertex->previous = vertex;
-				if ((faceCommon & 0xfeu) == 0 && (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
+				if ((faceCommon & SLIP_COLLISION_OUTCODE_FACE_REJECT_MASK) == 0 &&
+				    (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
 					SlipRaceCollision_SelectContact();
 				}
 			}
@@ -1886,10 +1953,10 @@ void SlipRaceCollision_TestMaxX(void) {
 }
 
 void SlipRaceCollision_TestMinY(void) {
-	uint32_t commonFlags = 0xffffffffu;
-	uint32_t remainingCount = 8u;
+	uint32_t commonFlags = UINT32_MAX;
+	uint32_t remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	uint32_t cornerIndex = 0;
-	int32_t (*face)[8];
+	int32_t (*face)[SLIP_COLLISION_FACE_VALUE_COUNT];
 	SlipRaceCollisionBounds *const bounds = &SlipRaceCollision_sourceBounds;
 
 	if (SlipRaceCollision_deltaY == 0 || SlipRaceCollision_deltaY < 0)
@@ -1902,7 +1969,7 @@ void SlipRaceCollision_TestMinY(void) {
 		state->originalY = SlipRaceCollision_corners[cornerIndex][1];
 		state->originalZ = SlipRaceCollision_corners[cornerIndex][2];
 		if (state->originalY > bounds->minY)
-			flags = 0x80u;
+			flags = SLIP_COLLISION_OUTCODE_PLANE_SIDE;
 		state->flags = flags;
 		commonFlags &= flags;
 		++cornerIndex;
@@ -1910,7 +1977,7 @@ void SlipRaceCollision_TestMinY(void) {
 	} while (remainingCount != 0);
 	if (commonFlags != 0)
 		return;
-	remainingCount = 8u;
+	remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	cornerIndex = 0;
 	do {
 		int32_t coordinate = SlipRaceCollision_cornerState[cornerIndex].originalY;
@@ -1924,21 +1991,23 @@ void SlipRaceCollision_TestMinY(void) {
 	} while (remainingCount != 0);
 	if (remainingCount == 0)
 		return;
-	if ((uint16_t)SlipRaceCollision_velocityY < 0x1cu)
+	if ((uint16_t)SlipRaceCollision_velocityY < SLIP_COLLISION_MINIMUM_AXIS_SPEED)
 		return;
-	SlipRaceCollision_inverseVelocity = 0x40000000u / (uint16_t)SlipRaceCollision_velocityY;
+	SlipRaceCollision_inverseVelocity = SLIP_COLLISION_RECIPROCAL_ONE / (uint16_t)SlipRaceCollision_velocityY;
 	face = SlipRaceCollision_faces;
-	remainingCount = 6u;
+	remainingCount = SLIP_COLLISION_BOX_FACE_COUNT;
 	do {
-		if ((*face)[4] != 0) {
-			SlipView3DVec16 normal = {(int16_t)(*face)[5], (int16_t)(*face)[6], (int16_t)(*face)[7]};
+		if ((*face)[SLIP_COLLISION_FACE_ENABLED_INDEX] != 0) {
+			SlipView3DVec16 normal = {(int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_X_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Y_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Z_INDEX]};
 			const int16_t normalAlongAxisQ14 =
 			    (int16_t)SlipView3D_ProjectColumn1(&SlipRaceCollision_relativeMatrix, normal);
 
 			if (normalAlongAxisQ14 != 0 && normalAlongAxisQ14 > 0) {
-				uint32_t faceCommon = 0xffffffffu;
+				uint32_t faceCommon = UINT32_MAX;
 				uint32_t faceCombined = 0;
-				uint32_t remainingFaceCorners = 4u;
+				uint32_t remainingFaceCorners = SLIP_COLLISION_FACE_CORNER_COUNT;
 				int32_t *cornerIndexPointer = *face;
 				SlipRaceCollisionVertex *vertex = SlipRaceCollision_AllocateVertex();
 				SlipRaceCollisionVertex *const firstVertex = vertex;
@@ -1952,11 +2021,13 @@ void SlipRaceCollision_TestMinY(void) {
 					const int64_t intersectionTimeProduct =
 					    (int64_t)distanceToPlane * (int64_t)(int32_t)SlipRaceCollision_inverseVelocity;
 					const uint32_t productLow = (uint32_t)intersectionTimeProduct;
-					int32_t intersectionTime =
-					    (int32_t)((productLow >> 16) | ((uint32_t)((uint64_t)intersectionTimeProduct >> 32) << 16));
+					int32_t intersectionTime = (int32_t)((productLow >> SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT) |
+					                                     ((uint32_t)((uint64_t)intersectionTimeProduct >> 32)
+					                                      << (32 - SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT)));
 					uint32_t outcode;
 
-					intersectionTime = (int32_t)((uint32_t)intersectionTime + ((productLow >> 15) & 1u));
+					intersectionTime = (int32_t)((uint32_t)intersectionTime +
+					                             ((productLow >> (SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT - 1)) & 1u));
 					state->time = intersectionTime;
 					vertex->time = intersectionTime;
 					state->projectedZ =
@@ -1969,20 +2040,20 @@ void SlipRaceCollision_TestMinY(void) {
 					vertex->x = state->projectedX;
 					state->projectedY = bounds->minY;
 					vertex->y = bounds->minY;
-					state->flags |= 1u;
-					outcode = state->flags & 0x81u;
+					state->flags |= SLIP_COLLISION_CORNER_PROJECTED;
+					outcode = state->flags & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 					if (vertex->x < bounds->minX)
-						outcode |= 0x02u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 					if (vertex->x > bounds->maxX)
-						outcode |= 0x04u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 					if (vertex->y < bounds->minY)
-						outcode |= 0x08u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 					if (vertex->y > bounds->maxY)
-						outcode |= 0x10u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 					if (vertex->z < bounds->minZ)
-						outcode |= 0x20u;
+						outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 					if (vertex->z > bounds->maxZ)
-						outcode |= 0x40u;
+						outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 					vertex->outcode = outcode;
 					faceCombined |= outcode;
 					faceCommon &= outcode;
@@ -1997,7 +2068,8 @@ void SlipRaceCollision_TestMinY(void) {
 				} while (remainingFaceCorners != 0);
 				vertex->next = firstVertex;
 				firstVertex->previous = vertex;
-				if ((faceCommon & 0xfeu) == 0 && (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
+				if ((faceCommon & SLIP_COLLISION_OUTCODE_FACE_REJECT_MASK) == 0 &&
+				    (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
 					SlipRaceCollision_SelectContact();
 				}
 			}
@@ -2009,10 +2081,10 @@ void SlipRaceCollision_TestMinY(void) {
 }
 
 void SlipRaceCollision_TestMaxY(void) {
-	uint32_t commonFlags = 0xffffffffu;
-	uint32_t remainingCount = 8u;
+	uint32_t commonFlags = UINT32_MAX;
+	uint32_t remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	uint32_t cornerIndex = 0;
-	int32_t (*face)[8];
+	int32_t (*face)[SLIP_COLLISION_FACE_VALUE_COUNT];
 	SlipRaceCollisionBounds *const bounds = &SlipRaceCollision_sourceBounds;
 
 	if (SlipRaceCollision_deltaY >= 0)
@@ -2025,7 +2097,7 @@ void SlipRaceCollision_TestMaxY(void) {
 		state->originalY = SlipRaceCollision_corners[cornerIndex][1];
 		state->originalZ = SlipRaceCollision_corners[cornerIndex][2];
 		if (state->originalY < bounds->maxY)
-			flags = 0x80u;
+			flags = SLIP_COLLISION_OUTCODE_PLANE_SIDE;
 		state->flags = flags;
 		commonFlags &= flags;
 		++cornerIndex;
@@ -2033,7 +2105,7 @@ void SlipRaceCollision_TestMaxY(void) {
 	} while (remainingCount != 0);
 	if (commonFlags != 0)
 		return;
-	remainingCount = 8u;
+	remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
 	cornerIndex = 0;
 	do {
 		int32_t coordinate = SlipRaceCollision_cornerState[cornerIndex].originalY;
@@ -2049,22 +2121,24 @@ void SlipRaceCollision_TestMaxY(void) {
 		return;
 	{
 		const int32_t speedAlongAxis = -(int32_t)SlipRaceCollision_velocityY;
-		if (speedAlongAxis < 0x1c)
+		if (speedAlongAxis < SLIP_COLLISION_MINIMUM_AXIS_SPEED)
 			return;
-		SlipRaceCollision_inverseVelocity = 0x40000000u / (uint32_t)speedAlongAxis;
+		SlipRaceCollision_inverseVelocity = SLIP_COLLISION_RECIPROCAL_ONE / (uint32_t)speedAlongAxis;
 	}
 	face = SlipRaceCollision_faces;
-	remainingCount = 6u;
+	remainingCount = SLIP_COLLISION_BOX_FACE_COUNT;
 	do {
-		if ((*face)[4] != 0) {
-			SlipView3DVec16 normal = {(int16_t)(*face)[5], (int16_t)(*face)[6], (int16_t)(*face)[7]};
+		if ((*face)[SLIP_COLLISION_FACE_ENABLED_INDEX] != 0) {
+			SlipView3DVec16 normal = {(int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_X_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Y_INDEX],
+			                          (int16_t)(*face)[SLIP_COLLISION_FACE_NORMAL_Z_INDEX]};
 			const int16_t normalAlongAxisQ14 =
 			    (int16_t)SlipView3D_ProjectColumn1(&SlipRaceCollision_relativeMatrix, normal);
 
 			if (normalAlongAxisQ14 < 0) {
-				uint32_t faceCommon = 0xffffffffu;
+				uint32_t faceCommon = UINT32_MAX;
 				uint32_t faceCombined = 0;
-				uint32_t remainingFaceCorners = 4u;
+				uint32_t remainingFaceCorners = SLIP_COLLISION_FACE_CORNER_COUNT;
 				int32_t *cornerIndexPointer = *face;
 				SlipRaceCollisionVertex *vertex = SlipRaceCollision_AllocateVertex();
 				SlipRaceCollisionVertex *const firstVertex = vertex;
@@ -2075,15 +2149,18 @@ void SlipRaceCollision_TestMaxY(void) {
 					SlipRaceCollisionCornerState *const state = &SlipRaceCollision_cornerState[stateIndex];
 					uint32_t outcode;
 
-					if ((state->flags & 1u) == 0) {
+					if ((state->flags & SLIP_COLLISION_CORNER_PROJECTED) == 0) {
 						const int32_t distanceToPlane = (int32_t)((uint32_t)state->originalY - (uint32_t)bounds->maxY);
 						const int64_t intersectionTimeProduct =
 						    (int64_t)distanceToPlane * (int64_t)(int32_t)SlipRaceCollision_inverseVelocity;
 						const uint32_t productLow = (uint32_t)intersectionTimeProduct;
-						int32_t intersectionTime =
-						    (int32_t)((productLow >> 16) | ((uint32_t)((uint64_t)intersectionTimeProduct >> 32) << 16));
+						int32_t intersectionTime = (int32_t)((productLow >> SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT) |
+						                                     ((uint32_t)((uint64_t)intersectionTimeProduct >> 32)
+						                                      << (32 - SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT)));
 
-						intersectionTime = (int32_t)((uint32_t)intersectionTime + ((productLow >> 15) & 1u));
+						intersectionTime =
+						    (int32_t)((uint32_t)intersectionTime +
+						              ((productLow >> (SLIP_COLLISION_RECIPROCAL_TO_Q14_SHIFT - 1)) & 1u));
 						state->time = intersectionTime;
 						vertex->time = intersectionTime;
 						state->projectedZ =
@@ -2098,17 +2175,17 @@ void SlipRaceCollision_TestMaxY(void) {
 						vertex->y = bounds->maxY;
 						outcode = 1u;
 						if (vertex->x < bounds->minX)
-							outcode |= 0x02u;
+							outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 						if (vertex->x > bounds->maxX)
-							outcode |= 0x04u;
+							outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 						if (vertex->y < bounds->minY)
-							outcode |= 0x08u;
+							outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 						if (vertex->y > bounds->maxY)
-							outcode |= 0x10u;
+							outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 						if (vertex->z < bounds->minZ)
-							outcode |= 0x20u;
+							outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 						if (vertex->z > bounds->maxZ)
-							outcode |= 0x40u;
+							outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 						vertex->outcode = outcode;
 					} else {
 						SlipRaceCollision_CopyVertex((const SlipRaceCollisionCopySource *)state, vertex);
@@ -2127,7 +2204,8 @@ void SlipRaceCollision_TestMaxY(void) {
 				} while (remainingFaceCorners != 0);
 				vertex->next = firstVertex;
 				firstVertex->previous = vertex;
-				if ((faceCommon & 0xfeu) == 0 && (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
+				if ((faceCommon & SLIP_COLLISION_OUTCODE_FACE_REJECT_MASK) == 0 &&
+				    (faceCombined == 0 || !SlipRaceCollision_ClipPolygon(faceCombined))) {
 					SlipRaceCollision_SelectContact();
 				}
 			}
@@ -2185,7 +2263,7 @@ static uint32_t SlipRaceCollision_IntersectionFractionQ30(int32_t target, int32_
 		denominator = 0u - denominator;
 		numerator = 0u - numerator;
 	}
-	return (uint32_t)(((uint64_t)numerator << 30) / denominator);
+	return (uint32_t)(((uint64_t)numerator << SLIP_COLLISION_RECIPROCAL_FRACTION_BITS) / denominator);
 }
 
 void SlipRaceCollision_InterpolateX(const SlipRaceCollisionVertex *insideVertex,
@@ -2205,19 +2283,19 @@ void SlipRaceCollision_InterpolateX(const SlipRaceCollisionVertex *insideVertex,
 	                  (int32_t)((uint32_t)insideVertex->z - (uint32_t)intersectionVertex->z), fraction));
 	SlipRaceCollision_InterpolateTime(insideVertex, intersectionVertex, fraction);
 	intersectionVertex->x = planeX;
-	outcode = intersectionVertex->outcode & 0x81u;
+	outcode = intersectionVertex->outcode & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 	if (intersectionVertex->x < bounds->minX)
-		outcode |= 0x02u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 	if (intersectionVertex->x > bounds->maxX)
-		outcode |= 0x04u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 	if (intersectionVertex->y < bounds->minY)
-		outcode |= 0x08u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 	if (intersectionVertex->y > bounds->maxY)
-		outcode |= 0x10u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 	if (intersectionVertex->z < bounds->minZ)
-		outcode |= 0x20u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 	if (intersectionVertex->z > bounds->maxZ)
-		outcode |= 0x40u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 	intersectionVertex->outcode = outcode;
 }
 
@@ -2238,19 +2316,19 @@ void SlipRaceCollision_InterpolateY(const SlipRaceCollisionVertex *insideVertex,
 	                  (int32_t)((uint32_t)insideVertex->z - (uint32_t)intersectionVertex->z), fraction));
 	SlipRaceCollision_InterpolateTime(insideVertex, intersectionVertex, fraction);
 	intersectionVertex->y = planeY;
-	outcode = intersectionVertex->outcode & 0x81u;
+	outcode = intersectionVertex->outcode & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 	if (intersectionVertex->x < bounds->minX)
-		outcode |= 0x02u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 	if (intersectionVertex->x > bounds->maxX)
-		outcode |= 0x04u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 	if (intersectionVertex->y < bounds->minY)
-		outcode |= 0x08u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 	if (intersectionVertex->y > bounds->maxY)
-		outcode |= 0x10u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 	if (intersectionVertex->z < bounds->minZ)
-		outcode |= 0x20u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 	if (intersectionVertex->z > bounds->maxZ)
-		outcode |= 0x40u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 	intersectionVertex->outcode = outcode;
 }
 
@@ -2271,25 +2349,25 @@ void SlipRaceCollision_InterpolateZ(const SlipRaceCollisionVertex *insideVertex,
 	                  (int32_t)((uint32_t)insideVertex->y - (uint32_t)intersectionVertex->y), fraction));
 	SlipRaceCollision_InterpolateTime(insideVertex, intersectionVertex, fraction);
 	intersectionVertex->z = planeZ;
-	outcode = intersectionVertex->outcode & 0x81u;
+	outcode = intersectionVertex->outcode & SLIP_COLLISION_OUTCODE_PRESERVED_MASK;
 	if (intersectionVertex->x < bounds->minX)
-		outcode |= 0x02u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 	if (intersectionVertex->x > bounds->maxX)
-		outcode |= 0x04u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 	if (intersectionVertex->y < bounds->minY)
-		outcode |= 0x08u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 	if (intersectionVertex->y > bounds->maxY)
-		outcode |= 0x10u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 	if (intersectionVertex->z < bounds->minZ)
-		outcode |= 0x20u;
+		outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 	if (intersectionVertex->z > bounds->maxZ)
-		outcode |= 0x40u;
+		outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 	intersectionVertex->outcode = outcode;
 }
 
 bool SlipRaceCollision_RejectMovingBox(uint32_t *commonOutcode) {
-	uint32_t remainingCount = 8u;
-	uint32_t sharedOutcode = 0xffffffffu;
+	uint32_t remainingCount = SLIP_TRACK_BOUNDING_CORNER_COUNT;
+	uint32_t sharedOutcode = UINT32_MAX;
 	const int32_t (*corner)[3] = SlipRaceCollision_corners;
 	SlipRaceCollisionBounds *const bounds = &SlipRaceCollision_sourceBounds;
 
@@ -2298,19 +2376,19 @@ bool SlipRaceCollision_RejectMovingBox(uint32_t *commonOutcode) {
 		int32_t coordinate = (*corner)[0];
 
 		if (coordinate < bounds->minX)
-			outcode |= 0x02u;
+			outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_X;
 		if (coordinate > bounds->maxX)
-			outcode |= 0x04u;
+			outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_X;
 		coordinate = (*corner)[1];
 		if (coordinate < bounds->minY)
-			outcode |= 0x08u;
+			outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Y;
 		if (coordinate > bounds->maxY)
-			outcode |= 0x10u;
+			outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Y;
 		coordinate = (*corner)[2];
 		if (coordinate < bounds->minZ)
-			outcode |= 0x20u;
+			outcode |= SLIP_COLLISION_OUTCODE_MINIMUM_Z;
 		if (coordinate > bounds->maxZ)
-			outcode |= 0x40u;
+			outcode |= SLIP_COLLISION_OUTCODE_MAXIMUM_Z;
 		sharedOutcode &= outcode;
 		++corner;
 		--remainingCount;
@@ -2318,25 +2396,25 @@ bool SlipRaceCollision_RejectMovingBox(uint32_t *commonOutcode) {
 	*commonOutcode = sharedOutcode;
 	if (SlipRaceCollision_deltaX != 0) {
 		if (SlipRaceCollision_deltaX > 0) {
-			if ((sharedOutcode & 0x04u) != 0)
+			if ((sharedOutcode & SLIP_COLLISION_OUTCODE_MAXIMUM_X) != 0)
 				return true;
-		} else if ((sharedOutcode & 0x02u) != 0) {
+		} else if ((sharedOutcode & SLIP_COLLISION_OUTCODE_MINIMUM_X) != 0) {
 			return true;
 		}
 	}
 	if (SlipRaceCollision_deltaY != 0) {
 		if (SlipRaceCollision_deltaY > 0) {
-			if ((sharedOutcode & 0x10u) != 0)
+			if ((sharedOutcode & SLIP_COLLISION_OUTCODE_MAXIMUM_Y) != 0)
 				return true;
-		} else if ((sharedOutcode & 0x08u) != 0) {
+		} else if ((sharedOutcode & SLIP_COLLISION_OUTCODE_MINIMUM_Y) != 0) {
 			return true;
 		}
 	}
 	if (SlipRaceCollision_deltaZ != 0) {
 		if (SlipRaceCollision_deltaZ > 0) {
-			if ((sharedOutcode & 0x40u) != 0)
+			if ((sharedOutcode & SLIP_COLLISION_OUTCODE_MAXIMUM_Z) != 0)
 				return true;
-		} else if ((sharedOutcode & 0x20u) != 0) {
+		} else if ((sharedOutcode & SLIP_COLLISION_OUTCODE_MINIMUM_Z) != 0) {
 			return true;
 		}
 	}
@@ -2464,49 +2542,55 @@ bool SlipRaceCollision_TestBodies(void) {
 	    (uint16_t)SlipRaceCollision_velocityX, (uint16_t)SlipRaceCollision_velocityY,
 	    (uint16_t)SlipRaceCollision_velocityZ, (uint16_t)SlipRaceCollision_relativeMatrix.m[6],
 	    (uint16_t)SlipRaceCollision_relativeMatrix.m[7], (uint16_t)SlipRaceCollision_relativeMatrix.m[8], NULL);
-	if ((int16_t)(uint16_t)dot >= 0x3ffe) {
-		SlipRaceCollision_faces[0][4] = -1;
-		SlipRaceCollision_faces[1][4] = 0;
-		SlipRaceCollision_faces[2][4] = 0;
-		SlipRaceCollision_faces[3][4] = 0;
-		SlipRaceCollision_faces[4][4] = 0;
-		SlipRaceCollision_faces[5][4] = 0;
+	if ((int16_t)(uint16_t)dot >= SLIP_COLLISION_FORWARD_FACE_ALIGNMENT_Q14) {
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_POSITIVE_Z][SLIP_COLLISION_FACE_ENABLED_INDEX] = -1;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_NEGATIVE_Z][SLIP_COLLISION_FACE_ENABLED_INDEX] = 0;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_POSITIVE_X][SLIP_COLLISION_FACE_ENABLED_INDEX] = 0;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_NEGATIVE_X][SLIP_COLLISION_FACE_ENABLED_INDEX] = 0;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_POSITIVE_Y][SLIP_COLLISION_FACE_ENABLED_INDEX] = 0;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_NEGATIVE_Y][SLIP_COLLISION_FACE_ENABLED_INDEX] = 0;
 	} else {
 		oppositeFaceEnabled = 0;
-		forwardFaceEnabled = 0xffffffffu;
+		forwardFaceEnabled = UINT32_MAX;
 		if ((int16_t)(uint16_t)dot < 0) {
 			const uint32_t exchange = forwardFaceEnabled;
 			forwardFaceEnabled = oppositeFaceEnabled;
 			oppositeFaceEnabled = exchange;
 		}
-		SlipRaceCollision_faces[0][4] = (int32_t)forwardFaceEnabled;
-		SlipRaceCollision_faces[1][4] = (int32_t)oppositeFaceEnabled;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_POSITIVE_Z][SLIP_COLLISION_FACE_ENABLED_INDEX] =
+		    (int32_t)forwardFaceEnabled;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_NEGATIVE_Z][SLIP_COLLISION_FACE_ENABLED_INDEX] =
+		    (int32_t)oppositeFaceEnabled;
 		dot = SlipView3D_DotProductQ14(
 		    (uint16_t)SlipRaceCollision_velocityX, (uint16_t)SlipRaceCollision_velocityY,
 		    (uint16_t)SlipRaceCollision_velocityZ, (uint16_t)SlipRaceCollision_relativeMatrix.m[0],
 		    (uint16_t)SlipRaceCollision_relativeMatrix.m[1], (uint16_t)SlipRaceCollision_relativeMatrix.m[2], NULL);
 		oppositeFaceEnabled = 0;
-		forwardFaceEnabled = 0xffffffffu;
+		forwardFaceEnabled = UINT32_MAX;
 		if ((int16_t)(uint16_t)dot < 0) {
 			const uint32_t exchange = forwardFaceEnabled;
 			forwardFaceEnabled = oppositeFaceEnabled;
 			oppositeFaceEnabled = exchange;
 		}
-		SlipRaceCollision_faces[2][4] = (int32_t)forwardFaceEnabled;
-		SlipRaceCollision_faces[3][4] = (int32_t)oppositeFaceEnabled;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_POSITIVE_X][SLIP_COLLISION_FACE_ENABLED_INDEX] =
+		    (int32_t)forwardFaceEnabled;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_NEGATIVE_X][SLIP_COLLISION_FACE_ENABLED_INDEX] =
+		    (int32_t)oppositeFaceEnabled;
 		dot = SlipView3D_DotProductQ14(
 		    (uint16_t)SlipRaceCollision_velocityX, (uint16_t)SlipRaceCollision_velocityY,
 		    (uint16_t)SlipRaceCollision_velocityZ, (uint16_t)SlipRaceCollision_relativeMatrix.m[3],
 		    (uint16_t)SlipRaceCollision_relativeMatrix.m[4], (uint16_t)SlipRaceCollision_relativeMatrix.m[5], NULL);
 		oppositeFaceEnabled = 0;
-		forwardFaceEnabled = 0xffffffffu;
+		forwardFaceEnabled = UINT32_MAX;
 		if ((int16_t)(uint16_t)dot < 0) {
 			const uint32_t exchange = forwardFaceEnabled;
 			forwardFaceEnabled = oppositeFaceEnabled;
 			oppositeFaceEnabled = exchange;
 		}
-		SlipRaceCollision_faces[4][4] = (int32_t)forwardFaceEnabled;
-		SlipRaceCollision_faces[5][4] = (int32_t)oppositeFaceEnabled;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_POSITIVE_Y][SLIP_COLLISION_FACE_ENABLED_INDEX] =
+		    (int32_t)forwardFaceEnabled;
+		SlipRaceCollision_faces[SLIP_COLLISION_FACE_NEGATIVE_Y][SLIP_COLLISION_FACE_ENABLED_INDEX] =
+		    (int32_t)oppositeFaceEnabled;
 	}
 	SlipRaceCollision_contact.time = (int32_t)SlipRaceCollision_velocityLength;
 	SlipRaceCollision_BuildBodyCorners(
@@ -2529,21 +2613,22 @@ void SlipRaceCollision_RecordContact(uint32_t otherObjectHighBits) {
 
 	if (contactDistance >= SlipRaceCollision_velocityLength)
 		return;
-	distanceDividendQ30 = (uint64_t)contactDistance << 30;
+	distanceDividendQ30 = (uint64_t)contactDistance << SLIP_COLLISION_RECIPROCAL_FRACTION_BITS;
 	contactFraction = (uint32_t)(distanceDividendQ30 / SlipRaceCollision_velocityLength);
-	contactFraction >>= 16;
+	contactFraction >>= SLIP_COLLISION_RECIPROCAL_FRACTION_BITS - SLIP_Q14_FRACTION_BITS;
 	frameTimeProduct = (uint32_t)(uint16_t)contactFraction * (uint16_t)SlipRaceCollision_frameStep;
-	contactTime = (uint16_t)(((uint16_t)frameTimeProduct >> 14) | ((uint16_t)(frameTimeProduct >> 16) << 2));
+	contactTime = (uint16_t)(((uint16_t)frameTimeProduct >> SLIP_Q14_FRACTION_BITS) |
+	                         ((uint16_t)(frameTimeProduct >> 16) << SLIP_Q14_WORD_HIGH_SHIFT));
 	if (contactTime >= SlipRaceCollision_firstTime)
 		return;
 	SlipRaceCollision_firstTime = contactTime;
 	firstBody = (SlipRaceCollisionBody *)(void *)SlipRaceCollision_sourceBody;
 	secondBody = (SlipRaceCollisionBody *)(void *)SlipRaceCollision_targetBody;
 	firstBody->contactTime = contactTime;
-	firstBody->otherObject = (otherObjectHighBits & 0xffff0000u) | secondBody->objectHandle;
+	firstBody->otherObject = (otherObjectHighBits & SLIP_COLLISION_PACKED_UPPER_WORD_MASK) | secondBody->objectHandle;
 	firstBody->contactType = SLIP_COLLISION_CONTACT_BODY;
 	secondBody->contactTime = contactTime;
-	secondBody->otherObject = (otherObjectHighBits & 0xffff0000u) | firstBody->objectHandle;
+	secondBody->otherObject = (otherObjectHighBits & SLIP_COLLISION_PACKED_UPPER_WORD_MASK) | firstBody->objectHandle;
 	secondBody->contactType = SLIP_COLLISION_CONTACT_BODY;
 	SlipRaceCollision_BuildContactResponse();
 }
@@ -2576,8 +2661,8 @@ void SlipRaceCollision_BuildContactResponse(void) {
 	contactTime = firstBody->contactTime;
 	speed = SlipObject_Speed(SlipRaceCollision_objectTable, object);
 	timeSpeedProduct = (int64_t)(int32_t)contactTime * speed;
-	travelDistance =
-	    (int32_t)(((uint32_t)timeSpeedProduct >> 14) | ((uint32_t)((uint64_t)timeSpeedProduct >> 32) << 18));
+	travelDistance = (int32_t)(((uint32_t)timeSpeedProduct >> SLIP_Q14_FRACTION_BITS) |
+	                           ((uint32_t)((uint64_t)timeSpeedProduct >> 32) << SLIP_Q14_DWORD_HIGH_SHIFT));
 	direction = SlipObject_Direction(SlipRaceCollision_objectTable, object);
 	scaled = SlipView3D_ScaleVector(direction.directionXQ14, direction.directionYQ14, direction.directionZQ14,
 	                                travelDistance);
@@ -2595,8 +2680,8 @@ void SlipRaceCollision_BuildContactResponse(void) {
 	contactTime = secondBody->contactTime;
 	speed = SlipObject_Speed(SlipRaceCollision_objectTable, object);
 	timeSpeedProduct = (int64_t)(int32_t)contactTime * speed;
-	travelDistance =
-	    (int32_t)(((uint32_t)timeSpeedProduct >> 14) | ((uint32_t)((uint64_t)timeSpeedProduct >> 32) << 18));
+	travelDistance = (int32_t)(((uint32_t)timeSpeedProduct >> SLIP_Q14_FRACTION_BITS) |
+	                           ((uint32_t)((uint64_t)timeSpeedProduct >> 32) << SLIP_Q14_DWORD_HIGH_SHIFT));
 	travelDistance = (int32_t)(0u - (uint32_t)travelDistance);
 	direction = SlipObject_Direction(SlipRaceCollision_objectTable, object);
 	scaled = SlipView3D_ScaleVector(direction.directionXQ14, direction.directionYQ14, direction.directionZQ14,
@@ -2634,7 +2719,7 @@ void SlipRaceCollision_BuildBodyCorners(SlipView3DVec32 translation, const SlipV
 	SlipRaceCollision_targetBounds.maxX = body->maximumBounds.x;
 	SlipRaceCollision_targetBounds.maxY = body->maximumBounds.y;
 	SlipRaceCollision_targetBounds.maxZ = body->maximumBounds.z;
-	if ((int32_t)body->radius > 0x4000) {
+	if ((int32_t)body->radius > SLIP_COLLISION_FULL_BOX_MINIMUM_RADIUS) {
 		SlipView3D_BuildBoxCorners(matrix, boundsAndCorners, translation);
 	} else {
 		SlipView3D_BuildBoxCornersThunk(matrix, boundsAndCorners, translation);

@@ -1,16 +1,17 @@
+#include "string_tags.h"
 #include "vehicle_select.h"
 
 void SlipVehicleSelection_Setup(SlipVehicleSelection *state, SlipVehicleSelectionAssets *assets,
                                 SlipStringTableState *strings, uint16_t language,
                                 const SlipStringTableResources *resources, const SlipVehicleSelectionErrors *errors) {
-	state->titleTag = 0x5449544c;
+	state->titleTag = SLIP_STRING_TITLE;
 	state->titleDelay = 0;
 	SlipStringTable_SetLanguage(strings, (uint8_t)language);
 	SlipStringTableSlot *slot;
 	if (!SlipStringTable_Load(strings, "CH_TEAM ", resources, &slot))
 		errors->resourceError(errors->context);
 	assets->strings = slot;
-	for (unsigned i = 0; i < 10; ++i) {
+	for (unsigned i = 0; i < SLIP_RACE_RACER_COUNT; ++i) {
 		state->doors[i].frame = 0;
 		state->doors[i].redrawPasses = 0;
 	}

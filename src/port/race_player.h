@@ -1,12 +1,24 @@
 #ifndef SLIPSTREAM5000_RACE_PLAYER_H
 #define SLIPSTREAM5000_RACE_PLAYER_H
 
+#include "race_limits.h"
 #include "sound_effects.h"
 #include "track_world.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+enum { SLIP_RACE_TURBO_UPGRADE_COUNT = 5, SLIP_RACE_BEAM_HIT_FLAG = 0x80000000u };
+
+typedef enum SlipRaceBranchState {
+	SLIP_RACE_BRANCH_NO_EXIT = 0,
+	SLIP_RACE_BRANCH_LINKED_EXIT = 1,
+	SLIP_RACE_BRANCH_ROUTE_CHOICE = 2,
+	SLIP_RACE_BRANCH_REFUEL_CHOICE = 3
+} SlipRaceBranchState;
+
+enum { SLIP_RACE_POSITION_MASK = 0x7fff, SLIP_RACE_POSITION_FINISHED_FLAG = 0x8000 };
 
 enum {
 	SLIP_CONTROL_LEFT = 1u,
@@ -55,11 +67,37 @@ uint32_t SlipRacePlayer_MiniMinesEvent(uint32_t eventCode, uint32_t eventPayload
 
 typedef void (*SlipRaceWeaponFireCallback)(uint16_t shooterObject, uint16_t targetObject);
 
-enum { SLIP_OBJECT_FLAG_PROJECTILE = 2u };
+enum { SLIP_OBJECT_FLAG_BONUS = 1u, SLIP_OBJECT_FLAG_PROJECTILE = 2u, SLIP_OBJECT_FLAG_RACER = 4u };
+
+enum { SLIP_RACE_WEAPON_MUZZLE_CENTER = 0, SLIP_RACE_WEAPON_MUZZLE_RIGHT = 1, SLIP_RACE_WEAPON_MUZZLE_LEFT = 2 };
+
+/* Garage system bits follow the Charger, Targetter, Loader item order. */
+enum { SLIP_RACE_POWERUP_RAPID_WEAPONS = 1u, SLIP_RACE_POWERUP_TARGETTER = 2u, SLIP_RACE_POWERUP_LOADER = 4u };
+
+/* Weapon IDs index the record table; selected slots index per-player charges. */
+enum {
+	SLIP_RACE_WEAPON_BLASTER = 0,
+	SLIP_RACE_WEAPON_DISRUPTER = 1,
+	SLIP_RACE_WEAPON_FRAG = 2,
+	SLIP_RACE_WEAPON_SUPER_FRAG = 3,
+	SLIP_RACE_WEAPON_SEEKER = 4,
+	SLIP_RACE_WEAPON_SUPER_SEEKER = 5,
+	SLIP_RACE_WEAPON_AMBLER = 6,
+	SLIP_RACE_WEAPON_SCRAMBLER = 7,
+	SLIP_RACE_WEAPON_HYPER_NEURO = 8,
+	SLIP_RACE_WEAPON_SMOKER = 9,
+	SLIP_RACE_WEAPON_MINI_MINES = 10,
+	SLIP_RACE_WEAPON_BOMBER = 11,
+	SLIP_RACE_WEAPON_COUNT = SLIP_RACE_WEAPON_BOMBER + 1,
+	SLIP_RACE_WEAPON_NAME_BYTES = 16,
+	SLIP_RACE_WEAPON_LABEL_BYTES = 24,
+	SLIP_RACE_WEAPON_PRICE_MODE_COUNT = 3,
+	SLIP_RACE_BIASED_WEAPON_COUNT = SLIP_RACE_WEAPON_COUNT + 1
+};
 
 typedef struct SlipRacePlayerWeaponRecord {
-	char displayName[16];
-	uint32_t priceByMode[3];
+	char displayName[SLIP_RACE_WEAPON_NAME_BYTES];
+	uint32_t priceByMode[SLIP_RACE_WEAPON_PRICE_MODE_COUNT];
 	uint32_t initialLoad;
 	uint32_t chargeRate;
 	uint32_t chargeCost;
@@ -69,10 +107,18 @@ typedef struct SlipRacePlayerWeaponRecord {
 	uint32_t handlingDamageQ16;
 } SlipRacePlayerWeaponRecord;
 
-extern const SlipRacePlayerWeaponRecord SlipRacePlayer_records[12];
+extern const SlipRacePlayerWeaponRecord SlipRacePlayer_records[SLIP_RACE_WEAPON_COUNT];
 SlipView3DVec32 SlipRacePlayer_WeaponPosition(uint16_t shooter, uint32_t side);
 
 enum { SLIP_RACE_RACER_RECORD_BYTES = 0x4e, SLIP_RACE_TUNING_RECORD_BYTES = 0x18 };
+
+enum {
+	SLIP_RACE_WEAPON_SLOT_BLASTER = 0,
+	SLIP_RACE_WEAPON_SLOT_PRIMARY = 1,
+	SLIP_RACE_WEAPON_SLOT_SECONDARY = 2,
+	SLIP_RACE_WEAPON_CHARGE_COUNT = SLIP_RACE_WEAPON_SLOT_SECONDARY + 1,
+	SLIP_RACE_WEAPON_SLOT_POWERUP = 3
+};
 
 typedef struct SlipRacePlayerPrivateRecord {
 	int32_t collisionImpulseX;
@@ -82,7 +128,7 @@ typedef struct SlipRacePlayerPrivateRecord {
 	uint16_t speedFraction;
 	uint16_t collisionCooldown;
 	uint16_t weaponSelection;
-	uint16_t weaponCharge[3];
+	uint16_t weaponCharge[SLIP_RACE_WEAPON_CHARGE_COUNT];
 	uint16_t targetObject;
 	uint16_t controller;
 	uint32_t racerStateOffset;
@@ -109,6 +155,13 @@ typedef struct SlipRacePlayerPrivateRecord {
 	uint16_t unusedStorage;
 	SlipObjectEventCallback recoveryPreviousCallback;
 } SlipRacePlayerPrivateRecord;
+
+typedef enum SlipRacerType {
+	SLIP_RACER_PLAYER_ONE = 0,
+	SLIP_RACER_PLAYER_TWO = 1,
+	SLIP_RACER_COMPUTER = 2,
+	SLIP_RACER_LINKED_PLAYER = 3
+} SlipRacerType;
 
 typedef struct SlipRaceRacerState {
 	uint16_t tuningIndex;
@@ -212,7 +265,15 @@ typedef struct SlipRacePlayerNeighbours {
 
 extern int32_t SlipConfig_mode;
 extern int32_t SlipConfig_fallbackMode;
-extern const int32_t SlipRacePlayer_propulsionTables[3][10][4];
+
+enum {
+	SLIP_RACE_PROPULSION_MODE_COUNT = 3,
+	SLIP_RACE_PROPULSION_PROFILE_COUNT = 4,
+	SLIP_RACE_PROPULSION_PLAYER_PROFILE = SLIP_RACE_PROPULSION_PROFILE_COUNT - 1
+};
+
+extern const int32_t SlipRacePlayer_propulsionTables[SLIP_RACE_PROPULSION_MODE_COUNT][SLIP_RACE_TRACK_COUNT]
+                                                    [SLIP_RACE_PROPULSION_PROFILE_COUNT];
 extern uint32_t SlipRacePlayer_trackBranch;
 extern SlipView3DVec32 SlipRacePlayer_trackPosition;
 extern SlipView3DVec32 SlipRacePlayer_roadPosition;
@@ -248,7 +309,14 @@ extern uint16_t SlipRacePlayer_farNeighbourCandidate;
 extern uint16_t SlipRacePlayer_middleNeighbourCandidate;
 extern int32_t SlipRacePlayer_maximumSpeed;
 extern int32_t SlipRacePlayer_lookAhead;
-extern int16_t SlipRacePlayer_avoidanceAxes[6];
+
+enum {
+	SLIP_RACE_AVOIDANCE_X_AXIS_OFFSET = 0,
+	SLIP_RACE_AVOIDANCE_Y_AXIS_OFFSET = 3,
+	SLIP_RACE_AVOIDANCE_COMPONENT_COUNT = SLIP_RACE_AVOIDANCE_Y_AXIS_OFFSET + 3
+};
+
+extern int16_t SlipRacePlayer_avoidanceAxes[SLIP_RACE_AVOIDANCE_COMPONENT_COUNT];
 extern SlipView3DMatrix SlipRacePlayer_steeringMatrix;
 extern uint16_t SlipRacePlayer_accelerate;
 extern uint16_t SlipRacePlayer_targetObject;
@@ -269,9 +337,9 @@ extern uint16_t SlipRacePlayer_neighbourDirectionZ;
 extern uint16_t SlipRacePlayer_neighbourNormalX;
 extern uint16_t SlipRacePlayer_neighbourNormalY;
 extern uint16_t SlipRacePlayer_neighbourNormalZ;
-extern const SlipRacePlayerTuningRecord *const SlipRacePlayer_tuningRecords[11];
-extern const int32_t SlipRacePlayer_aiBaseSpeed[11];
-extern const int32_t SlipRacePlayer_aiSpeedScale[11];
+extern const SlipRacePlayerTuningRecord *const SlipRacePlayer_tuningRecords[SLIP_RACE_DRIVER_TABLE_COUNT];
+extern const int32_t SlipRacePlayer_aiBaseSpeed[SLIP_RACE_TRACK_TABLE_COUNT];
+extern const int32_t SlipRacePlayer_aiSpeedScale[SLIP_RACE_TRACK_TABLE_COUNT];
 extern uint32_t SlipRacePlayer_neighbourMode;
 extern uint32_t SlipRacePlayer_neighbourRadius;
 extern uint32_t SlipRacePlayer_neighbourNearLimit;
@@ -288,7 +356,7 @@ void SlipRacePlayer_UpdateMinimumPosition(const SlipRaceRacerState *racerStates,
 void SlipRacePlayer_ResetMinimumPosition(void);
 
 void SlipRacePlayer_BuildWeaponLabel(const SlipRacePlayerWeaponRecord *records, uint32_t weaponIndex,
-                                     uint32_t ammunition, char label[24]);
+                                     uint32_t ammunition, char label[SLIP_RACE_WEAPON_LABEL_BYTES]);
 uint32_t SlipRacePlayer_WeaponRechargeRate(uint32_t weaponIndex);
 
 uint32_t SlipRacePlayer_WeaponChargeCost(const SlipRacePlayerWeaponRecord *records, uint32_t weaponIndex);
@@ -370,7 +438,7 @@ extern uint32_t SlipConfig_damageEnabled;
 extern uint16_t SlipRacePlayer_damageSourceObject;
 extern uint32_t SlipRacePlayer_damageSourceFlags;
 extern uint16_t SlipRacePlayer_demoAiEnabled;
-extern int32_t SlipRacePlayer_gamePenalty[11];
+extern int32_t SlipRacePlayer_gamePenalty[SLIP_RACE_TRACK_TABLE_COUNT];
 extern uint16_t SlipRacePlayer_playerOneObject;
 extern uint16_t SlipRacePlayer_track;
 extern uint32_t SlipRacePlayer_positionBoostTimer;

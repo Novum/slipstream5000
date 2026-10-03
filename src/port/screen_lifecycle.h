@@ -3,6 +3,9 @@
 #include "raster/raster.h"
 #include "runtime.h"
 #include "software_cursor.h"
+#include "vga_dac.h"
+
+enum { SLIP_SCREEN_BIOS_MODE_80X25_TEXT = 3, SLIP_SCREEN_BIOS_MODE_320X200_256_COLOURS = 0x13 };
 
 enum SlipScreenMode {
 	SLIP_SCREEN_AUTO = 0,
@@ -22,13 +25,13 @@ typedef struct SlipScreenLifecycle {
 	uint16_t signature, transparentColor;
 	uint16_t drawHandle, previousHandle;
 	uint8_t *drawPage, *previousPage;
-	uint32_t rowOffsets[200];
+	uint32_t rowOffsets[SLIPSTREAM_SCREEN_HEIGHT];
 	uint16_t pitch;
 	void (*present)(void);
 	bool spriteTarget;
 	SlipScreenClip clip, cursorClip;
 	SlipSoftwareCursor cursor;
-	uint8_t palette[256][3], dirtyColors[256];
+	uint8_t palette[SLIP_VGA_DAC_PALETTE_COUNT][SLIP_VGA_DAC_CHANNEL_COUNT], dirtyColors[SLIP_VGA_DAC_PALETTE_COUNT];
 	uint32_t textureRowScroll;
 	uint16_t perspectiveHandle;
 	RasterPerspectiveEntry *perspectiveTable;
@@ -43,7 +46,7 @@ typedef struct SlipScreenLifecycleCalls {
 	void (*release)(void *, uint16_t);
 	uint8_t (*getBiosMode)(void *);
 	void (*setBiosMode)(void *, uint8_t);
-	void (*readDac)(void *, uint8_t[256][3]);
+	void (*readDac)(void *, uint8_t[SLIP_VGA_DAC_PALETTE_COUNT][SLIP_VGA_DAC_CHANNEL_COUNT]);
 	void (*bindRows)(void *, uint8_t *, uint32_t, uint16_t);
 	void (*setClip)(void *, SlipScreenClip);
 	void (*registerExit)(void *, SlipRuntimeCleanup);

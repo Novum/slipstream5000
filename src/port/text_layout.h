@@ -1,6 +1,10 @@
 #ifndef SLIPSTREAM5000_TEXT_LAYOUT_H
 #define SLIPSTREAM5000_TEXT_LAYOUT_H
 
+enum { SLIP_TEXT_LINE_CHARACTERS = 160 };
+
+enum { SLIP_TEXT_AT_POSITION = 0, SLIP_TEXT_JUSTIFIED = 1, SLIP_TEXT_CENTERED = 2, SLIP_TEXT_RIGHT_ALIGNED = 3 };
+
 #include "font.h"
 #include "sprite.h"
 #include "text_format.h"
@@ -15,7 +19,7 @@ typedef struct SlipTextLayout {
 	/* Host binding: NULL uses an already resident FONT view. */
 	const SlipFontResourceCalls *fontResources;
 	uint16_t fontResource;
-	char line[161];
+	char line[SLIP_TEXT_LINE_CHARACTERS + 1];
 	uint16_t length, width;
 	uint16_t spaceFraction, spaceStep;
 } SlipTextLayout;

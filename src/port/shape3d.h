@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "draw3d.h"
+#include "shape_format.h"
 
 typedef struct SlipShape3D {
 	const uint8_t *data;
@@ -63,6 +64,8 @@ typedef struct SlipShape3DHeader {
 	int32_t maximumZ;
 	uint16_t sortList;
 } SlipShape3DHeader;
+
+enum { SLIP_SHAPE_DOOR_COORDINATE_SHIFT = 6 };
 
 typedef struct SlipShape3DDoorTemplate {
 	SlipShape3DHeader header;
@@ -157,8 +160,8 @@ typedef struct SlipShape3DMaterialNameScanVisit {
 	size_t recordOffset;
 	uint16_t materialIndex;
 	int match;
-	uint8_t bytesBefore[16];
-	uint8_t bytesAfter[16];
+	uint8_t bytesBefore[SLIP_SHAPE_MATERIAL_NAME_BYTES];
+	uint8_t bytesAfter[SLIP_SHAPE_MATERIAL_NAME_BYTES];
 } SlipShape3DMaterialNameScanVisit;
 
 typedef struct SlipShape3DMaterialNameScan {

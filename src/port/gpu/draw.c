@@ -8,7 +8,7 @@ static void RasterGpu_DrawLineSolid(uint8_t c, int16_t x0, int16_t y0, int16_t x
 }
 
 static void RasterGpu_FillRectUnchecked(uint16_t c, int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
-	if (c & 0x8000u) {
+	if (c & RASTER_RECTANGLE_OUTLINE_FLAG) {
 		SlipRaceGpu_Line((uint8_t)c, x0, y0, x1, y0);
 		SlipRaceGpu_Line((uint8_t)c, x1, y0, x1, y1);
 		SlipRaceGpu_Line((uint8_t)c, x1, y1, x0, y1);

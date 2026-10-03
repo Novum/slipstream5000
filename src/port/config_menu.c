@@ -48,28 +48,28 @@ void SlipConfigMenu_Run(SlipConfigMenuState *state, const SlipConfigMenuCalls *c
 		calls->updateTimer(context);
 		SlipConfigMenuPoint point = calls->pointer(context);
 		const uint32_t selection = calls->hitTest(context, SLIP_CONFIG_MAIN_TABLE, point);
-		if (selection != 1) {
+		if (selection != SLIP_CONFIG_MAIN_TITLE) {
 			state->mainSelection = selection;
 			if (calls->pressed(context, SLIP_INPUT_SCAN_ENTER) || calls->pressed(context, SLIP_INPUT_MOUSE_LEFT)) {
 				if (selection != 0) {
 					bool returnedFromSubmenu = true;
-					if (selection == 2) {
+					if (selection == SLIP_CONFIG_MAIN_GENERAL) {
 						SlipConfigMenu_General(state, calls);
 						calls->releaseStrings(context, state->mainStrings);
 						calls->language(context);
 						if (!calls->strings(context, "CONFIG  ", &state->mainStrings))
 							calls->resourceError(context);
-					} else if (selection == 3) {
+					} else if (selection == SLIP_CONFIG_MAIN_CONTROLS) {
 						SlipConfigMenu_Controls(state, calls);
-					} else if (selection == 7) {
+					} else if (selection == SLIP_CONFIG_MAIN_SOUND) {
 						SlipConfigMenu_Sound(state, calls);
-					} else if (selection == 4) {
+					} else if (selection == SLIP_CONFIG_MAIN_DETAIL) {
 						SlipConfigMenu_Detail(state, calls);
-					} else if (selection == 6 && state->allowDifficulty != 0) {
+					} else if (selection == SLIP_CONFIG_MAIN_DIFFICULTY && state->allowDifficulty != 0) {
 						SlipConfigMenu_Difficulty(state, calls);
 					} else {
 						returnedFromSubmenu = false;
-						if (selection == 5)
+						if (selection == SLIP_CONFIG_MAIN_CLOSE)
 							break;
 					}
 					if (returnedFromSubmenu) {
@@ -102,16 +102,16 @@ void SlipConfigMenu_Difficulty(SlipConfigMenuState *state, const SlipConfigMenuC
 		calls->resourceError(context);
 	calls->navigation(context, SLIP_CONFIG_DIFFICULTY_TABLE);
 	calls->resetTimer(context);
-	void (*const options[5])(void *) = {calls->cycleDifficulty, calls->toggleDamage, NULL, NULL, NULL};
+	void (*const options[])(void *) = {calls->cycleDifficulty, calls->toggleDamage, NULL, NULL, NULL};
 	for (;;) {
 		calls->updateTimer(context);
 		SlipConfigMenuPoint point = calls->pointer(context);
 		const uint32_t selection = calls->hitTest(context, SLIP_CONFIG_DIFFICULTY_TABLE, point);
-		if (selection != 4) {
+		if (selection != SLIP_CONFIG_DIFFICULTY_TITLE) {
 			state->difficultySelection = selection;
 			if (calls->pressed(context, SLIP_INPUT_SCAN_ENTER) || calls->pressed(context, SLIP_INPUT_MOUSE_LEFT)) {
 				if (selection != 0) {
-					if (selection == 3)
+					if (selection == SLIP_CONFIG_DIFFICULTY_CLOSE)
 						break;
 					if (options[selection - 1] != NULL)
 						options[selection - 1](context);
@@ -157,15 +157,15 @@ void SlipConfigMenu_General(SlipConfigMenuState *state, const SlipConfigMenuCall
 		calls->updateTimer(context);
 		SlipConfigMenuPoint point = calls->pointer(context);
 		const uint32_t selection = calls->hitTest(context, SLIP_CONFIG_GENERAL_TABLE, point);
-		if (selection != 7) {
+		if (selection != SLIP_CONFIG_GENERAL_TITLE) {
 			state->generalSelection = selection;
 			if (calls->pressed(context, SLIP_INPUT_SCAN_ENTER) || calls->pressed(context, SLIP_INPUT_MOUSE_LEFT)) {
 				if (selection != 0) {
-					if (selection == 6)
+					if (selection == SLIP_CONFIG_GENERAL_CLOSE)
 						break;
-					if (selection == 8 && calls->toggleHighRes != NULL)
+					if (selection == SLIP_CONFIG_GENERAL_HIGH_RES && calls->toggleHighRes != NULL)
 						calls->toggleHighRes(context);
-					else if (selection <= 5)
+					else if (selection <= SLIP_CONFIG_GENERAL_OPTION_COUNT)
 						calls->generalOptions[selection - 1](context);
 				}
 			}
@@ -195,11 +195,11 @@ void SlipConfigMenu_Detail(SlipConfigMenuState *state, const SlipConfigMenuCalls
 		calls->updateTimer(context);
 		SlipConfigMenuPoint point = calls->pointer(context);
 		const uint32_t selection = calls->hitTest(context, SLIP_CONFIG_DETAIL_TABLE, point);
-		if (selection != 8) {
+		if (selection != SLIP_CONFIG_DETAIL_TITLE) {
 			state->detailSelection = selection;
 			if (calls->pressed(context, SLIP_INPUT_SCAN_ENTER) || calls->pressed(context, SLIP_INPUT_MOUSE_LEFT)) {
 				if (selection != 0) {
-					if (selection == 7)
+					if (selection == SLIP_CONFIG_DETAIL_CLOSE)
 						break;
 					calls->detailOptions[selection - 1](context);
 				}
@@ -230,11 +230,11 @@ void SlipConfigMenu_Sound(SlipConfigMenuState *state, const SlipConfigMenuCalls 
 		calls->updateTimer(context);
 		SlipConfigMenuPoint point = calls->pointer(context);
 		const uint32_t selection = calls->hitTest(context, SLIP_CONFIG_SOUND_TABLE, point);
-		if (selection != 6) {
+		if (selection != SLIP_CONFIG_SOUND_TITLE) {
 			state->soundSelection = selection;
 			if (calls->pressed(context, SLIP_INPUT_SCAN_ENTER) || calls->pressed(context, SLIP_INPUT_MOUSE_LEFT)) {
 				if (selection != 0) {
-					if (selection == 5)
+					if (selection == SLIP_CONFIG_SOUND_CLOSE)
 						break;
 					if (calls->soundOptions[selection - 1] != NULL)
 						calls->soundOptions[selection - 1](context);
@@ -265,29 +265,29 @@ void SlipConfigMenu_Controls(SlipConfigMenuState *state, const SlipConfigMenuCal
 		calls->updateTimer(context);
 		SlipConfigMenuPoint point = calls->pointer(context);
 		const uint32_t selection = calls->hitTest(context, SLIP_CONFIG_CONTROLS_TABLE, point);
-		if (selection != 7) {
+		if (selection != SLIP_CONFIG_CONTROLS_TITLE) {
 			state->controlsSelection = selection;
 			if (calls->pressed(context, SLIP_INPUT_SCAN_ENTER) || calls->pressed(context, SLIP_INPUT_MOUSE_LEFT)) {
 				if (selection != 0) {
-					if (selection == 6)
+					if (selection == SLIP_CONFIG_CONTROLS_CLOSE)
 						break;
-					if (selection == 3) {
+					if (selection == SLIP_CONFIG_CONTROLS_CALIBRATE_ONE) {
 						SlipConfigControls_Calibrate(&SlipConfigCalibration_state, 0, state->background,
 						                             calls->controlDialogs);
 						calls->navigation(context, SLIP_CONFIG_CONTROLS_TABLE);
-					} else if (selection == 4) {
+					} else if (selection == SLIP_CONFIG_CONTROLS_CALIBRATE_TWO) {
 						SlipConfigControls_Calibrate(&SlipConfigCalibration_state, 1, state->background,
 						                             calls->controlDialogs);
 						calls->navigation(context, SLIP_CONFIG_CONTROLS_TABLE);
-					} else if (selection == 1) {
+					} else if (selection == SLIP_CONFIG_CONTROLS_PLAYER_ONE) {
 						SlipConfigControls_Run(&SlipConfigControls_state, 1, state->background,
 						                       calls->controlDialogs->controls);
 						calls->navigation(context, SLIP_CONFIG_CONTROLS_TABLE);
-					} else if (selection == 2) {
+					} else if (selection == SLIP_CONFIG_CONTROLS_PLAYER_TWO) {
 						SlipConfigControls_Run(&SlipConfigControls_state, 2, state->background,
 						                       calls->controlDialogs->controls);
 						calls->navigation(context, SLIP_CONFIG_CONTROLS_TABLE);
-					} else if (selection == 5) {
+					} else if (selection == SLIP_CONFIG_CONTROLS_REVERSE_ACCELERATOR) {
 						calls->reverseAccelerator(context);
 					}
 				}

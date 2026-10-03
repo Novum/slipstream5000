@@ -66,7 +66,7 @@ void SlipShape_Draw(SlipActorShapeState *state, uint16_t resource, const SlipVie
 void SlipShape_SortNode(SlipActorShapeState *state, uint32_t index, uint16_t type, int32_t classification,
                         const uint8_t *node, const SlipActorShapeCalls *calls) {
 	(void)node;
-	if (classification >= 0 && type == 0) {
+	if (classification >= 0 && type == SLIP_SHAPE_SORT_NODE_PRIMITIVE) {
 		const SlipShape3DHeader *const header = (const SlipShape3DHeader *)state->shape;
 		state->primitive(calls->context, state->shape + header->primitiveOffset + index, (uint32_t)classification);
 	}
@@ -87,12 +87,15 @@ void SlipActorShape_DrawPart(SlipActorShapeState *state, SlipActorPartRecord *pa
 	if ((SlipBytes_ReadLE16(shape + SLIP_SHAPE_FLAGS_OFFSET) & SLIP_SHAPE_MATERIALS_PREPARED) == 0)
 		calls->prepare(context, shape);
 	const uint16_t savedFlags = calls->getShapeFlags(context);
-	const uint32_t flags = calls->classify(context, state->viewPosition, (int32_t)SlipBytes_ReadLE32(shape + 0x1c));
+	const uint32_t flags =
+	    calls->classify(context, state->viewPosition, (int32_t)SlipBytes_ReadLE32(shape + SLIP_SHAPE_RADIUS_OFFSET));
 	calls->setShapeFlags(context, (uint16_t)flags);
-	SlipView3DVec32 minimum = {(int32_t)SlipBytes_ReadLE32(shape + 0x20), (int32_t)SlipBytes_ReadLE32(shape + 0x28),
-	                           (int32_t)SlipBytes_ReadLE32(shape + 0x30)};
-	SlipView3DVec32 maximum = {(int32_t)SlipBytes_ReadLE32(shape + 0x24), (int32_t)SlipBytes_ReadLE32(shape + 0x2c),
-	                           (int32_t)SlipBytes_ReadLE32(shape + 0x34)};
+	SlipView3DVec32 minimum = {(int32_t)SlipBytes_ReadLE32(shape + SLIP_SHAPE_MINIMUM_X_OFFSET),
+	                           (int32_t)SlipBytes_ReadLE32(shape + SLIP_SHAPE_MINIMUM_Y_OFFSET),
+	                           (int32_t)SlipBytes_ReadLE32(shape + SLIP_SHAPE_MINIMUM_Z_OFFSET)};
+	SlipView3DVec32 maximum = {(int32_t)SlipBytes_ReadLE32(shape + SLIP_SHAPE_MAXIMUM_X_OFFSET),
+	                           (int32_t)SlipBytes_ReadLE32(shape + SLIP_SHAPE_MAXIMUM_Y_OFFSET),
+	                           (int32_t)SlipBytes_ReadLE32(shape + SLIP_SHAPE_MAXIMUM_Z_OFFSET)};
 	calls->bounds(context, minimum, maximum);
 	const SlipActorShapeBounds classification = calls->projectBounds(context, state->viewPosition, &state->drawMatrix);
 	if (classification == SLIP_ACTOR_SHAPE_OUTSIDE) {
@@ -105,11 +108,11 @@ void SlipActorShape_DrawPart(SlipActorShapeState *state, SlipActorPartRecord *pa
 		calls->setShapeFlags(context, currentFlags | SLIP_SHAPE_INSIDE_VIEW);
 	}
 	calls->vertices(context, shape);
-	if (SlipBytes_ReadLE16(shape + 0x38) == 0) {
-		if (SlipBytes_ReadLE32(shape + 0x0c) == 0)
+	if (SlipBytes_ReadLE16(shape + SLIP_SHAPE_SORT_LIST_OFFSET) == 0) {
+		if (SlipBytes_ReadLE32(shape + SLIP_SHAPE_BSP_OFFSET) == 0)
 			SlipRuntime_Fatal("ArticSlotDraw - this shape has no sort data. Set NOSORT, or create sort data.");
 		state->shape = shape;
-		const uint8_t *const sort = shape + SlipBytes_ReadLE32(shape + 0x0c);
+		const uint8_t *const sort = shape + SlipBytes_ReadLE32(shape + SLIP_SHAPE_BSP_OFFSET);
 		calls->traverse(context, sort, SlipActorShape_SortNode, state, calls);
 	} else {
 		calls->unsorted(context, shape);
@@ -121,10 +124,11 @@ void SlipActorShape_DrawPart(SlipActorShapeState *state, SlipActorPartRecord *pa
 
 void SlipActorShape_SortNode(SlipActorShapeState *state, uint32_t index, uint16_t type, int32_t classification,
                              const uint8_t *node, const SlipActorShapeCalls *calls) {
-	if (type == 1) {
+	if (type == SLIP_SHAPE_SORT_NODE_CHILD) {
 		if (state->actor->childrenInSortTree == 0)
 			return;
-		if ((SlipBytes_ReadLE32(node) | SlipBytes_ReadLE32(node + 4)) != 0)
+		if ((SlipBytes_ReadLE32(node + SLIP_SHAPE_SORT_CHILD_0_OFFSET) |
+		     SlipBytes_ReadLE32(node + SLIP_SHAPE_SORT_CHILD_1_OFFSET)) != 0)
 			SlipRuntime_Fatal("ArticShapeDrawSortNode - child problem");
 		const uint32_t rendererStateIndex = calls->getRendererStateIndex(calls->context);
 		calls->selectRendererStateIndex(calls->context, rendererStateIndex + 1u);
@@ -137,8 +141,9 @@ void SlipActorShape_SortNode(SlipActorShapeState *state, uint32_t index, uint16_
 		state->viewPosition = savedPosition;
 		state->shape = savedShape;
 		calls->selectRendererStateIndex(calls->context, rendererStateIndex);
-	} else if (type == 0 && classification >= 0) {
-		const uint8_t *const primitive = state->shape + SlipBytes_ReadLE32(state->shape + 0x14) + index;
+	} else if (type == SLIP_SHAPE_SORT_NODE_PRIMITIVE && classification >= 0) {
+		const uint8_t *const primitive =
+		    state->shape + SlipBytes_ReadLE32(state->shape + SLIP_SHAPE_PRIMITIVE_TABLE_OFFSET) + index;
 		state->primitive(calls->context, primitive, (uint32_t)classification);
 	}
 }

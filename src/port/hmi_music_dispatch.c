@@ -1,28 +1,32 @@
 #include "byte_order.h"
 #include "hmi_music.h"
 
-#define DISPATCH_BYTE(address) state->dispatchGlobals[(address) - 0x85e05u]
-#define SEND_DRIVER_MESSAGE(n) state->driverSend[driver](state, &DISPATCH_BYTE(0x86a35u), (n), driver)
+#define DISPATCH_BYTE(offset) state->dispatchGlobals[(offset)]
+#define SEND_DRIVER_MESSAGE(n)                                                                                         \
+	state->driverSend[driver](state, &DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET), (n), driver)
 
 uint32_t HmiMusic_SetSongVolume(HmiMusicState *state, uint32_t song, uint8_t volume) {
 	uint32_t track;
-	DISPATCH_BYTE(0x86b4eu + song * 4u) = volume;
-	DISPATCH_BYTE(0x86b4fu + song * 4u) = 0;
-	DISPATCH_BYTE(0x86b50u + song * 4u) = 0;
-	DISPATCH_BYTE(0x86b51u + song * 4u) = 0;
-	for (track = 0; track < 32; ++track) {
+	DISPATCH_BYTE(HMI_DISPATCH_SONG_VOLUMES_OFFSET + song * HMI_SERIALIZED_DWORD_BYTES) = volume;
+	DISPATCH_BYTE(HMI_DISPATCH_SONG_VOLUMES_OFFSET + 1u + song * HMI_SERIALIZED_DWORD_BYTES) = 0;
+	DISPATCH_BYTE(HMI_DISPATCH_SONG_VOLUMES_OFFSET + 2u + song * HMI_SERIALIZED_DWORD_BYTES) = 0;
+	DISPATCH_BYTE(HMI_DISPATCH_SONG_VOLUMES_OFFSET + 3u + song * HMI_SERIALIZED_DWORD_BYTES) = 0;
+	for (track = 0; track < HMI_MUSIC_TRACK_COUNT; ++track) {
 		if (state->cursors[song][track] != 0) {
-			const uint8_t channel = state->trackHeaders[song][track][8];
+			const uint8_t channel = state->trackHeaders[song][track][HMI_SONG_TRACK_CHANNEL_OFFSET];
 			const uint32_t driver = state->routing[song][track];
 			uint8_t mapped;
-			if (SlipBytes_ReadLE32(&DISPATCH_BYTE(0x86a49u)) != 0)
-				mapped = DISPATCH_BYTE(0x85e05u + driver * 128u + song * 16u + channel);
+			if (SlipBytes_ReadLE32(&DISPATCH_BYTE(HMI_DISPATCH_MAPPING_ENABLED_OFFSET)) != 0)
+				mapped = DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_MAP_OFFSET + driver * HMI_DISPATCH_DRIVER_MAP_BYTES +
+				                       song * HMI_MIDI_CHANNEL_COUNT + channel);
 			else
 				mapped = channel;
-			DISPATCH_BYTE(0x86a3fu) = channel | 0xb0u;
-			DISPATCH_BYTE(0x86a40u) = 7;
-			DISPATCH_BYTE(0x86a41u) = DISPATCH_BYTE(0x86b6eu + driver * 16u + mapped);
-			HmiMusic_Dispatch(state, song, state->routing[song][track], &DISPATCH_BYTE(0x86a3fu), 3);
+			DISPATCH_BYTE(HMI_DISPATCH_VOLUME_MESSAGE_OFFSET) = channel | HMI_MIDI_CONTROL_CHANGE;
+			DISPATCH_BYTE(HMI_DISPATCH_VOLUME_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_VOLUME;
+			DISPATCH_BYTE(HMI_DISPATCH_VOLUME_MESSAGE_OFFSET + 2u) =
+			    DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_VOLUMES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + mapped);
+			HmiMusic_Dispatch(state, song, state->routing[song][track],
+			                  &DISPATCH_BYTE(HMI_DISPATCH_VOLUME_MESSAGE_OFFSET), HMI_MIDI_CONTROL_MESSAGE_BYTES);
 		}
 	}
 	return 0;
@@ -30,10 +34,11 @@ uint32_t HmiMusic_SetSongVolume(HmiMusicState *state, uint32_t song, uint8_t vol
 
 uint32_t HmiMusic_SetMasterVolume(HmiMusicState *state, uint8_t volume) {
 	uint32_t song;
-	DISPATCH_BYTE(0x86b4du) = volume;
-	for (song = 0; song < 8; ++song) {
+	DISPATCH_BYTE(HMI_DISPATCH_MASTER_VOLUME_OFFSET) = volume;
+	for (song = 0; song < HMI_MUSIC_SONG_COUNT; ++song) {
 		if (state->playing[song] != 0)
-			HmiMusic_SetSongVolume(state, song, DISPATCH_BYTE(0x86b4eu + song * 4u));
+			HmiMusic_SetSongVolume(state, song,
+			                       DISPATCH_BYTE(HMI_DISPATCH_SONG_VOLUMES_OFFSET + song * HMI_SERIALIZED_DWORD_BYTES));
 	}
 	return 0;
 }
@@ -42,57 +47,61 @@ uint32_t HmiMusic_Cleanup(HmiMusicState *state, uint32_t song) {
 	uint32_t track;
 	for (track = 1; track < state->totalTracks[song]; ++track) {
 		const uint32_t driver = state->routing[song][track];
-		if (driver != UINT32_MAX && driver != 0xffu) {
-			const uint8_t channel = state->trackHeaders[song][track][8];
-			if (SlipBytes_ReadLE32(&DISPATCH_BYTE(0x86a49u)) == 0) {
-				DISPATCH_BYTE(0x86a35u) = channel | 0xb0u;
-				DISPATCH_BYTE(0x86a36u) = 0x7b;
-				DISPATCH_BYTE(0x86a37u) = 0;
-				SEND_DRIVER_MESSAGE(3);
-				DISPATCH_BYTE(0x86a35u) = channel | 0xb0u;
-				DISPATCH_BYTE(0x86a36u) = 0x79;
-				DISPATCH_BYTE(0x86a37u) = 0;
-				SEND_DRIVER_MESSAGE(3);
-				DISPATCH_BYTE(0x86a35u) = channel | 0xe0u;
-				DISPATCH_BYTE(0x86a36u) = 0x40;
-				DISPATCH_BYTE(0x86a37u) = 0x40;
-				SEND_DRIVER_MESSAGE(3);
-				DISPATCH_BYTE(0x86a35u) = channel | 0xb0u;
-				DISPATCH_BYTE(0x86a36u) = 7;
-				DISPATCH_BYTE(0x86a37u) = 0;
-				SEND_DRIVER_MESSAGE(3);
+		if (driver != UINT32_MAX && driver != HMI_MUSIC_UNROUTED_DRIVER) {
+			const uint8_t channel = state->trackHeaders[song][track][HMI_SONG_TRACK_CHANNEL_OFFSET];
+			if (SlipBytes_ReadLE32(&DISPATCH_BYTE(HMI_DISPATCH_MAPPING_ENABLED_OFFSET)) == 0) {
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = channel | HMI_MIDI_CONTROL_CHANGE;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_ALL_NOTES_OFF;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+				SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = channel | HMI_MIDI_CONTROL_CHANGE;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_RESET;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+				SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = channel | HMI_MIDI_PITCH_BEND;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_A002_PITCH_CENTER;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = HMI_A002_PITCH_CENTER;
+				SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = channel | HMI_MIDI_CONTROL_CHANGE;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_VOLUME;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+				SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
 			} else {
-				const uint32_t map = driver * 128u + song * 16u + channel;
-				const uint8_t mapped = DISPATCH_BYTE(0x85e05u + map);
+				const uint32_t map = driver * HMI_DISPATCH_DRIVER_MAP_BYTES + song * HMI_MIDI_CHANNEL_COUNT + channel;
+				const uint8_t mapped = DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_MAP_OFFSET + map);
 				uint8_t cache;
-				DISPATCH_BYTE(0x85e05u + map) = 0xff;
-				cache = DISPATCH_BYTE(0x867b5u + map);
-				DISPATCH_BYTE(0x860d5u + driver * 16u + mapped) = 0xff;
-				DISPATCH_BYTE(0x86125u + driver * 16u + mapped) = 0xff;
-				DISPATCH_BYTE(0x86a35u) = mapped | 0xb0u;
-				DISPATCH_BYTE(0x86a36u) = 0x7b;
-				DISPATCH_BYTE(0x86a37u) = 0;
-				SEND_DRIVER_MESSAGE(3);
-				DISPATCH_BYTE(0x86a35u) = mapped | 0xb0u;
-				DISPATCH_BYTE(0x86a36u) = 0x79;
-				DISPATCH_BYTE(0x86a37u) = 0;
-				SEND_DRIVER_MESSAGE(3);
-				DISPATCH_BYTE(0x86a35u) = mapped | 0xe0u;
-				DISPATCH_BYTE(0x86a36u) = 0x40;
-				DISPATCH_BYTE(0x86a37u) = 0x40;
-				SEND_DRIVER_MESSAGE(3);
-				DISPATCH_BYTE(0x86a35u) = mapped | 0xb0u;
-				DISPATCH_BYTE(0x86a36u) = 7;
-				DISPATCH_BYTE(0x86a37u) = 0;
-				SEND_DRIVER_MESSAGE(3);
-				if (cache != 0xff) {
-					const uint32_t offset = driver * 320u + channel * 20u + cache * 5u;
-					DISPATCH_BYTE(0x86178u + offset) = 0xff;
-					DISPATCH_BYTE(0x86176u + offset) = 0xff;
-					DISPATCH_BYTE(0x86177u + offset) = 0xff;
-					DISPATCH_BYTE(0x86179u + offset) = 0xff;
-					DISPATCH_BYTE(0x86175u + offset) = 0xff;
-					DISPATCH_BYTE(0x867b5u + map) = 0xff;
+				DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_MAP_OFFSET + map) = HMI_DISPATCH_UNASSIGNED;
+				cache = DISPATCH_BYTE(HMI_DISPATCH_CACHE_MAP_OFFSET + map);
+				DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_OWNERS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + mapped) =
+				    HMI_DISPATCH_UNASSIGNED;
+				DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_SONGS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + mapped) =
+				    HMI_DISPATCH_UNASSIGNED;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = mapped | HMI_MIDI_CONTROL_CHANGE;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_ALL_NOTES_OFF;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+				SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = mapped | HMI_MIDI_CONTROL_CHANGE;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_RESET;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+				SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = mapped | HMI_MIDI_PITCH_BEND;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_A002_PITCH_CENTER;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = HMI_A002_PITCH_CENTER;
+				SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = mapped | HMI_MIDI_CONTROL_CHANGE;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_VOLUME;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+				SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+				if (cache != HMI_DISPATCH_UNASSIGNED) {
+					const uint32_t offset = driver * HMI_DISPATCH_DRIVER_CACHE_BYTES +
+					                        channel * HMI_DISPATCH_CHANNEL_CACHE_BYTES +
+					                        cache * HMI_DISPATCH_CACHE_ENTRY_BYTES;
+					DISPATCH_BYTE(HMI_DISPATCH_CACHE_PROGRAM_OFFSET + offset) = HMI_DISPATCH_UNASSIGNED;
+					DISPATCH_BYTE(HMI_DISPATCH_CACHE_PITCH_OFFSET + offset) = HMI_DISPATCH_UNASSIGNED;
+					DISPATCH_BYTE(HMI_DISPATCH_CACHE_VOLUME_OFFSET + offset) = HMI_DISPATCH_UNASSIGNED;
+					DISPATCH_BYTE(HMI_DISPATCH_CACHE_SUSTAIN_OFFSET + offset) = HMI_DISPATCH_UNASSIGNED;
+					DISPATCH_BYTE(HMI_DISPATCH_CACHE_OCCUPIED_OFFSET + offset) = HMI_DISPATCH_UNASSIGNED;
+					DISPATCH_BYTE(HMI_DISPATCH_CACHE_MAP_OFFSET + map) = HMI_DISPATCH_UNASSIGNED;
 				}
 			}
 		}
@@ -100,33 +109,47 @@ uint32_t HmiMusic_Cleanup(HmiMusicState *state, uint32_t song) {
 	return 1;
 }
 
+static void HmiMusic_AllocateChannelCache(HmiMusicState *state, uint32_t mapIndex, uint32_t cacheBase) {
+	for (uint32_t slot = 0; slot < HMI_DISPATCH_CHANNEL_CACHE_COUNT; ++slot) {
+		const uint32_t entryOffset = cacheBase + slot * HMI_DISPATCH_CACHE_ENTRY_BYTES;
+		if (DISPATCH_BYTE(HMI_DISPATCH_CACHE_OCCUPIED_OFFSET + entryOffset) != HMI_DISPATCH_UNASSIGNED)
+			continue;
+		DISPATCH_BYTE(HMI_DISPATCH_CACHE_OCCUPIED_OFFSET + entryOffset) = 1;
+		DISPATCH_BYTE(HMI_DISPATCH_CACHE_MAP_OFFSET + mapIndex) = (uint8_t)slot;
+		break;
+	}
+}
+
 uint32_t HmiMusic_Dispatch(HmiMusicState *state, uint32_t song, uint32_t driver, uint8_t *message, uint32_t length) {
 	const uint8_t original = message[0];
-	const uint8_t channel = original & 15u;
+	const uint8_t channel = original & (HMI_MIDI_CHANNEL_COUNT - 1u);
 	uint8_t mapped;
 	uint8_t priority = 0;
-	uint8_t victim = 0xff;
+	uint8_t victim = HMI_DISPATCH_UNASSIGNED;
 	uint32_t volume = UINT32_MAX;
-	uint32_t i, cache, j;
-	const uint32_t mapIndex = driver * 128u + song * 16u + channel;
-	const uint32_t cacheBase = driver * 320u + channel * 20u;
-	if (SlipBytes_ReadLE32(&DISPATCH_BYTE(0x86a49u)) == 0) {
-		if ((original & 0xf0u) == 0xb0u) {
-			if (message[1] == 7) {
-				DISPATCH_BYTE(0x86a35u) = message[0];
-				DISPATCH_BYTE(0x86a36u) = 7;
-				DISPATCH_BYTE(0x86a37u) =
-				    (uint8_t)((DISPATCH_BYTE(0x86b4du) *
-				               ((message[2] * SlipBytes_ReadLE32(&DISPATCH_BYTE(0x86b4eu + song * 4u))) >> 7)) >>
-				              7);
-				DISPATCH_BYTE(0x86b6eu + driver * 16u + channel) = message[2];
+	uint32_t cache;
+	const uint32_t mapIndex = driver * HMI_DISPATCH_DRIVER_MAP_BYTES + song * HMI_MIDI_CHANNEL_COUNT + channel;
+	const uint32_t cacheBase = driver * HMI_DISPATCH_DRIVER_CACHE_BYTES + channel * HMI_DISPATCH_CHANNEL_CACHE_BYTES;
+	if (SlipBytes_ReadLE32(&DISPATCH_BYTE(HMI_DISPATCH_MAPPING_ENABLED_OFFSET)) == 0) {
+		if ((original & HMI_MIDI_STATUS_MASK) == HMI_MIDI_CONTROL_CHANGE) {
+			if (message[1] == HMI_MIDI_CONTROL_VOLUME) {
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = message[0];
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_VOLUME;
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) =
+				    (uint8_t)((DISPATCH_BYTE(HMI_DISPATCH_MASTER_VOLUME_OFFSET) *
+				               ((message[2] * SlipBytes_ReadLE32(&DISPATCH_BYTE(HMI_DISPATCH_SONG_VOLUMES_OFFSET +
+				                                                                song * HMI_SERIALIZED_DWORD_BYTES))) >>
+				                HMI_A002_VOLUME_FRACTION_BITS)) >>
+				              HMI_A002_VOLUME_FRACTION_BITS);
+				DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_VOLUMES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + channel) =
+				    message[2];
 				if (state->muted[song] != 0)
-					DISPATCH_BYTE(0x86a37u) = 0;
+					DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
 			} else {
-				DISPATCH_BYTE(0x86a35u) = message[0];
-				DISPATCH_BYTE(0x86a36u) = message[1];
-				DISPATCH_BYTE(0x86a37u) = message[2];
-				DISPATCH_BYTE(0x86a38u) = message[3];
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = message[0];
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = message[1];
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = message[2];
+				DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 3u) = message[3];
 			}
 			SEND_DRIVER_MESSAGE(length);
 		} else {
@@ -134,158 +157,165 @@ uint32_t HmiMusic_Dispatch(HmiMusicState *state, uint32_t song, uint32_t driver,
 		}
 		return 1;
 	}
-	mapped = DISPATCH_BYTE(0x85e05u + mapIndex);
-retry:
-	if (mapped == 0xff) {
-		if (channel == 9) {
-			DISPATCH_BYTE(0x85e05u + mapIndex) = 9;
-			mapped = 9;
+	mapped = DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_MAP_OFFSET + mapIndex);
+	while (mapped == HMI_DISPATCH_UNASSIGNED) {
+		if (channel == HMI_MIDI_PERCUSSION_CHANNEL) {
+			DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_MAP_OFFSET + mapIndex) = HMI_MIDI_PERCUSSION_CHANNEL;
+			mapped = HMI_MIDI_PERCUSSION_CHANNEL;
 		} else {
-			for (i = 0; i < 16; ++i) {
-				while (DISPATCH_BYTE(0x86afdu + driver * 16u + i) == 0 && i < 16)
-					++i;
-				if (i < 16 && DISPATCH_BYTE(0x860d5u + driver * 16u + i) == 0xff) {
-					DISPATCH_BYTE(0x85e05u + mapIndex) = (uint8_t)i;
+			for (uint32_t i = 0; i < HMI_MIDI_CHANNEL_COUNT; ++i) {
+				if (DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_ENABLED_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) == 0)
+					continue;
+				if (DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_OWNERS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) ==
+				    HMI_DISPATCH_UNASSIGNED) {
+					DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_MAP_OFFSET + mapIndex) = (uint8_t)i;
 					mapped = (uint8_t)i;
-					DISPATCH_BYTE(0x860d5u + driver * 16u + i) = channel;
-					DISPATCH_BYTE(0x86125u + driver * 16u + i) = (uint8_t)song;
-					DISPATCH_BYTE(0x86085u + driver * 16u + i) = state->songs[song][0x40u + channel * 4u];
-					cache = DISPATCH_BYTE(0x867b5u + mapIndex);
-					if (cache == 0xff) {
-						j = 0;
-						goto allocateCachedVolumeChannel;
+					DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_OWNERS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) = channel;
+					DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_SONGS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) =
+					    (uint8_t)song;
+					DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_PRIORITIES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) =
+					    state->songs[song][HMI_SONG_CHANNEL_PRIORITIES_OFFSET + channel * HMI_SERIALIZED_DWORD_BYTES];
+					cache = DISPATCH_BYTE(HMI_DISPATCH_CACHE_MAP_OFFSET + mapIndex);
+					if (cache == HMI_DISPATCH_UNASSIGNED) {
+						HmiMusic_AllocateChannelCache(state, mapIndex, cacheBase);
+						break;
 					}
-					DISPATCH_BYTE(0x86b6eu + driver * 16u + i) = 127;
-					DISPATCH_BYTE(0x86a35u) = (uint8_t)i | 0xb0u;
-					DISPATCH_BYTE(0x86a36u) = 0x79;
-					DISPATCH_BYTE(0x86a37u) = 0;
-					SEND_DRIVER_MESSAGE(3);
-					if (DISPATCH_BYTE(0x86178u + cacheBase + cache * 5u) != 0xff) {
-						DISPATCH_BYTE(0x86a35u) = (uint8_t)i | 0xc0u;
-						DISPATCH_BYTE(0x86a36u) = DISPATCH_BYTE(0x86178u + cacheBase + cache * 5u);
-						SEND_DRIVER_MESSAGE(2);
+					DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_VOLUMES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) =
+					    HMI_MIDI_DATA_MAXIMUM;
+					DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = (uint8_t)i | HMI_MIDI_CONTROL_CHANGE;
+					DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_RESET;
+					DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+					SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+					if (DISPATCH_BYTE(HMI_DISPATCH_CACHE_PROGRAM_OFFSET + cacheBase +
+					                  cache * HMI_DISPATCH_CACHE_ENTRY_BYTES) != HMI_DISPATCH_UNASSIGNED) {
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = (uint8_t)i | HMI_MIDI_PROGRAM_CHANGE;
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = DISPATCH_BYTE(
+						    HMI_DISPATCH_CACHE_PROGRAM_OFFSET + cacheBase + cache * HMI_DISPATCH_CACHE_ENTRY_BYTES);
+						SEND_DRIVER_MESSAGE(HMI_MIDI_SHORT_MESSAGE_BYTES);
 					}
-					if (DISPATCH_BYTE(0x86176u + cacheBase + cache * 5u) != 0xff) {
-						DISPATCH_BYTE(0x86a35u) = (uint8_t)i | 0xe0u;
-						DISPATCH_BYTE(0x86a36u) = 0;
-						DISPATCH_BYTE(0x86a37u) = DISPATCH_BYTE(0x86176u + cacheBase + cache * 5u);
-						SEND_DRIVER_MESSAGE(2); /* Original passes two, despite filling three bytes. */
+					if (DISPATCH_BYTE(HMI_DISPATCH_CACHE_PITCH_OFFSET + cacheBase +
+					                  cache * HMI_DISPATCH_CACHE_ENTRY_BYTES) != HMI_DISPATCH_UNASSIGNED) {
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = (uint8_t)i | HMI_MIDI_PITCH_BEND;
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = 0;
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = DISPATCH_BYTE(
+						    HMI_DISPATCH_CACHE_PITCH_OFFSET + cacheBase + cache * HMI_DISPATCH_CACHE_ENTRY_BYTES);
+						SEND_DRIVER_MESSAGE(
+						    HMI_MIDI_SHORT_MESSAGE_BYTES); /* Original passes two, despite filling three bytes. */
 					}
-					if (DISPATCH_BYTE(0x86177u + cacheBase + cache * 5u) != 0xff) {
-						DISPATCH_BYTE(0x86a35u) = (uint8_t)i | 0xb0u;
-						DISPATCH_BYTE(0x86a36u) = 7;
-						DISPATCH_BYTE(0x86a37u) = DISPATCH_BYTE(0x86177u + cacheBase + cache * 5u);
-						SEND_DRIVER_MESSAGE(3);
+					if (DISPATCH_BYTE(HMI_DISPATCH_CACHE_VOLUME_OFFSET + cacheBase +
+					                  cache * HMI_DISPATCH_CACHE_ENTRY_BYTES) != HMI_DISPATCH_UNASSIGNED) {
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = (uint8_t)i | HMI_MIDI_CONTROL_CHANGE;
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_VOLUME;
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = DISPATCH_BYTE(
+						    HMI_DISPATCH_CACHE_VOLUME_OFFSET + cacheBase + cache * HMI_DISPATCH_CACHE_ENTRY_BYTES);
+						SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
 					}
-					if (DISPATCH_BYTE(0x86179u + cacheBase + cache * 5u) != 0xff) {
-						DISPATCH_BYTE(0x86a35u) = (uint8_t)i | 0xb0u;
-						DISPATCH_BYTE(0x86a36u) = 0x40;
-						DISPATCH_BYTE(0x86a37u) = DISPATCH_BYTE(0x86179u + cacheBase + cache * 5u);
-						SEND_DRIVER_MESSAGE(3);
+					if (DISPATCH_BYTE(HMI_DISPATCH_CACHE_SUSTAIN_OFFSET + cacheBase +
+					                  cache * HMI_DISPATCH_CACHE_ENTRY_BYTES) != HMI_DISPATCH_UNASSIGNED) {
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = (uint8_t)i | HMI_MIDI_CONTROL_CHANGE;
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_SUSTAIN;
+						DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = DISPATCH_BYTE(
+						    HMI_DISPATCH_CACHE_SUSTAIN_OFFSET + cacheBase + cache * HMI_DISPATCH_CACHE_ENTRY_BYTES);
+						SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
 					}
-					goto retry;
+					break;
 				}
 			}
-			for (i = 0; i < 16; ++i) {
-				while (DISPATCH_BYTE(0x86afdu + driver * 16u + i) == 0 && i < 16)
-					++i;
-				if (i < 16 && priority < DISPATCH_BYTE(0x86085u + driver * 16u + i) &&
-				    DISPATCH_BYTE(0x86085u + driver * 16u + i) != 0xff) {
-					priority = DISPATCH_BYTE(0x86085u + driver * 16u + i);
+			if (mapped != HMI_DISPATCH_UNASSIGNED)
+				continue;
+			for (uint32_t i = 0; i < HMI_MIDI_CHANNEL_COUNT; ++i) {
+				if (DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_ENABLED_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) == 0)
+					continue;
+				if (priority <
+				        DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_PRIORITIES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) &&
+				    DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_PRIORITIES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i) !=
+				        HMI_DISPATCH_UNASSIGNED) {
+					priority =
+					    DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_PRIORITIES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + i);
 					victim = (uint8_t)i;
 				}
 			}
-			if (victim == 0xff)
-				goto event;
-			if (priority <= SlipBytes_ReadLE32(state->songs[song] + 0x40u + channel * 4u)) {
-				if (DISPATCH_BYTE(0x867b5u + mapIndex) != 0xff)
-					goto event;
-				j = 0;
-				goto allocateCachedEventChannel;
+			if (victim == HMI_DISPATCH_UNASSIGNED)
+				break;
+			if (priority <= SlipBytes_ReadLE32(state->songs[song] + HMI_SONG_CHANNEL_PRIORITIES_OFFSET +
+			                                   channel * HMI_SERIALIZED_DWORD_BYTES)) {
+				if (DISPATCH_BYTE(HMI_DISPATCH_CACHE_MAP_OFFSET + mapIndex) != HMI_DISPATCH_UNASSIGNED)
+					break;
+				HmiMusic_AllocateChannelCache(state, mapIndex, cacheBase);
+				break;
 			}
-			DISPATCH_BYTE(0x85e05u + mapIndex) = victim;
-			DISPATCH_BYTE(0x85e05u + driver * 128u + DISPATCH_BYTE(0x86125u + driver * 16u + victim) * 16u +
-			              DISPATCH_BYTE(0x860d5u + driver * 16u + victim)) = 0xff;
-			DISPATCH_BYTE(0x860d5u + driver * 16u + victim) = channel;
-			DISPATCH_BYTE(0x86125u + driver * 16u + victim) = (uint8_t)song;
+			DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_MAP_OFFSET + mapIndex) = victim;
+			DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_MAP_OFFSET + driver * HMI_DISPATCH_DRIVER_MAP_BYTES +
+			              DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_SONGS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + victim) *
+			                  HMI_MIDI_CHANNEL_COUNT +
+			              DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_OWNERS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT +
+			                            victim)) = HMI_DISPATCH_UNASSIGNED;
+			DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_OWNERS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + victim) = channel;
+			DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_SONGS_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + victim) = (uint8_t)song;
 			mapped = victim;
-			DISPATCH_BYTE(0x86085u + driver * 16u + victim) = state->songs[song][0x40u + channel * 4u];
-			DISPATCH_BYTE(0x86b6eu + driver * 16u + victim) = 127;
-			DISPATCH_BYTE(0x86a35u) = victim | 0xb0u;
-			DISPATCH_BYTE(0x86a36u) = 0x7b;
-			DISPATCH_BYTE(0x86a37u) = 0;
-			SEND_DRIVER_MESSAGE(3);
-			DISPATCH_BYTE(0x86a35u) = victim | 0xb0u;
-			DISPATCH_BYTE(0x86a36u) = 0x79;
-			DISPATCH_BYTE(0x86a37u) = 0;
-			SEND_DRIVER_MESSAGE(3);
-			if (DISPATCH_BYTE(0x867b5u + mapIndex) == 0xff) {
-				for (j = 0; j < 4; ++j) {
-					if (DISPATCH_BYTE(0x86175u + cacheBase + j * 5u) == 0xff) {
-						DISPATCH_BYTE(0x86175u + cacheBase + j * 5u) = 1;
-						DISPATCH_BYTE(0x867b5u + mapIndex) = (uint8_t)j;
-						break;
-					}
-				}
-			}
+			DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_PRIORITIES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + victim) =
+			    state->songs[song][HMI_SONG_CHANNEL_PRIORITIES_OFFSET + channel * HMI_SERIALIZED_DWORD_BYTES];
+			DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_VOLUMES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + victim) =
+			    HMI_MIDI_DATA_MAXIMUM;
+			DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = victim | HMI_MIDI_CONTROL_CHANGE;
+			DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_ALL_NOTES_OFF;
+			DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+			SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+			DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET) = victim | HMI_MIDI_CONTROL_CHANGE;
+			DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 1u) = HMI_MIDI_CONTROL_RESET;
+			DISPATCH_BYTE(HMI_DISPATCH_MESSAGE_OFFSET + 2u) = 0;
+			SEND_DRIVER_MESSAGE(HMI_MIDI_CONTROL_MESSAGE_BYTES);
+			if (DISPATCH_BYTE(HMI_DISPATCH_CACHE_MAP_OFFSET + mapIndex) == HMI_DISPATCH_UNASSIGNED)
+				HmiMusic_AllocateChannelCache(state, mapIndex, cacheBase);
 		}
-		goto retry;
 	}
-	message[0] = mapped | (original & 0xf0u);
-event:
-	if (channel == 9) {
-		if (original == 0xb9 && message[1] == 7) {
+	if (mapped != HMI_DISPATCH_UNASSIGNED)
+		message[0] = mapped | (original & HMI_MIDI_STATUS_MASK);
+	if (channel == HMI_MIDI_PERCUSSION_CHANNEL) {
+		if (original == (HMI_MIDI_CONTROL_CHANGE | HMI_MIDI_PERCUSSION_CHANNEL) &&
+		    message[1] == HMI_MIDI_CONTROL_VOLUME) {
 			volume = message[2];
-			DISPATCH_BYTE(0x86b77u + driver * 16u) = message[2];
+			DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_VOLUMES_OFFSET + HMI_MIDI_PERCUSSION_CHANNEL +
+			              driver * HMI_MIDI_CHANNEL_COUNT) = message[2];
 		}
 	} else {
-		cache = DISPATCH_BYTE(0x867b5u + mapIndex);
-		if ((original & 0xf0u) == 0xb0u) {
-			if (message[1] == 7) {
-				DISPATCH_BYTE(0x86177u + cacheBase + cache * 5u) = message[2];
+		cache = DISPATCH_BYTE(HMI_DISPATCH_CACHE_MAP_OFFSET + mapIndex);
+		if ((original & HMI_MIDI_STATUS_MASK) == HMI_MIDI_CONTROL_CHANGE) {
+			if (message[1] == HMI_MIDI_CONTROL_VOLUME) {
+				DISPATCH_BYTE(HMI_DISPATCH_CACHE_VOLUME_OFFSET + cacheBase + cache * HMI_DISPATCH_CACHE_ENTRY_BYTES) =
+				    message[2];
 				volume = message[2];
-				DISPATCH_BYTE(0x86b6eu + driver * 16u + mapped) = message[2];
-			} else if (message[1] == 0x40) {
-				DISPATCH_BYTE(0x86179u + cacheBase + cache * 5u) = message[2];
+				DISPATCH_BYTE(HMI_DISPATCH_CHANNEL_VOLUMES_OFFSET + driver * HMI_MIDI_CHANNEL_COUNT + mapped) =
+				    message[2];
+			} else if (message[1] == HMI_MIDI_CONTROL_SUSTAIN) {
+				DISPATCH_BYTE(HMI_DISPATCH_CACHE_SUSTAIN_OFFSET + cacheBase + cache * HMI_DISPATCH_CACHE_ENTRY_BYTES) =
+				    message[2];
 			}
-		} else if ((original & 0xf0u) == 0xc0u) {
-			DISPATCH_BYTE(0x86178u + cacheBase + cache * 5u) = message[1];
-		} else if ((original & 0xf0u) == 0xe0u) {
-			DISPATCH_BYTE(0x86176u + cacheBase + cache * 5u) = message[2];
+		} else if ((original & HMI_MIDI_STATUS_MASK) == HMI_MIDI_PROGRAM_CHANGE) {
+			DISPATCH_BYTE(HMI_DISPATCH_CACHE_PROGRAM_OFFSET + cacheBase + cache * HMI_DISPATCH_CACHE_ENTRY_BYTES) =
+			    message[1];
+		} else if ((original & HMI_MIDI_STATUS_MASK) == HMI_MIDI_PITCH_BEND) {
+			DISPATCH_BYTE(HMI_DISPATCH_CACHE_PITCH_OFFSET + cacheBase + cache * HMI_DISPATCH_CACHE_ENTRY_BYTES) =
+			    message[2];
 		}
 	}
-	if (mapped == 0xff)
+	if (mapped == HMI_DISPATCH_UNASSIGNED)
 		return UINT32_MAX;
 	if (volume != UINT32_MAX) {
-		message[2] = state->muted[song] != 0
-		                 ? 0
-		                 : (uint8_t)((DISPATCH_BYTE(0x86b4du) *
-		                              ((volume * SlipBytes_ReadLE32(&DISPATCH_BYTE(0x86b4eu + song * 4u))) >> 7)) >>
-		                             7);
+		message[2] =
+		    state->muted[song] != 0
+		        ? 0
+		        : (uint8_t)((DISPATCH_BYTE(HMI_DISPATCH_MASTER_VOLUME_OFFSET) *
+		                     ((volume * SlipBytes_ReadLE32(&DISPATCH_BYTE(HMI_DISPATCH_SONG_VOLUMES_OFFSET +
+		                                                                  song * HMI_SERIALIZED_DWORD_BYTES))) >>
+		                      HMI_A002_VOLUME_FRACTION_BITS)) >>
+		                    HMI_A002_VOLUME_FRACTION_BITS);
 	}
 	state->driverSend[driver](state, message, length, driver);
 	message[0] = original;
 	if (volume != UINT32_MAX)
 		message[2] = (uint8_t)volume;
 	return 0;
-allocateCachedVolumeChannel:
-	for (; j < 4; ++j) {
-		if (DISPATCH_BYTE(0x86175u + cacheBase + j * 5u) == 0xff) {
-			DISPATCH_BYTE(0x86175u + cacheBase + j * 5u) = 1;
-			DISPATCH_BYTE(0x867b5u + mapIndex) = (uint8_t)j;
-			break;
-		}
-	}
-	goto retry;
-allocateCachedEventChannel:
-	for (; j < 4; ++j) {
-		if (DISPATCH_BYTE(0x86175u + cacheBase + j * 5u) == 0xff) {
-			DISPATCH_BYTE(0x86175u + cacheBase + j * 5u) = 1;
-			DISPATCH_BYTE(0x867b5u + mapIndex) = (uint8_t)j;
-			break;
-		}
-	}
-	goto event;
 }
 
 #undef SEND_DRIVER_MESSAGE

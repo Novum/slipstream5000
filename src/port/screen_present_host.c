@@ -10,9 +10,11 @@ SlipScreenPage g_physicalDisplay;
 SlipScreenPage *g_drawPage;
 SlipScreenPage *g_displayPage;
 
-static SlipScreenLifecycle screen = {.cursor = {.x = 160, .y = 100}};
-static uint8_t biosMode = 3;
-static uint8_t savedPixels[4096];
+enum { SLIP_SCREEN_CURSOR_BACKGROUND_BYTES = 4096 };
+
+static SlipScreenLifecycle screen = {.cursor = {.x = SLIPSTREAM_SCREEN_WIDTH / 2, .y = SLIPSTREAM_SCREEN_HEIGHT / 2}};
+static uint8_t biosMode = SLIP_SCREEN_BIOS_MODE_80X25_TEXT;
+static uint8_t savedPixels[SLIP_SCREEN_CURSOR_BACKGROUND_BYTES];
 static SlipCursorPixels cursorPixels = {.background = {.pixels = savedPixels}};
 
 void SlipScreenHost_SelectCursor(void *context, bool useDefault, const SlipCursorSprite *sprite) {
@@ -54,15 +56,16 @@ static void SlipScreenHost_SetBiosMode(void *context, uint8_t mode) {
 	(void)context;
 	biosMode = mode;
 	/* SDL owns the physical window. This is the mode-13 VGA state binding. */
-	if (mode == 0x13) {
+	if (mode == SLIP_SCREEN_BIOS_MODE_320X200_256_COLOURS) {
 		memset(g_physicalDisplay, 0, sizeof(g_physicalDisplay));
 		SlipVgaDac_InitializeHostBiosDefaults();
 	}
 }
 
-static void SlipScreenHost_ReadDac(void *context, uint8_t colors[256][3]) {
+static void SlipScreenHost_ReadDac(void *context,
+                                   uint8_t colors[SLIP_VGA_DAC_PALETTE_COUNT][SLIP_VGA_DAC_CHANNEL_COUNT]) {
 	(void)context;
-	SlipVgaDac_ReadRange(0, 256, colors[0]);
+	SlipVgaDac_ReadRange(0, SLIP_VGA_DAC_PALETTE_COUNT, colors[0]);
 }
 
 static void SlipScreenHost_BindRows(void *context, uint8_t *page, uint32_t offset, uint16_t pitch) {

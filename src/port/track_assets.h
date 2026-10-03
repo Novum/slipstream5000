@@ -21,9 +21,9 @@ typedef struct SlipTrackAssetBundle {
 	const SlipTrackAssetCalls *resourceCalls;
 	uint16_t trkHandle, trdHandle, trcHandle;
 	uint32_t trdBaseToken, trcBaseToken;
-	char trkName[13];
-	char trdName[13];
-	char trcName[13];
+	char trkName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
+	char trdName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
+	char trcName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 	SlipResourcePayload trkPayload;
 	SlipResourcePayload trdPayload;
 	SlipResourcePayload trcPayload;

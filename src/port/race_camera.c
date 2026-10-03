@@ -1,39 +1,114 @@
 #include "race_camera.h"
+#include "actor_tags.h"
 
 #include "byte_order.h"
+#include "fixed_point.h"
 #include "game_errors.h"
 #include "race.h"
 #include "race_collision.h"
 #include "resource.h"
 #include "resource_host.h"
 #include "runtime.h"
+#include "track_format.h"
 #include "track_world.h"
 
 #include <string.h>
 
-#define RACE_CAMERA_MODE_COUNT 9u
+enum {
+	SLIP_RACE_CAMERA_SIDE_VISIT_CAPACITY = 32,
+	/* The original shake spans -3 through +4 pixels. */
+	SLIP_RACE_CAMERA_SHAKE_SAMPLE_MASK = 7,
+	SLIP_RACE_CAMERA_SHAKE_CENTER_BIAS = 3,
+	SLIP_RACE_LAP_TIME_DURATION_MS = 4000,
+	SLIP_RACE_LAP_NOTIFICATION_DURATION_MS = 2000,
+	SLIP_RACE_FINISH_CAMERA_HORIZONTAL_TILT_SHIFT = 1,
+	SLIP_RACE_TV_POSITIONS_DOS_ADDRESS = 0x42e1c,
+	SLIP_RACE_CAMERA_MODE_TABLE_DOS_ADDRESS = 0x42cab,
+	SLIP_RACE_CAMERA_MODE_DOS_STRIDE = 20,
+	SLIP_RACE_TV_ZOOM_START_DISTANCE = 9760,
+	SLIP_RACE_TV_ZOOM_DISTANCE_RANGE = 292800,
+	SLIP_RACE_TV_ZOOM_SCALE_RANGE_Q16 = 3 * SLIP_DRAW3D_SCALE_ONE_Q16,
+	SLIP_RACE_EXTERNAL_DISTANCE_MINIMUM = 8784,
+	SLIP_RACE_EXTERNAL_DISTANCE_MAXIMUM = 48800,
+	SLIP_RACE_EXTERNAL_DISTANCE_FRACTION_BITS = 13,
+	SLIP_RACE_EXTERNAL_ROTATION_SLOW = 1024,
+	SLIP_RACE_EXTERNAL_ROTATION_NORMAL = SLIP_ANGLE_QUARTER_TURN,
+	SLIP_RACE_EXTERNAL_PITCH_RATE_SHIFT = 1,
+	SLIP_RACE_EXTERNAL_PITCH_LIMIT_Q14 = 15360,
+	SLIP_RACE_CAMERA_INTRO_INITIAL_DISTANCE = 57344,
+	SLIP_RACE_CAMERA_DESTROYED_DISTANCE = 3072,
+	SLIP_RACE_CAMERA_INTRO_MINIMUM_DISTANCE = 7372,
+	SLIP_RACE_CAMERA_INTRO_ZOOM_STEP = 53248,
+	SLIP_RACE_CAMERA_PITCH_OFFSET = -1024,
+	SLIP_RACE_CAMERA_CHASE_BASE_DISTANCE = 20480,
+	SLIP_RACE_CAMERA_CHASE_SPEED_DISTANCE_SHIFT = 4,
+	SLIP_RACE_CAMERA_CHASE_ROTATION_STEP = 8192,
+	SLIP_RACE_CAMERA_MODE_NAME_DURATION = 6000,
+	SLIP_RACE_CAMERA_FINISH_DELAY = 4000,
+	SLIP_RACE_CAMERA_RAY_MINIMUM_FACING_Q14 = 16,
+	SLIP_RACE_CAMERA_PLANE_STANDOFF = 2440,
+	SLIP_RACE_CAMERA_RAY_NUMERATOR_SHIFT = 30,
+	SLIP_RACE_CAMERA_RAY_DIVISOR_SHIFT = 16,
+	SLIP_RACE_CAMERA_SELECT_COCKPIT_ONE = 0x3b,
+	SLIP_RACE_CAMERA_SELECT_CHASE_ONE = 0x3c,
+	SLIP_RACE_CAMERA_SELECT_REAR_ONE = 0x3d,
+	SLIP_RACE_CAMERA_SELECT_EXTERNAL_ONE = 0x3f,
+	SLIP_RACE_CAMERA_SELECT_COCKPIT_TWO = 0x40,
+	SLIP_RACE_CAMERA_SELECT_CHASE_TWO = 0x41,
+	SLIP_RACE_CAMERA_SELECT_REAR_TWO = 0x42,
+	SLIP_RACE_CAMERA_SELECT_TV_TWO = 0x43,
+	SLIP_RACE_CAMERA_SELECT_EXTERNAL_TWO = 0x44,
+	SLIP_RACE_CAMERA_KEY_ZOOM_IN = 0x4e,
+	SLIP_RACE_CAMERA_KEY_ZOOM_OUT = 0x4a,
+	SLIP_RACE_CAMERA_KEY_SLOW_ROTATION = 0x2a,
+	SLIP_RACE_CAMERA_KEY_ROTATE_LEFT = 0x52,
+	SLIP_RACE_CAMERA_KEY_ROTATE_RIGHT = 0x53,
+	SLIP_RACE_CAMERA_KEY_PITCH_UP = 0x49,
+	SLIP_RACE_CAMERA_KEY_PITCH_DOWN = 0x51,
+	SLIP_RACE_TV_POSITIONS_DOS_END = SLIP_RACE_TV_POSITIONS_DOS_ADDRESS + SLIP_RACE_CAM_FILE_BYTES
+};
 
-static const char *const cameraFiles[10] = {"CHICAGO.CAM", "HAWAII.CAM", "TOKYO.CAM",  "NORWAY.CAM", "CAVE.CAM",
-                                            "CAN.CAM",     "AMAZON.CAM", "LONDON.CAM", "EGYPT.CAM",  "NEWYORK.CAM"};
+/* Inclusive viewport coordinates in the original 320x200 display. */
+enum {
+	SLIP_RACE_VIEWPORT_CENTRE_X = 160,
+	SLIP_RACE_VIEWPORT_LEFT = 4,
+	SLIP_RACE_VIEWPORT_RIGHT = 315,
+	SLIP_RACE_VIEWPORT_SPLIT_BOTTOM_CENTRE_Y = 144,
+	SLIP_RACE_VIEWPORT_SPLIT_BOTTOM_TOP = 101,
+	SLIP_RACE_VIEWPORT_SPLIT_BOTTOM_BOTTOM = 187,
+	SLIP_RACE_VIEWPORT_SPLIT_TOP_CENTRE_Y = 43,
+	SLIP_RACE_VIEWPORT_SPLIT_TOP_BOTTOM = 87,
+	SLIP_RACE_VIEWPORT_CENTRE_Y = 87,
+	SLIP_RACE_VIEWPORT_BOTTOM = 166,
+	SLIP_RACE_VIEWPORT_INSET_TOP = 32,
+	SLIP_RACE_VIEWPORT_INSET_CENTRE_SHIFT = 12,
+	SLIP_RACE_VIEWPORT_TOP = 8,
+};
+
+static const char *const cameraFiles[SLIP_RACE_TRACK_COUNT] = {"CHICAGO.CAM", "HAWAII.CAM", "TOKYO.CAM",  "NORWAY.CAM",
+                                                               "CAVE.CAM",    "CAN.CAM",    "AMAZON.CAM", "LONDON.CAM",
+                                                               "EGYPT.CAM",   "NEWYORK.CAM"};
 
 bool SlipRaceCamera_LoadPositions(SlipRaceCameraState *state, const char *const *archives, size_t archiveCount,
                                   uint16_t track) {
 	(void)archives;
 	(void)archiveCount;
-	if (track == 0 || track > 10)
+	if (track == 0 || track > SLIP_RACE_TRACK_COUNT)
 		return false;
 	uint16_t cameraResource;
 	if (!SlipResourceHost_Load(NULL, cameraFiles[track - 1], &cameraResource))
 		SlipGame_ResourceFailure();
 	const uint8_t *const cameraBytes = SlipResourceHost_Lock(NULL, cameraResource);
 	SlipResourcePayload cameraPayload = SlipResourceHost_Payload(cameraResource);
-	if (cameraPayload.size < 0x2d0u)
+	if (cameraPayload.size < SLIP_RACE_CAM_FILE_BYTES)
 		return false;
-	for (size_t cameraIndex = 0; cameraIndex < 60; ++cameraIndex) {
+	for (size_t cameraIndex = 0; cameraIndex < SLIP_RACE_TV_POSITION_COUNT; ++cameraIndex) {
 		state->tvPositions[cameraIndex] =
-		    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(cameraBytes + cameraIndex * 12),
-		                      (int32_t)SlipBytes_ReadLE32(cameraBytes + cameraIndex * 12 + 4),
-		                      (int32_t)SlipBytes_ReadLE32(cameraBytes + cameraIndex * 12 + 8)};
+		    (SlipView3DVec32){(int32_t)SlipBytes_ReadLE32(cameraBytes + cameraIndex * SLIP_RACE_CAM_POSITION_BYTES),
+		                      (int32_t)SlipBytes_ReadLE32(cameraBytes + cameraIndex * SLIP_RACE_CAM_POSITION_BYTES +
+		                                                  SLIP_RACE_CAM_Y_OFFSET),
+		                      (int32_t)SlipBytes_ReadLE32(cameraBytes + cameraIndex * SLIP_RACE_CAM_POSITION_BYTES +
+		                                                  SLIP_RACE_CAM_Z_OFFSET)};
 	}
 	SlipResourceHost_Unlock(NULL, cameraResource);
 	SlipResourceHost_Release(NULL, cameraResource);
@@ -44,12 +119,12 @@ bool SlipRaceCamera_SelectTv(SlipRaceCameraState *state, SlipView3DVec32 craft, 
                              const uint8_t *components, size_t componentBytes, const uint8_t *cells, size_t cellBytes,
                              uint32_t trackDataAddress, uint32_t *selectedCameraAddressOut, int32_t *distance) {
 	uint32_t selectedCameraAddress = 0;
-	int32_t nearestCameraDistance = 0x7fffffff;
+	int32_t nearestCameraDistance = INT32_MAX;
 	SlipTrackWorldRecordSearch cameraRecordSearch;
 	SlipTrackWorldSegmentCollision lineOfSightCollision;
 	const SlipView3DVec32 *cameraPosition;
 
-	for (size_t cameraIndex = 0; cameraIndex < 60; ++cameraIndex) {
+	for (size_t cameraIndex = 0; cameraIndex < SLIP_RACE_TV_POSITION_COUNT; ++cameraIndex) {
 		cameraPosition = &state->tvPositions[cameraIndex];
 		if (cameraPosition->x == -1)
 			continue;
@@ -59,12 +134,15 @@ bool SlipRaceCamera_SelectTv(SlipRaceCameraState *state, SlipView3DVec32 craft, 
 		                                     (int32_t)((uint32_t)craft.z - (uint32_t)cameraPosition->z));
 		if (cameraDistance < nearestCameraDistance) {
 			nearestCameraDistance = cameraDistance;
-			selectedCameraAddress = 0x42e1cu + (uint32_t)cameraIndex * 12u;
+			selectedCameraAddress =
+			    SLIP_RACE_TV_POSITIONS_DOS_ADDRESS + (uint32_t)cameraIndex * SLIP_RACE_CAM_POSITION_BYTES;
 		}
 	}
 	if (selectedCameraAddress == 0 || SlipRaceCollision_segmentQuery == NULL)
 		return false;
-	cameraPosition = &state->tvPositions[(selectedCameraAddress - 0x42e1cu) / 12u];
+	cameraPosition =
+	    &state
+	         ->tvPositions[(selectedCameraAddress - SLIP_RACE_TV_POSITIONS_DOS_ADDRESS) / SLIP_RACE_CAM_POSITION_BYTES];
 
 	if (!SlipTrackWorld_RecordSearch(trd, trdBytes, components, componentBytes, cells, cellBytes, trackDataAddress, 0,
 	                                 cameraPosition->x, cameraPosition->y, cameraPosition->z, &cameraRecordSearch))
@@ -75,11 +153,12 @@ bool SlipRaceCamera_SelectTv(SlipRaceCameraState *state, SlipView3DVec32 craft, 
 		if (lineOfSightCollision.transitionBlocked) {
 			const uint32_t rejectedCameraAddress = selectedCameraAddress;
 			selectedCameraAddress = 0;
-			nearestCameraDistance = 0x7fffffff;
+			nearestCameraDistance = INT32_MAX;
 
-			for (size_t cameraIndex = 0; cameraIndex < 60; ++cameraIndex) {
+			for (size_t cameraIndex = 0; cameraIndex < SLIP_RACE_TV_POSITION_COUNT; ++cameraIndex) {
 				cameraPosition = &state->tvPositions[cameraIndex];
-				const uint32_t cameraAddress = 0x42e1cu + (uint32_t)cameraIndex * 12u;
+				const uint32_t cameraAddress =
+				    SLIP_RACE_TV_POSITIONS_DOS_ADDRESS + (uint32_t)cameraIndex * SLIP_RACE_CAM_POSITION_BYTES;
 				if (cameraPosition->x == -1 || cameraAddress == rejectedCameraAddress)
 					continue;
 				const int32_t cameraDistance =
@@ -93,12 +172,13 @@ bool SlipRaceCamera_SelectTv(SlipRaceCameraState *state, SlipView3DVec32 craft, 
 			}
 			if (selectedCameraAddress == 0)
 				return false;
-			cameraPosition = &state->tvPositions[(selectedCameraAddress - 0x42e1cu) / 12u];
+			cameraPosition = &state->tvPositions[(selectedCameraAddress - SLIP_RACE_TV_POSITIONS_DOS_ADDRESS) /
+			                                     SLIP_RACE_CAM_POSITION_BYTES];
 			SlipRaceCollision_segmentQuery(trd, trdBytes, trackDataAddress, components, componentBytes, cells,
 			                               cellBytes, craft, *cameraPosition, &lineOfSightCollision);
 			if (lineOfSightCollision.transitionBlocked)
 				selectedCameraAddress =
-				    state->tvPreviousCamera != 0xffffffffu ? state->tvPreviousCamera : rejectedCameraAddress;
+				    state->tvPreviousCamera != UINT32_MAX ? state->tvPreviousCamera : rejectedCameraAddress;
 		}
 	}
 	state->tvPreviousCamera = selectedCameraAddress;
@@ -116,10 +196,10 @@ bool SlipRaceCamera_Finish(SlipRaceCameraState *state, SlipObject *objects, size
 	SlipView3DNormalizeLength3D normalized;
 	const SlipView3DVec32 *selectedCameraPosition = NULL;
 	int32_t nearestCameraDistance = INT32_MAX;
-	state->finishPosition = racePosition & 0x7fffu;
+	state->finishPosition = racePosition & SLIP_RACE_POSITION_MASK;
 	if (!SlipObject_Position(objects, objectBytes, racerObject, &craft))
 		return false;
-	for (size_t cameraIndex = 0; cameraIndex < 60; ++cameraIndex) {
+	for (size_t cameraIndex = 0; cameraIndex < SLIP_RACE_TV_POSITION_COUNT; ++cameraIndex) {
 		const SlipView3DVec32 *const cameraPosition = &state->tvPositions[cameraIndex];
 		if (cameraPosition->x == -1)
 			continue;
@@ -148,17 +228,19 @@ bool SlipRaceCamera_Finish(SlipRaceCameraState *state, SlipObject *objects, size
 }
 
 void SlipRaceCamera_ActivateTv(SlipRaceCameraState *state) {
-	state->tvSoundDistance = 0x7fffffff;
+	state->tvSoundDistance = INT32_MAX;
 	state->tvSoundCamera = 0;
 }
 
 uint32_t SlipRaceCamera_TvScale(uint32_t distance) {
-	uint32_t zoomDistanceExcess = distance - 0x2620u;
+	uint32_t zoomDistanceExcess = distance - SLIP_RACE_TV_ZOOM_START_DISTANCE;
 	if ((int32_t)zoomDistanceExcess < 0)
 		zoomDistanceExcess = 0;
-	if ((int32_t)zoomDistanceExcess > 0x477c0)
-		zoomDistanceExcess = 0x477c0;
-	return (uint32_t)(((uint64_t)zoomDistanceExcess * 0x30000u) / 0x477c0u) + 0x10000u;
+	if ((int32_t)zoomDistanceExcess > SLIP_RACE_TV_ZOOM_DISTANCE_RANGE)
+		zoomDistanceExcess = SLIP_RACE_TV_ZOOM_DISTANCE_RANGE;
+	return (uint32_t)(((uint64_t)zoomDistanceExcess * SLIP_RACE_TV_ZOOM_SCALE_RANGE_Q16) /
+	                  SLIP_RACE_TV_ZOOM_DISTANCE_RANGE) +
+	       SLIP_DRAW3D_SCALE_ONE_Q16;
 }
 
 bool SlipRaceCamera_TvTransform(const SlipRaceCameraState *state, SlipObject *objects, size_t objectBytes,
@@ -169,10 +251,13 @@ bool SlipRaceCamera_TvTransform(const SlipRaceCameraState *state, SlipObject *ob
 	SlipView3DNormalizeVector3D normalized;
 	SlipView3DMatrix matrix;
 	const SlipView3DVec32 *position;
-	if (selectedCameraAddress < 0x42e1cu || selectedCameraAddress >= 0x430ecu ||
-	    (selectedCameraAddress - 0x42e1cu) % 12u != 0)
+	if (selectedCameraAddress < SLIP_RACE_TV_POSITIONS_DOS_ADDRESS ||
+	    selectedCameraAddress >= SLIP_RACE_TV_POSITIONS_DOS_END ||
+	    (selectedCameraAddress - SLIP_RACE_TV_POSITIONS_DOS_ADDRESS) % SLIP_RACE_CAM_POSITION_BYTES != 0)
 		return false;
-	position = &state->tvPositions[(selectedCameraAddress - 0x42e1cu) / 12u];
+	position =
+	    &state
+	         ->tvPositions[(selectedCameraAddress - SLIP_RACE_TV_POSITIONS_DOS_ADDRESS) / SLIP_RACE_CAM_POSITION_BYTES];
 	if (!SlipObject_SetPosition(objects, objectBytes, 0, (uint32_t)position->x, (uint32_t)position->y,
 	                            (uint32_t)position->z, &setPosition) ||
 	    !SlipObject_Position(objects, objectBytes, racerObject, &craft))
@@ -208,7 +293,8 @@ bool SlipRaceCamera_External(SlipRaceCameraState *state, SlipObject *objects, si
 	distance = state->externalDistance;
 	if (distance > clearance) {
 		distance = clearance;
-		state->externalDistance = clearance < 0x2250 ? 0x2250 : clearance;
+		state->externalDistance =
+		    clearance < SLIP_RACE_EXTERNAL_DISTANCE_MINIMUM ? SLIP_RACE_EXTERNAL_DISTANCE_MINIMUM : clearance;
 	}
 	offset = SlipView3D_TransformPositionByColumns(matrix, (SlipView3DVec32){0, 0, (int32_t)(0u - (uint32_t)distance)});
 	return SlipObject_SetPosition(objects, objectBytes, 0, craft.positionX + (uint32_t)offset.x,
@@ -216,32 +302,40 @@ bool SlipRaceCamera_External(SlipRaceCameraState *state, SlipObject *objects, si
 	                              &setPosition);
 }
 
-void SlipRaceCamera_ExternalControls(SlipRaceCameraState *state, uint16_t frameStep, const bool held[256],
-                                     const SlipView3DMaths *maths) {
-	const int32_t distanceIncrement = (int32_t)(((int64_t)state->externalDistance * (int16_t)frameStep) >> 13);
+void SlipRaceCamera_ExternalControls(SlipRaceCameraState *state, uint16_t frameStep,
+                                     const bool held[SLIP_INPUT_CODE_COUNT], const SlipView3DMaths *maths) {
+	const int32_t distanceIncrement =
+	    (int32_t)(((int64_t)state->externalDistance * (int16_t)frameStep) >> SLIP_RACE_EXTERNAL_DISTANCE_FRACTION_BITS);
 	int32_t distance = state->externalDistance;
 	SlipView3DMatrix *const matrix = &state->externalMatrix;
 	int16_t rotationAngle;
-	if (held[0x4e]) {
+	if (held[SLIP_RACE_CAMERA_KEY_ZOOM_IN]) {
 		distance = (int32_t)((uint32_t)distance - (uint32_t)distanceIncrement);
-		if (distance < 0x2250)
-			distance = 0x2250;
+		if (distance < SLIP_RACE_EXTERNAL_DISTANCE_MINIMUM)
+			distance = SLIP_RACE_EXTERNAL_DISTANCE_MINIMUM;
 	}
-	if (held[0x4a]) {
+	if (held[SLIP_RACE_CAMERA_KEY_ZOOM_OUT]) {
 		distance = (int32_t)((uint32_t)distance + (uint32_t)distanceIncrement);
-		if ((uint32_t)distance > 0xbea0u)
-			distance = 0xbea0;
+		if ((uint32_t)distance > SLIP_RACE_EXTERNAL_DISTANCE_MAXIMUM)
+			distance = SLIP_RACE_EXTERNAL_DISTANCE_MAXIMUM;
 	}
 	state->externalDistance = distance;
-	rotationAngle = (int16_t)(((int32_t)(held[0x2a] ? 0x400 : 0x4000) * (int16_t)frameStep) >> 14);
-	if (held[0x52])
+	rotationAngle =
+	    (int16_t)(((int32_t)(held[SLIP_RACE_CAMERA_KEY_SLOW_ROTATION] ? SLIP_RACE_EXTERNAL_ROTATION_SLOW
+	                                                                  : SLIP_RACE_EXTERNAL_ROTATION_NORMAL) *
+	               (int16_t)frameStep) >>
+	              SLIP_Q14_FRACTION_BITS);
+	if (held[SLIP_RACE_CAMERA_KEY_ROTATE_LEFT])
 		SlipView3D_ApplyColumn0Column2Rotation(maths, rotationAngle, matrix);
-	if (held[0x53])
-		SlipView3D_ApplyColumn0Column2Rotation(maths, (int16_t)((0u - (uint16_t)rotationAngle) & 0xffffu), matrix);
-	if (held[0x49] && matrix->m[7] > -0x3c00)
-		SlipView3D_ApplyPitchMatrix(maths, (int16_t)((int16_t)((0u - (uint16_t)rotationAngle) & 0xffffu) >> 1), matrix);
-	if (held[0x51] && matrix->m[7] < 0x3c00)
-		SlipView3D_ApplyPitchMatrix(maths, (int16_t)(rotationAngle >> 1), matrix);
+	if (held[SLIP_RACE_CAMERA_KEY_ROTATE_RIGHT])
+		SlipView3D_ApplyColumn0Column2Rotation(maths, (int16_t)((0u - (uint16_t)rotationAngle) & UINT16_MAX), matrix);
+	if (held[SLIP_RACE_CAMERA_KEY_PITCH_UP] && matrix->m[7] > -SLIP_RACE_EXTERNAL_PITCH_LIMIT_Q14)
+		SlipView3D_ApplyPitchMatrix(
+		    maths,
+		    (int16_t)((int16_t)((0u - (uint16_t)rotationAngle) & UINT16_MAX) >> SLIP_RACE_EXTERNAL_PITCH_RATE_SHIFT),
+		    matrix);
+	if (held[SLIP_RACE_CAMERA_KEY_PITCH_DOWN] && matrix->m[7] < SLIP_RACE_EXTERNAL_PITCH_LIMIT_Q14)
+		SlipView3D_ApplyPitchMatrix(maths, (int16_t)(rotationAngle >> SLIP_RACE_EXTERNAL_PITCH_RATE_SHIFT), matrix);
 	SlipView3D_OrthonormalizeForwardBasis(matrix);
 }
 
@@ -249,8 +343,8 @@ void SlipRaceCamera_ViewportShake(uint16_t shakeTimer, int32_t *centerX, int32_t
 	if (shakeTimer == 0 || centerX == NULL || centerY == NULL) {
 		return;
 	}
-	*centerX += (int32_t)(SlipRandom_Next() & 7u) - 3;
-	*centerY += (int32_t)(SlipRandom_Next() & 7u) - 3;
+	*centerX += (int32_t)(SlipRandom_Next() & SLIP_RACE_CAMERA_SHAKE_SAMPLE_MASK) - SLIP_RACE_CAMERA_SHAKE_CENTER_BIAS;
+	*centerY += (int32_t)(SlipRandom_Next() & SLIP_RACE_CAMERA_SHAKE_SAMPLE_MASK) - SLIP_RACE_CAMERA_SHAKE_CENTER_BIAS;
 }
 
 bool SlipRaceCamera_MainViewport(uint16_t viewId, uint32_t gameMode, uint32_t splitView, uint16_t shakeView1,
@@ -267,35 +361,35 @@ bool SlipRaceCamera_MainViewport(uint16_t viewId, uint32_t gameMode, uint32_t sp
 		return false;
 	}
 	savedRandomState = SlipRandom_GetState();
-	if (gameMode == 1u) {
-		centerX = 0x00a0;
+	if (gameMode == SLIP_RACE_GAME_SPLIT_SCREEN) {
+		centerX = SLIP_RACE_VIEWPORT_CENTRE_X;
 		if (viewId == 2u) {
-			centerY = 0x0090;
+			centerY = SLIP_RACE_VIEWPORT_SPLIT_BOTTOM_CENTRE_Y;
 			SlipRaceCamera_ViewportShake(shakeView2, &centerX, &centerY);
-			minX = 0x0004;
-			minY = 0x0065;
-			maxX = 0x013b;
-			maxY = 0x00bb;
+			minX = SLIP_RACE_VIEWPORT_LEFT;
+			minY = SLIP_RACE_VIEWPORT_SPLIT_BOTTOM_TOP;
+			maxX = SLIP_RACE_VIEWPORT_RIGHT;
+			maxY = SLIP_RACE_VIEWPORT_SPLIT_BOTTOM_BOTTOM;
 		} else {
-			centerY = 0x002b;
+			centerY = SLIP_RACE_VIEWPORT_SPLIT_TOP_CENTRE_Y;
 			SlipRaceCamera_ViewportShake(shakeView1, &centerX, &centerY);
-			minX = 0x0004;
+			minX = SLIP_RACE_VIEWPORT_LEFT;
 			minY = 0;
-			maxX = 0x013b;
-			maxY = 0x0057;
+			maxX = SLIP_RACE_VIEWPORT_RIGHT;
+			maxY = SLIP_RACE_VIEWPORT_SPLIT_TOP_BOTTOM;
 		}
 	} else {
-		centerX = 0x00a0;
-		centerY = 0x0057;
+		centerX = SLIP_RACE_VIEWPORT_CENTRE_X;
+		centerY = SLIP_RACE_VIEWPORT_CENTRE_Y;
 		SlipRaceCamera_ViewportShake(shakeView1, &centerX, &centerY);
-		minX = 0x0004;
-		maxX = 0x013b;
-		maxY = 0x00a6;
+		minX = SLIP_RACE_VIEWPORT_LEFT;
+		maxX = SLIP_RACE_VIEWPORT_RIGHT;
+		maxY = SLIP_RACE_VIEWPORT_BOTTOM;
 		if (splitView != 0) {
-			minY = 0x0020;
-			centerY += 0x000c;
+			minY = SLIP_RACE_VIEWPORT_INSET_TOP;
+			centerY += SLIP_RACE_VIEWPORT_INSET_CENTRE_SHIFT;
 		} else {
-			minY = 0x0008;
+			minY = SLIP_RACE_VIEWPORT_TOP;
 		}
 	}
 	SlipDraw3D_SetViewport(projectState, minX, minY, maxX, maxY, centerX, centerY);
@@ -310,16 +404,21 @@ typedef struct RaceCameraModeEntry {
 	bool hasActivationCallback;
 } RaceCameraModeEntry;
 
-static const RaceCameraModeEntry kRaceCameraModeTable[RACE_CAMERA_MODE_COUNT] = {
-    {"", 0x0000u, 0x0000u, false},
-    {"", 0x0000u, 0x0000u, false},
-    {"", 0x0000u, 0x0000u, false},
-    {"Cockpit View", 0x003bu, 0x0040u, false},
-    {"Chase Camera", 0x003cu, 0x0041u, true},
-    {"Rear View", 0x003du, 0x0042u, false},
-    {"TV Camera", 0x003eu, 0x0043u, true},
-    {"External Camera", 0x003fu, 0x0044u, false},
-    {"Camera Dropped", 0x003cu, 0x0041u, false},
+static const RaceCameraModeEntry kRaceCameraModeTable[SLIP_RACE_CAMERA_MODE_COUNT] = {
+    [SLIP_RACE_CAMERA_MODE_INTRO] = {"", 0x0000u, 0x0000u, false},
+    [SLIP_RACE_CAMERA_MODE_DESTROYED] = {"", 0x0000u, 0x0000u, false},
+    [SLIP_RACE_CAMERA_MODE_FINISH] = {"", 0x0000u, 0x0000u, false},
+    [SLIP_RACE_CAMERA_MODE_COCKPIT] = {"Cockpit View", SLIP_RACE_CAMERA_SELECT_COCKPIT_ONE,
+                                       SLIP_RACE_CAMERA_SELECT_COCKPIT_TWO, false},
+    [SLIP_RACE_CAMERA_MODE_CHASE] = {"Chase Camera", SLIP_RACE_CAMERA_SELECT_CHASE_ONE,
+                                     SLIP_RACE_CAMERA_SELECT_CHASE_TWO, true},
+    [SLIP_RACE_CAMERA_MODE_REAR] = {"Rear View", SLIP_RACE_CAMERA_SELECT_REAR_ONE, SLIP_RACE_CAMERA_SELECT_REAR_TWO,
+                                    false},
+    [SLIP_RACE_CAMERA_MODE_TV] = {"TV Camera", SLIP_RACE_CAMERA_SELECT_TV_ONE, SLIP_RACE_CAMERA_SELECT_TV_TWO, true},
+    [SLIP_RACE_CAMERA_MODE_EXTERNAL] = {"External Camera", SLIP_RACE_CAMERA_SELECT_EXTERNAL_ONE,
+                                        SLIP_RACE_CAMERA_SELECT_EXTERNAL_TWO, false},
+    [SLIP_RACE_CAMERA_MODE_DROPPED] = {"Camera Dropped", SLIP_RACE_CAMERA_SELECT_CHASE_ONE,
+                                       SLIP_RACE_CAMERA_SELECT_CHASE_TWO, false},
 };
 
 const char *SlipRaceCamera_ModeName(uint16_t mode) { return kRaceCameraModeTable[mode].modeName; }
@@ -349,8 +448,8 @@ void SlipRaceCamera_Reset(SlipRaceCameraState *state) {
 		return;
 	}
 
-	state->viewOneMode = 0;
-	state->viewTwoMode = 0;
+	state->viewOneMode = SLIP_RACE_CAMERA_MODE_INTRO;
+	state->viewTwoMode = SLIP_RACE_CAMERA_MODE_INTRO;
 	state->lapNotificationTimer[0] = 0;
 	state->lapNotificationTimer[1] = 0;
 	state->lapTimeTimer[0] = 0;
@@ -358,14 +457,14 @@ void SlipRaceCamera_Reset(SlipRaceCameraState *state) {
 	state->shake[0] = 0;
 	state->shake[1] = 0;
 
-	state->viewOneZoomDistance = 0xe000;
-	state->viewTwoZoomDistance = 0xe000;
+	state->viewOneZoomDistance = SLIP_RACE_CAMERA_INTRO_INITIAL_DISTANCE;
+	state->viewTwoZoomDistance = SLIP_RACE_CAMERA_INTRO_INITIAL_DISTANCE;
 
 	SlipRaceCamera_projectileObject = 0;
-	SlipObject_SetServer(1, SlipRaceCamera_ProjectileDeleted);
+	SlipObject_SetServer(SLIP_OBJECT_RELEASE_SERVER_ID, SlipRaceCamera_ProjectileDeleted);
 
-	state->viewOneModeNameTimer = 0x1770;
-	state->viewTwoModeNameTimer = 0x1770;
+	state->viewOneModeNameTimer = SLIP_RACE_CAMERA_MODE_NAME_DURATION;
+	state->viewTwoModeNameTimer = SLIP_RACE_CAMERA_MODE_NAME_DURATION;
 }
 
 void SlipRaceCamera_DestroyRacer(SlipRaceCameraState *state, uint16_t racerObject, uint16_t playerOneObject,
@@ -373,43 +472,43 @@ void SlipRaceCamera_DestroyRacer(SlipRaceCameraState *state, uint16_t racerObjec
 	if (racerObject == thirdObject) {
 		if (SlipRace_racerCount == 2u) {
 			SlipRace_playerTwoFinished = 1;
-			SlipRace_playerTwoFinishDelay = 0x0fa0;
+			SlipRace_playerTwoFinishDelay = SLIP_RACE_CAMERA_FINISH_DELAY;
 		}
 		return;
 	}
 	if (racerObject == playerOneObject) {
 
-		state->viewOneZoomDistance = 0x0c00;
-		state->viewOneMode = 1;
+		state->viewOneZoomDistance = SLIP_RACE_CAMERA_DESTROYED_DISTANCE;
+		state->viewOneMode = SLIP_RACE_CAMERA_MODE_DESTROYED;
 		state->lapNotificationTimer[0] = 0;
 		state->viewOneModeNameTimer = 0;
-		if (SlipRace_racerCount == 2u || SlipRace_gameMode == 0) {
+		if (SlipRace_racerCount == 2u || SlipRace_gameMode == SLIP_RACE_GAME_SINGLE_PLAYER) {
 			SlipRace_playerOneFinished = 1;
-			SlipRace_playerOneFinishDelay = 0x0fa0;
+			SlipRace_playerOneFinishDelay = SLIP_RACE_CAMERA_FINISH_DELAY;
 		}
 		return;
 	}
 	if (racerObject != playerTwoObject)
 		return;
 
-	state->viewTwoZoomDistance = 0x0c00;
-	state->viewTwoMode = 1;
+	state->viewTwoZoomDistance = SLIP_RACE_CAMERA_DESTROYED_DISTANCE;
+	state->viewTwoMode = SLIP_RACE_CAMERA_MODE_DESTROYED;
 	state->lapNotificationTimer[1] = 0;
 	state->viewTwoModeNameTimer = 0;
-	if (SlipRace_gameMode == 0) {
+	if (SlipRace_gameMode == SLIP_RACE_GAME_SINGLE_PLAYER) {
 		SlipRace_playerTwoFinished = 1;
-		SlipRace_playerTwoFinishDelay = 0x0fa0;
+		SlipRace_playerTwoFinishDelay = SLIP_RACE_CAMERA_FINISH_DELAY;
 	}
 }
 
 void SlipRaceCamera_FinishRacer(SlipRaceCameraState *state, uint16_t racerObject, uint16_t playerOneObject,
                                 uint16_t playerTwoObject) {
 	if (racerObject == playerOneObject) {
-		state->viewOneMode = 2;
+		state->viewOneMode = SLIP_RACE_CAMERA_MODE_FINISH;
 		state->lapNotificationTimer[0] = 0;
 		state->viewOneModeNameTimer = 0;
 	} else if (racerObject == playerTwoObject) {
-		state->viewTwoMode = 2;
+		state->viewTwoMode = SLIP_RACE_CAMERA_MODE_FINISH;
 		state->lapNotificationTimer[1] = 0;
 		state->viewTwoModeNameTimer = 0;
 	}
@@ -419,7 +518,7 @@ void SlipRaceCamera_StoreLapTime(SlipRaceCameraState *state, uint32_t playerId, 
 	uint32_t playerIndex;
 
 	playerIndex = playerId == 1u ? 0u : 1u;
-	state->lapTimeTimer[playerIndex] = 4000u;
+	state->lapTimeTimer[playerIndex] = SLIP_RACE_LAP_TIME_DURATION_MS;
 	state->lapTime[playerIndex] = lapTime;
 }
 
@@ -427,7 +526,7 @@ void SlipRaceCamera_StoreLapNumber(SlipRaceCameraState *state, uint32_t playerId
 	uint32_t playerIndex;
 
 	playerIndex = playerId - 1u;
-	state->lapNotificationTimer[playerIndex] = 2000u;
+	state->lapNotificationTimer[playerIndex] = SLIP_RACE_LAP_NOTIFICATION_DURATION_MS;
 	state->lapNotificationValue[playerIndex] = lapNumber;
 }
 
@@ -438,12 +537,12 @@ bool SlipRaceCamera_Event(SlipRaceCameraState *state, uint16_t selectionEvent, S
 	if (state == NULL) {
 		return false;
 	}
-	for (modeIndex = 0; modeIndex < RACE_CAMERA_MODE_COUNT; ++modeIndex) {
+	for (modeIndex = 0; modeIndex < SLIP_RACE_CAMERA_MODE_COUNT; ++modeIndex) {
 		const RaceCameraModeEntry *const entry = &kRaceCameraModeTable[modeIndex];
 
 		if (modeIndex != state->viewOneMode && selectionEvent == entry->viewOneSelectionEvent) {
 			state->viewOneMode = modeIndex;
-			state->viewOneModeNameTimer = 0x1770u;
+			state->viewOneModeNameTimer = SLIP_RACE_CAMERA_MODE_NAME_DURATION;
 
 			if (entry->hasActivationCallback && (activate == NULL || !activate(context, modeIndex, 1u)))
 				return false;
@@ -452,7 +551,7 @@ bool SlipRaceCamera_Event(SlipRaceCameraState *state, uint16_t selectionEvent, S
 
 		if (modeIndex != state->viewTwoMode && selectionEvent == entry->viewTwoSelectionEvent) {
 			state->viewTwoMode = modeIndex;
-			state->viewTwoModeNameTimer = 0x1770u;
+			state->viewTwoModeNameTimer = SLIP_RACE_CAMERA_MODE_NAME_DURATION;
 
 			if (entry->hasActivationCallback && (activate == NULL || !activate(context, modeIndex, 2u)))
 				return false;
@@ -463,23 +562,24 @@ bool SlipRaceCamera_Event(SlipRaceCameraState *state, uint16_t selectionEvent, S
 	return true;
 }
 
-bool SlipRaceCamera_PollKeys(SlipRaceCameraState *state, uint32_t gameMode, bool pressed[256],
+bool SlipRaceCamera_PollKeys(SlipRaceCameraState *state, uint32_t gameMode, bool pressed[SLIP_INPUT_CODE_COUNT],
                              SlipRaceCameraActivation activate, void *context) {
-	for (uint16_t mode = 0; mode < RACE_CAMERA_MODE_COUNT; ++mode) {
+	for (uint16_t mode = 0; mode < SLIP_RACE_CAMERA_MODE_COUNT; ++mode) {
 		const RaceCameraModeEntry *const entry = &kRaceCameraModeTable[mode];
-		if (mode != state->viewOneMode && state->viewOneMode != 1u && state->viewOneMode != 2u &&
-		    pressed[entry->viewOneSelectionEvent]) {
+		if (mode != state->viewOneMode && state->viewOneMode != SLIP_RACE_CAMERA_MODE_DESTROYED &&
+		    state->viewOneMode != SLIP_RACE_CAMERA_MODE_FINISH && pressed[entry->viewOneSelectionEvent]) {
 			pressed[entry->viewOneSelectionEvent] = false;
 			state->viewOneMode = mode;
-			state->viewOneModeNameTimer = 0x1770u;
+			state->viewOneModeNameTimer = SLIP_RACE_CAMERA_MODE_NAME_DURATION;
 			if (entry->hasActivationCallback && (activate == NULL || !activate(context, mode, 1u)))
 				return false;
 		}
-		if (gameMode == 1u && mode != state->viewTwoMode && state->viewTwoMode != 1u && state->viewTwoMode != 2u &&
-		    pressed[entry->viewTwoSelectionEvent]) {
+		if (gameMode == SLIP_RACE_GAME_SPLIT_SCREEN && mode != state->viewTwoMode &&
+		    state->viewTwoMode != SLIP_RACE_CAMERA_MODE_DESTROYED &&
+		    state->viewTwoMode != SLIP_RACE_CAMERA_MODE_FINISH && pressed[entry->viewTwoSelectionEvent]) {
 			pressed[entry->viewTwoSelectionEvent] = false;
 			state->viewTwoMode = mode;
-			state->viewTwoModeNameTimer = 0x1770u;
+			state->viewTwoModeNameTimer = SLIP_RACE_CAMERA_MODE_NAME_DURATION;
 			if (entry->hasActivationCallback && (activate == NULL || !activate(context, mode, 2u)))
 				return false;
 		}
@@ -499,33 +599,33 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 	size_t primitiveOffset;
 	uint16_t remainingPrimitiveCount;
 
-	if (record == NULL || componentBase == NULL || minimumClearance == NULL || recordBytesRemaining < 0x1eu) {
+	if (record == NULL || componentBase == NULL || minimumClearance == NULL ||
+	    recordBytesRemaining < SLIP_TRD_SECTION_ORIGIN_END) {
 		return false;
 	}
 
-	queryRelativeToComponent.x = query.x - (int32_t)((uint32_t)record[0x12u] | ((uint32_t)record[0x13u] << 8) |
-	                                                 ((uint32_t)record[0x14u] << 16) | ((uint32_t)record[0x15u] << 24));
-	queryRelativeToComponent.y = query.y - (int32_t)((uint32_t)record[0x16u] | ((uint32_t)record[0x17u] << 8) |
-	                                                 ((uint32_t)record[0x18u] << 16) | ((uint32_t)record[0x19u] << 24));
-	queryRelativeToComponent.z = query.z - (int32_t)((uint32_t)record[0x1au] | ((uint32_t)record[0x1bu] << 8) |
-	                                                 ((uint32_t)record[0x1cu] << 16) | ((uint32_t)record[0x1du] << 24));
+	queryRelativeToComponent.x = query.x - SlipBytes_ReadLEI32(record + SLIP_TRD_SECTION_ORIGIN_X_OFFSET);
+	queryRelativeToComponent.y = query.y - SlipBytes_ReadLEI32(record + SLIP_TRD_SECTION_ORIGIN_Y_OFFSET);
+	queryRelativeToComponent.z = query.z - SlipBytes_ReadLEI32(record + SLIP_TRD_SECTION_ORIGIN_Z_OFFSET);
 
-	componentOffset = (uint16_t)((uint16_t)record[0x02u] | ((uint16_t)record[0x03u] << 8));
-	if (componentOffset == 0 || componentOffset > componentBaseBytes || componentBaseBytes - componentOffset < 0x06u) {
+	componentOffset = SlipBytes_ReadLE16(record + SLIP_TRD_SECTION_COMPONENT_OFFSET);
+	if (componentOffset == 0 || componentOffset > componentBaseBytes ||
+	    componentBaseBytes - componentOffset < SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET + sizeof(uint16_t)) {
 		return false;
 	}
 	component = componentBase + componentOffset;
 
-	primitiveListOffset = (uint16_t)((uint16_t)component[0x04u] | ((uint16_t)component[0x05u] << 8));
+	primitiveListOffset = SlipBytes_ReadLE16(component + SLIP_TRC_COMPONENT_PRIMITIVE_LIST_OFFSET);
 	if (primitiveListOffset == 0) {
 		return true;
 	}
-	if ((size_t)primitiveListOffset > componentBaseBytes || componentBaseBytes - primitiveListOffset < 2u) {
+	if ((size_t)primitiveListOffset > componentBaseBytes ||
+	    componentBaseBytes - primitiveListOffset < SLIP_TRC_TABLE_COUNT_BYTES) {
 		return false;
 	}
 	primitiveCount = (uint16_t)((uint16_t)componentBase[primitiveListOffset] |
 	                            ((uint16_t)componentBase[(size_t)primitiveListOffset + 1u] << 8));
-	primitiveOffset = (size_t)primitiveListOffset + 2u;
+	primitiveOffset = (size_t)primitiveListOffset + SLIP_TRC_TABLE_COUNT_BYTES;
 
 	for (remainingPrimitiveCount = primitiveCount; remainingPrimitiveCount != 0; --remainingPrimitiveCount) {
 		const uint8_t *primitive;
@@ -539,43 +639,47 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 		uint32_t planeIntersectionDistance;
 		SlipView3DVec32 planeIntersection;
 		SlipTrackWorldPointLookup pointLookup;
-		SlipTrackWorldSideTestVisit sideVisits[32];
+		SlipTrackWorldSideTestVisit sideVisits[SLIP_RACE_CAMERA_SIDE_VISIT_CAPACITY];
 		SlipTrackWorldSideTest sideTest;
 
-		if (primitiveOffset > componentBaseBytes || componentBaseBytes - primitiveOffset < 0x0eu) {
+		if (primitiveOffset > componentBaseBytes ||
+		    componentBaseBytes - primitiveOffset < SLIP_TRC_PRIMITIVE_FIRST_INDEX_END) {
 			return false;
 		}
 		primitive = componentBase + primitiveOffset;
 		descriptor = (uint16_t)((uint16_t)primitive[0] | ((uint16_t)primitive[1] << 8));
 
-		if (descriptor & 0x8000u) {
-			primitiveByteCount = (uint32_t)(descriptor & 0x7fffu) * 6u + 0x0cu;
+		if (descriptor & SLIP_TRC_PRIMITIVE_TEXTURED) {
+			primitiveByteCount =
+			    (uint32_t)(descriptor & SLIP_TRC_PRIMITIVE_VERTEX_COUNT_MASK) * SLIP_TRC_TEXTURED_VERTEX_BYTES +
+			    SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		} else {
-			primitiveByteCount = (uint32_t)descriptor * 2u + 0x0cu;
+			primitiveByteCount = (uint32_t)descriptor * SLIP_TRC_VERTEX_INDEX_BYTES + SLIP_TRC_PRIMITIVE_HEADER_BYTES;
 		}
 
-		if ((primitive[0x08u] & 0x41u) == 0) {
+		if ((primitive[SLIP_TRC_PRIMITIVE_FLAGS_OFFSET] & SLIP_TRC_PRIMITIVE_CAMERA_RAY_SKIP_MASK) == 0) {
 
 			const int32_t normalDirectionDot =
-			    (int32_t)(int16_t)((uint16_t)primitive[0x02u] | ((uint16_t)primitive[0x03u] << 8)) * dirX +
-			    (int32_t)(int16_t)((uint16_t)primitive[0x04u] | ((uint16_t)primitive[0x05u] << 8)) * dirY +
-			    (int32_t)(int16_t)((uint16_t)primitive[0x06u] | ((uint16_t)primitive[0x07u] << 8)) * dirZ;
+			    (int32_t)SlipBytes_ReadLEI16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET) * dirX +
+			    (int32_t)SlipBytes_ReadLEI16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET) * dirY +
+			    (int32_t)SlipBytes_ReadLEI16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET) * dirZ;
 
 			if (normalDirectionDot >= 0) {
 				primitiveOffset += primitiveByteCount;
 				continue;
 			}
-			facingNormalDot = -(int16_t)((normalDirectionDot >> 14) + ((normalDirectionDot >> 13) & 1));
+			facingNormalDot = -(int16_t)((normalDirectionDot >> SLIP_Q14_FRACTION_BITS) +
+			                             ((normalDirectionDot >> (SLIP_Q14_FRACTION_BITS - 1)) & 1));
 
-			if (facingNormalDot < 0x10) {
+			if (facingNormalDot < SLIP_RACE_CAMERA_RAY_MINIMUM_FACING_Q14) {
 				primitiveOffset += primitiveByteCount;
 				continue;
 			}
 			rayPlaneDivisor = (int16_t)facingNormalDot;
 
 			if (!SlipTrackWorld_PointLookup(component, componentBase, componentBaseBytes,
-			                                (uint16_t)((uint16_t)primitive[0x0cu] | ((uint16_t)primitive[0x0du] << 8)),
-			                                0, 0, 0, &pointLookup)) {
+			                                SlipBytes_ReadLE16(primitive + SLIP_TRC_PRIMITIVE_INDEX_STREAM_OFFSET), 0,
+			                                0, 0, &pointLookup)) {
 				return false;
 			}
 			if (pointLookup.carry) {
@@ -589,14 +693,13 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 				const int32_t planePointDeltaZ =
 				    queryRelativeToComponent.z - (int32_t)pointLookup.pointZOrCountMergedWithInput;
 
-				const int64_t planeSum = (int64_t)planePointDeltaX *
-				                             (int16_t)((uint16_t)primitive[0x02u] | ((uint16_t)primitive[0x03u] << 8)) +
-				                         (int64_t)planePointDeltaY *
-				                             (int16_t)((uint16_t)primitive[0x04u] | ((uint16_t)primitive[0x05u] << 8)) +
-				                         (int64_t)planePointDeltaZ *
-				                             (int16_t)((uint16_t)primitive[0x06u] | ((uint16_t)primitive[0x07u] << 8));
+				const int64_t planeSum =
+				    (int64_t)planePointDeltaX * SlipBytes_ReadLEI16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_X_OFFSET) +
+				    (int64_t)planePointDeltaY * SlipBytes_ReadLEI16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Y_OFFSET) +
+				    (int64_t)planePointDeltaZ * SlipBytes_ReadLEI16(primitive + SLIP_TRC_PRIMITIVE_NORMAL_Z_OFFSET);
 
-				planeDistance = (int32_t)((planeSum >> 14) + ((planeSum >> 13) & 1));
+				planeDistance =
+				    (int32_t)((planeSum >> SLIP_Q14_FRACTION_BITS) + ((planeSum >> (SLIP_Q14_FRACTION_BITS - 1)) & 1));
 			}
 
 			if (planeDistance < 0) {
@@ -604,9 +707,9 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 				continue;
 			}
 
-			nearPlane = planeDistance - 0x988 < 0;
+			nearPlane = planeDistance - SLIP_RACE_CAMERA_PLANE_STANDOFF < 0;
 			if (!nearPlane) {
-				const int32_t standoffDistance = planeDistance - 0x988;
+				const int32_t standoffDistance = planeDistance - SLIP_RACE_CAMERA_PLANE_STANDOFF;
 				uint64_t standoffDividend;
 				uint32_t standoffDivisor;
 
@@ -615,8 +718,8 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 					continue;
 				}
 
-				standoffDividend = (uint64_t)(uint32_t)standoffDistance << 30;
-				standoffDivisor = (uint32_t)(uint16_t)rayPlaneDivisor << 16;
+				standoffDividend = (uint64_t)(uint32_t)standoffDistance << SLIP_RACE_CAMERA_RAY_NUMERATOR_SHIFT;
+				standoffDivisor = (uint32_t)(uint16_t)rayPlaneDivisor << SLIP_RACE_CAMERA_RAY_DIVISOR_SHIFT;
 				if (standoffDivisor == 0 || (uint32_t)(standoffDividend >> 32) >= standoffDivisor) {
 					primitiveOffset += primitiveByteCount;
 					continue;
@@ -633,12 +736,14 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 				}
 			} else {
 
-				clearanceDistance = (uint32_t)(planeDistance - 0x988);
+				clearanceDistance = (uint32_t)(planeDistance - SLIP_RACE_CAMERA_PLANE_STANDOFF);
 			}
 
 			{
-				const uint64_t planeDistanceDividend = (uint64_t)(uint32_t)planeDistance << 30;
-				const uint32_t planeDistanceDivisor = (uint32_t)(uint16_t)rayPlaneDivisor << 16;
+				const uint64_t planeDistanceDividend = (uint64_t)(uint32_t)planeDistance
+				                                       << SLIP_RACE_CAMERA_RAY_NUMERATOR_SHIFT;
+				const uint32_t planeDistanceDivisor = (uint32_t)(uint16_t)rayPlaneDivisor
+				                                      << SLIP_RACE_CAMERA_RAY_DIVISOR_SHIFT;
 
 				if (planeDistanceDivisor == 0 || (uint32_t)(planeDistanceDividend >> 32) >= planeDistanceDivisor) {
 					primitiveOffset += primitiveByteCount;
@@ -652,11 +757,14 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 			}
 
 			planeIntersection.x =
-			    queryRelativeToComponent.x + (int32_t)(((int64_t)dirX * (int32_t)planeIntersectionDistance) >> 14);
+			    queryRelativeToComponent.x +
+			    (int32_t)(((int64_t)dirX * (int32_t)planeIntersectionDistance) >> SLIP_Q14_FRACTION_BITS);
 			planeIntersection.y =
-			    queryRelativeToComponent.y + (int32_t)(((int64_t)dirY * (int32_t)planeIntersectionDistance) >> 14);
+			    queryRelativeToComponent.y +
+			    (int32_t)(((int64_t)dirY * (int32_t)planeIntersectionDistance) >> SLIP_Q14_FRACTION_BITS);
 			planeIntersection.z =
-			    queryRelativeToComponent.z + (int32_t)(((int64_t)dirZ * (int32_t)planeIntersectionDistance) >> 14);
+			    queryRelativeToComponent.z +
+			    (int32_t)(((int64_t)dirZ * (int32_t)planeIntersectionDistance) >> SLIP_Q14_FRACTION_BITS);
 
 			if (!SlipTrackWorld_SideTest(component, componentBase, componentBaseBytes, primitive,
 			                             componentBaseBytes - primitiveOffset, planeIntersection, sideVisits,
@@ -673,8 +781,10 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 			} else {
 
 				uint32_t nearPlaneCorrectionDistance;
-				const uint64_t nearPlaneDividend = (uint64_t)(uint32_t)(-(int32_t)clearanceDistance) << 30;
-				const uint32_t nearPlaneDivisor = (uint32_t)(uint16_t)rayPlaneDivisor << 16;
+				const uint64_t nearPlaneDividend = (uint64_t)(uint32_t)(-(int32_t)clearanceDistance)
+				                                   << SLIP_RACE_CAMERA_RAY_NUMERATOR_SHIFT;
+				const uint32_t nearPlaneDivisor = (uint32_t)(uint16_t)rayPlaneDivisor
+				                                  << SLIP_RACE_CAMERA_RAY_DIVISOR_SHIFT;
 
 				if (nearPlaneDivisor == 0 || (uint32_t)(nearPlaneDividend >> 32) >= nearPlaneDivisor) {
 					primitiveOffset += primitiveByteCount;
@@ -682,7 +792,7 @@ static bool SlipRaceCamera_AccumulateRecordRayClearance(const uint8_t *record, s
 				}
 				nearPlaneCorrectionDistance = (uint32_t)(nearPlaneDividend / nearPlaneDivisor);
 				if (-(int32_t)nearPlaneCorrectionDistance < 0) {
-					*minimumClearance = 0x2250;
+					*minimumClearance = SLIP_RACE_EXTERNAL_DISTANCE_MINIMUM;
 				} else {
 					*minimumClearance = -(int32_t)nearPlaneCorrectionDistance;
 				}
@@ -715,33 +825,35 @@ bool SlipRaceCamera_GroundClearance(const uint8_t *trdBase, size_t trdBytes, con
 	recordAddress = recordSearch.selectedRecordAddress;
 
 	if (recordSearch.carryOut || recordAddress == 0) {
-		*clearance = 0x2250;
+		*clearance = SLIP_RACE_EXTERNAL_DISTANCE_MINIMUM;
 		return true;
 	}
 	if (recordAddress < trackDataBaseAddress) {
 		return false;
 	}
 	recordOffset = recordAddress - trackDataBaseAddress;
-	if (recordOffset > trdBytes || trdBytes - recordOffset < 0x1eu) {
+	if (recordOffset > trdBytes || trdBytes - recordOffset < SLIP_TRD_SECTION_ORIGIN_END) {
 		return false;
 	}
 	record = trdBase + recordOffset;
 
-	minimumClearance = 0x7fffffff;
+	minimumClearance = INT32_MAX;
 
 	if (!SlipRaceCamera_AccumulateRecordRayClearance(record, trdBytes - recordOffset, componentBase, componentBaseBytes,
 	                                                 query, dirX, dirY, dirZ, &minimumClearance)) {
 		return false;
 	}
 
-	for (neighborLinkFieldOffset = 0x04u; neighborLinkFieldOffset <= 0x0cu; neighborLinkFieldOffset += 0x04u) {
+	for (neighborLinkFieldOffset = SLIP_TRD_SECTION_FIRST_EXIT_OFFSET;
+	     neighborLinkFieldOffset <= SLIP_TRD_SECTION_THIRD_EXIT_OFFSET;
+	     neighborLinkFieldOffset += SLIP_TRD_SECTION_EXIT_BYTES) {
 		const uint16_t neighborRecordOffset = (uint16_t)((uint16_t)record[neighborLinkFieldOffset] |
 		                                                 ((uint16_t)record[neighborLinkFieldOffset + 1u] << 8));
 
 		if (neighborRecordOffset == 0) {
 			continue;
 		}
-		if ((size_t)neighborRecordOffset > trdBytes || trdBytes - neighborRecordOffset < 0x1eu) {
+		if ((size_t)neighborRecordOffset > trdBytes || trdBytes - neighborRecordOffset < SLIP_TRD_SECTION_ORIGIN_END) {
 			return false;
 		}
 		if (!SlipRaceCamera_AccumulateRecordRayClearance(
@@ -784,7 +896,7 @@ bool SlipRaceCamera_IntroZoom(SlipRaceCameraState *state, SlipObject *objectTabl
 		return false;
 	}
 
-	cameraMatrix.m[1] = (int16_t)(cameraMatrix.m[1] >> 1);
+	cameraMatrix.m[1] = (int16_t)(cameraMatrix.m[1] >> SLIP_RACE_FINISH_CAMERA_HORIZONTAL_TILT_SHIFT);
 
 	SlipView3D_OrthonormalizeForwardBasis(&cameraMatrix);
 
@@ -792,7 +904,7 @@ bool SlipRaceCamera_IntroZoom(SlipRaceCameraState *state, SlipObject *objectTabl
 		return false;
 	}
 
-	SlipView3D_ApplyPitchMatrix(maths, (int16_t)0xfc00, &cameraMatrix);
+	SlipView3D_ApplyPitchMatrix(maths, SLIP_RACE_CAMERA_PITCH_OFFSET, &cameraMatrix);
 	result->pitchedOffsetMatrix = cameraMatrix;
 
 	result->direction =
@@ -807,21 +919,22 @@ bool SlipRaceCamera_IntroZoom(SlipRaceCameraState *state, SlipObject *objectTabl
 
 	activeZoomDistance = viewId == 1 ? &state->viewOneZoomDistance : &state->viewTwoZoomDistance;
 
-	zoomDistanceDecrement = (int32_t)(uint16_t)(((uint32_t)0xd000u * frameStep) >> 14);
+	zoomDistanceDecrement =
+	    (int32_t)(uint16_t)(((uint32_t)SLIP_RACE_CAMERA_INTRO_ZOOM_STEP * frameStep) >> SLIP_Q14_FRACTION_BITS);
 	*activeZoomDistance = (int32_t)((uint32_t)*activeZoomDistance - (uint32_t)zoomDistanceDecrement);
 
-	if (*activeZoomDistance < 0x1ccc) {
+	if (*activeZoomDistance < SLIP_RACE_CAMERA_INTRO_MINIMUM_DISTANCE) {
 		uint16_t event;
 
-		*activeZoomDistance = 0x1ccc;
-		event = 0x3bu;
+		*activeZoomDistance = SLIP_RACE_CAMERA_INTRO_MINIMUM_DISTANCE;
+		event = SLIP_RACE_CAMERA_SELECT_COCKPIT_ONE;
 		if (flybyChaseEnabled != 0 || demoChaseEnabled != 0) {
-			event = 0x3eu;
+			event = SLIP_RACE_CAMERA_SELECT_TV_ONE;
 		}
 		if (viewId != 1) {
-			event = 0x40u;
+			event = SLIP_RACE_CAMERA_SELECT_COCKPIT_TWO;
 			if (demoChaseEnabled != 0) {
-				event = 0x43u;
+				event = SLIP_RACE_CAMERA_SELECT_TV_TWO;
 			}
 		}
 		result->clamped = true;
@@ -839,10 +952,12 @@ bool SlipRaceCamera_IntroZoom(SlipRaceCameraState *state, SlipObject *objectTabl
 	result->appliedDistance = appliedDistance;
 
 	result->cameraPosition = (SlipView3DVec32){
-	    (int32_t)((uint32_t)result->carPosition.x + (uint32_t)(((int64_t)appliedDistance * result->direction.x) >> 14)),
-	    (int32_t)((uint32_t)result->carPosition.y + (uint32_t)(((int64_t)appliedDistance * result->direction.y) >> 14)),
+	    (int32_t)((uint32_t)result->carPosition.x +
+	              (uint32_t)(((int64_t)appliedDistance * result->direction.x) >> SLIP_Q14_FRACTION_BITS)),
+	    (int32_t)((uint32_t)result->carPosition.y +
+	              (uint32_t)(((int64_t)appliedDistance * result->direction.y) >> SLIP_Q14_FRACTION_BITS)),
 	    (int32_t)((uint32_t)result->carPosition.z +
-	              (uint32_t)(((int64_t)appliedDistance * result->direction.z) >> 14))};
+	              (uint32_t)(((int64_t)appliedDistance * result->direction.z) >> SLIP_Q14_FRACTION_BITS))};
 
 	if (!SlipObject_SetPosition(objectTable, objectTableBytes, 0, (uint32_t)result->cameraPosition.x,
 	                            (uint32_t)result->cameraPosition.y, (uint32_t)result->cameraPosition.z, &setPosition)) {
@@ -879,7 +994,7 @@ bool SlipRaceCamera_Chase(SlipRaceCameraState *state, SlipObject *objects, size_
 	if (!SlipObject_Position(objects, objectBytes, racerObject, &position))
 		return false;
 	cameraMatrix = state->chaseMatrix[viewIndex];
-	SlipView3D_ApplyPitchMatrix(maths, -0x400, &cameraMatrix);
+	SlipView3D_ApplyPitchMatrix(maths, SLIP_RACE_CAMERA_PITCH_OFFSET, &cameraMatrix);
 	SlipView3D_OrthonormalizeForwardBasis(&cameraMatrix);
 	if (!SlipObject_MatrixInstall(objects, objectBytes, 0, &cameraMatrix, &install))
 		return false;
@@ -890,14 +1005,15 @@ bool SlipRaceCamera_Chase(SlipRaceCameraState *state, SlipObject *objects, size_
 	                                    query, (int16_t)direction.x, (int16_t)direction.y, (int16_t)direction.z,
 	                                    &distance))
 		return false;
-	speedDistance = (int32_t)((uint32_t)(racerSpeed >> 4) + 0x5000u);
+	speedDistance = (int32_t)((uint32_t)(racerSpeed >> SLIP_RACE_CAMERA_CHASE_SPEED_DISTANCE_SHIFT) +
+	                          SLIP_RACE_CAMERA_CHASE_BASE_DISTANCE);
 	if (distance > speedDistance)
 		distance = speedDistance;
 	distance >>= 1;
 	/* Three signed IMUL/SHRD pairs followed by wrapping 32-bit ADDs. */
-	x = position.positionX + (uint32_t)(((int64_t)distance * direction.x) >> 14);
-	y = position.positionY + (uint32_t)(((int64_t)distance * direction.y) >> 14);
-	z = position.positionZ + (uint32_t)(((int64_t)distance * direction.z) >> 14);
+	x = position.positionX + (uint32_t)(((int64_t)distance * direction.x) >> SLIP_Q14_FRACTION_BITS);
+	y = position.positionY + (uint32_t)(((int64_t)distance * direction.y) >> SLIP_Q14_FRACTION_BITS);
+	z = position.positionZ + (uint32_t)(((int64_t)distance * direction.z) >> SLIP_Q14_FRACTION_BITS);
 	if (!SlipObject_SetPosition(objects, objectBytes, 0, x, y, z, &setPosition))
 		return false;
 	state->chasePosition[viewIndex] = (SlipView3DVec32){(int32_t)x, (int32_t)y, (int32_t)z};
@@ -911,7 +1027,8 @@ bool SlipRaceCamera_UpdateChaseMatrix(SlipRaceCameraState *state, const SlipObje
 	SlipView3DMatrix racerMatrix;
 	SlipView3DMatrix *const matrix = &state->chaseMatrix[view == 1u ? 0 : 1];
 
-	const uint16_t rotationStep = (uint16_t)(((uint32_t)0x2000u * frameStep) >> 14);
+	const uint16_t rotationStep =
+	    (uint16_t)((SLIP_RACE_CAMERA_CHASE_ROTATION_STEP * frameStep) >> SLIP_Q14_FRACTION_BITS);
 	if (!SlipObject_MatrixCopy(objects, objectBytes, racerObject, &racerMatrix, &copy))
 		return false;
 	if (!SlipView3D_RotateForwardTowards(maths, matrix, racerMatrix.m[6], racerMatrix.m[7], racerMatrix.m[8],
@@ -973,10 +1090,14 @@ bool SlipRaceCamera_Rear(SlipObject *objects, size_t objectBytes, uint16_t racer
 	SlipObjectMatrixInstall install;
 	SlipObjectSetPosition setPosition;
 
-	SlipArticSlotPosition position = {viewIndex, 0x00042cabu + 5u * 0x14u, 0, false};
+	SlipArticSlotPosition position = {viewIndex,
+	                                  SLIP_RACE_CAMERA_MODE_TABLE_DOS_ADDRESS +
+	                                      SLIP_RACE_CAMERA_MODE_REAR * SLIP_RACE_CAMERA_MODE_DOS_STRIDE,
+	                                  0, false};
 	if (!SlipObject_MatrixCopy(objects, objectBytes, racerObject, &matrix, &copy) ||
-	    !SlipArticSlot_WorldPosition(0x6d61696eu, 0x68656164u, racerObject, objects, objectBytes, slots, slotBytes,
-	                                 slotPoolAddress, art, artBytes, artDataAddress, maths, &position))
+	    !SlipArticSlot_WorldPosition(SLIP_ACTOR_PART_MAIN, SLIP_ACTOR_POINT_HEAD, racerObject, objects, objectBytes,
+	                                 slots, slotBytes, slotPoolAddress, art, artBytes, artDataAddress, maths,
+	                                 &position))
 		return false;
 	/* Six 16-bit NEG instructions reverse the right and forward rows, leaving up unchanged. */
 	for (size_t matrixElementIndex = 0; matrixElementIndex < 9; ++matrixElementIndex) {
@@ -1002,11 +1123,14 @@ bool SlipRaceCamera_Cockpit(SlipObject *objectTable, size_t objectTableBytes, ui
 	if (cameraPosition == NULL)
 		return false;
 
-	*cameraPosition = (SlipArticSlotPosition){viewIndex, 0x00042cabu + 3u * 0x14u, 0, false};
+	*cameraPosition = (SlipArticSlotPosition){viewIndex,
+	                                          SLIP_RACE_CAMERA_MODE_TABLE_DOS_ADDRESS +
+	                                              SLIP_RACE_CAMERA_MODE_COCKPIT * SLIP_RACE_CAMERA_MODE_DOS_STRIDE,
+	                                          0, false};
 	if (!SlipObject_MatrixCopy(objectTable, objectTableBytes, racerObject, &matrix, &matrixCopy) ||
-	    !SlipArticSlot_WorldPosition(0x6d61696eu, 0x68656164u, racerObject, objectTable, objectTableBytes, slotPool,
-	                                 slotPoolBytes, slotPoolAddress, artData, artDataBytes, artDataAddress, maths,
-	                                 cameraPosition)) {
+	    !SlipArticSlot_WorldPosition(SLIP_ACTOR_PART_MAIN, SLIP_ACTOR_POINT_HEAD, racerObject, objectTable,
+	                                 objectTableBytes, slotPool, slotPoolBytes, slotPoolAddress, artData, artDataBytes,
+	                                 artDataAddress, maths, cameraPosition)) {
 		return false;
 	}
 

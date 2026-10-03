@@ -1,6 +1,34 @@
 #include "vehicle_viewer.h"
+#include "fixed_point.h"
+#include "race_voice.h"
+#include "sprite_format.h"
+#include "string_tags.h"
+#include "text_layout.h"
 
-const SlipVehicleViewParameters SlipVehicleView_parameters[10] = {
+enum {
+	SLIP_VIEWER_MATERIAL_NAME_VEHICLE_INDEX = 4,
+	SLIP_VIEWER_OVERLAY_NAME_VEHICLE_INDEX = 7,
+	SLIP_VIEWER_ACTOR_NAME_VEHICLE_INDEX = 5,
+	SLIP_VIEWER_OBJECT_CAPACITY = 5,
+	SLIP_VIEWER_VERTEX_CAPACITY = 512,
+	SLIP_VIEWER_ACTOR_CAPACITY = 2,
+	SLIP_VIEWER_NEAR_DEPTH = 12,
+	SLIP_VIEWER_LIGHT_DIAGONAL_Q14 = -11594,
+	SLIP_VIEWER_AMBIENT_LIGHT_Q14 = 3 * SLIP_Q14_ONE / 16,
+	SLIP_VIEWER_VOICE_BUFFER_BYTES = 0x40000,
+	SLIP_VIEWER_LEFT = 31,
+	SLIP_VIEWER_TOP = 14,
+	SLIP_VIEWER_RIGHT = 287,
+	SLIP_VIEWER_BOTTOM = 183,
+	SLIP_VIEWER_CENTER_X = 159,
+	SLIP_VIEWER_CENTER_Y = 98,
+	SLIP_VIEWER_TEXT_LEFT = 33,
+	SLIP_VIEWER_TEXT_RIGHT = 285,
+	SLIP_VIEWER_TEXT_TOP = 130,
+	SLIP_VIEWER_TEXT_BOTTOM = 179
+};
+
+const SlipVehicleViewParameters SlipVehicleView_parameters[SLIP_RACE_RACER_COUNT] = {
     {14640, -4096, -17}, {14152, -4096, -17}, {15128, -4096, -17}, {13664, -4096, -17}, {15616, -4096, -17},
     {13176, -4096, -17}, {17080, -3072, -18}, {15616, -4096, -20}, {17568, -4096, -17}, {12200, -4096, -17}};
 
@@ -10,24 +38,25 @@ void SlipVehicleViewer_Run(SlipVehicleViewer *viewer, uint32_t vehicle, SlipStri
 	const SlipStringTableResources *const resources = &calls->resources;
 	char materialName[] = "VIEW0.MAT", overlayName[] = "VIEWCAR0.SPR", actorName[] = "RACER0.ART";
 	viewer->vehicle = vehicle;
-	const char digit = (char)(uint8_t)(vehicle + 0x2f);
-	materialName[4] = overlayName[7] = actorName[5] = digit;
-	viewer->descriptionTag = 0x43415200u | (uint8_t)digit;
+	const char digit = (char)(uint8_t)(vehicle + ('0' - 1));
+	materialName[SLIP_VIEWER_MATERIAL_NAME_VEHICLE_INDEX] = overlayName[SLIP_VIEWER_OVERLAY_NAME_VEHICLE_INDEX] =
+	    actorName[SLIP_VIEWER_ACTOR_NAME_VEHICLE_INDEX] = digit;
+	viewer->descriptionTag = SLIP_STRING_VEHICLE_DESCRIPTION_PREFIX | (uint8_t)digit;
 	viewer->parameters = &SlipVehicleView_parameters[vehicle - 1];
 	calls->language(context);
 	if (!SlipStringTable_Load(strings, "VIEWCAR ", resources, &viewer->strings))
 		calls->errors.resourceError(calls->errors.context);
 	if (!resources->load(resources->context, "VIEWDESC.FNT", &viewer->font))
 		calls->errors.resourceError(calls->errors.context);
-	calls->objects(context, 5);
-	calls->drawList(context, 5);
-	calls->renderer(context, 512, 0);
+	calls->objects(context, SLIP_VIEWER_OBJECT_CAPACITY);
+	calls->drawList(context, SLIP_VIEWER_OBJECT_CAPACITY);
+	calls->renderer(context, SLIP_VIEWER_VERTEX_CAPACITY, 0);
 	calls->shapes(context);
-	calls->actors(context, 2);
-	calls->minimumDepth(context, 12);
-	calls->maximumDepth(context, 0x7fffffff);
+	calls->actors(context, SLIP_VIEWER_ACTOR_CAPACITY);
+	calls->minimumDepth(context, SLIP_VIEWER_NEAR_DEPTH);
+	calls->maximumDepth(context, INT32_MAX);
 	calls->resetLighting(context);
-	calls->maximumDepth(context, 0x7fffffff);
+	calls->maximumDepth(context, INT32_MAX);
 	calls->disableDepthFade(context, 0);
 	calls->setRenderFlags(context, 0);
 	calls->actorMode(context, 0);
@@ -42,20 +71,21 @@ void SlipVehicleViewer_Run(SlipVehicleViewer *viewer, uint32_t vehicle, SlipStri
 	calls->residency(context);
 	resources->unlock(resources->context, materialResource);
 	resources->release(resources->context, materialResource);
-	calls->light(context, (int16_t)0xd2b6, (int16_t)0xd2b6, 0, 0x4000);
-	calls->ambientLight(context, 0xc00);
-	calls->voiceSetup(context, 2, 1, 0, 0x40000);
+	calls->light(context, SLIP_VIEWER_LIGHT_DIAGONAL_Q14, SLIP_VIEWER_LIGHT_DIAGONAL_Q14, 0, SLIP_Q14_ONE);
+	calls->ambientLight(context, SLIP_VIEWER_AMBIENT_LIGHT_Q14);
+	calls->voiceSetup(context, SLIP_RACE_VOICE_BANK_ALTERNATE, 1, 0, SLIP_VIEWER_VOICE_BUFFER_BYTES);
 	if (!resources->load(resources->context, actorName, &viewer->actorResource))
 		calls->errors.fatalError(calls->errors.context);
 	calls->prepareActor(context, viewer->actorResource);
 	uint16_t object;
-	if (!calls->createObject(context, calls->objectTemplate, 0x374986, 0x603e1, 0x473546, calls->drawActor, 0,
-	                         calls->objectEvent, &object))
+	if (!calls->createObject(context, calls->objectTemplate, SLIP_VIEWER_OBJECT_X, SLIP_VIEWER_OBJECT_Y,
+	                         SLIP_VIEWER_OBJECT_Z, calls->drawActor, 0, calls->objectEvent, &object))
 		calls->fatal(context, "DoViewCar: Error.");
 	calls->attachActor(context, object, viewer->actorResource);
 	viewer->object = object;
-	calls->viewport(context, 31, 14, 287, 183, 159, (int16_t)(98 + viewer->parameters->centerOffset));
-	calls->clip(context, 31, 14, 287, 183);
+	calls->viewport(context, SLIP_VIEWER_LEFT, SLIP_VIEWER_TOP, SLIP_VIEWER_RIGHT, SLIP_VIEWER_BOTTOM,
+	                SLIP_VIEWER_CENTER_X, (int16_t)(SLIP_VIEWER_CENTER_Y + viewer->parameters->centerOffset));
+	calls->clip(context, SLIP_VIEWER_LEFT, SLIP_VIEWER_TOP, SLIP_VIEWER_RIGHT, SLIP_VIEWER_BOTTOM);
 	viewer->yaw = 0;
 	viewer->animation.jetAngle = 0;
 	viewer->animation.jetDirection = 0;
@@ -73,13 +103,13 @@ void SlipVehicleViewer_Run(SlipVehicleViewer *viewer, uint32_t vehicle, SlipStri
 		calls->selectObject(context, 0);
 		SlipView3DVec32 position = calls->objectPosition(context, 0);
 		calls->setCameraPosition(context, position);
-		calls->drawClippedSprite(context, viewer->overlay, 0x7fff);
+		calls->drawClippedSprite(context, viewer->overlay, SLIP_SPRITE_USE_STORED_POSITION);
 		calls->drawObjects(context);
 		calls->font(context, viewer->font);
-		calls->style(context, 2, 0xffff, 33, 285);
-		calls->setTextColor(context, 0xffff);
+		calls->style(context, SLIP_TEXT_CENTERED, UINT16_MAX, SLIP_VIEWER_TEXT_LEFT, SLIP_VIEWER_TEXT_RIGHT);
+		calls->setTextColor(context, UINT16_MAX);
 		const char *const description = SlipStringTable_Get(viewer->strings, viewer->descriptionTag, resources);
-		calls->text(context, description, 33, 130, 179);
+		calls->text(context, description, SLIP_VIEWER_TEXT_LEFT, SLIP_VIEWER_TEXT_TOP, SLIP_VIEWER_TEXT_BOTTOM);
 		SlipStringTable_Unlock(viewer->strings, resources);
 		calls->present(context);
 		calls->poll(context);

@@ -13,8 +13,76 @@ typedef enum SlipConfigMenuTable {
 	SLIP_CONFIG_CONTROLS_TABLE,
 	SLIP_CONFIG_BINDINGS_TABLE,
 	SLIP_CONFIG_CONFLICT_TABLE,
-	SLIP_CONFIG_CALIBRATION_TABLE
+	SLIP_CONFIG_CALIBRATION_TABLE,
+	SLIP_CONFIG_TABLE_COUNT
 } SlipConfigMenuTable;
+
+enum {
+	SLIP_CONFIG_MAIN_TITLE = 1,
+	SLIP_CONFIG_MAIN_GENERAL = 2,
+	SLIP_CONFIG_MAIN_CONTROLS = 3,
+	SLIP_CONFIG_MAIN_DETAIL = 4,
+	SLIP_CONFIG_MAIN_CLOSE = 5,
+	SLIP_CONFIG_MAIN_DIFFICULTY = 6,
+	SLIP_CONFIG_MAIN_SOUND = 7
+};
+
+enum {
+	SLIP_CONFIG_DIFFICULTY_CLOSE = 3,
+	SLIP_CONFIG_DIFFICULTY_TITLE = 4,
+	SLIP_CONFIG_DIFFICULTY_OPTION_COUNT = SLIP_CONFIG_DIFFICULTY_CLOSE - 1
+};
+
+enum {
+	SLIP_CONFIG_GENERAL_OPTION_COUNT = 5,
+	SLIP_CONFIG_GENERAL_CLOSE = 6,
+	SLIP_CONFIG_GENERAL_TITLE = 7,
+	SLIP_CONFIG_GENERAL_HIGH_RES = 8
+};
+
+enum {
+	SLIP_CONFIG_DETAIL_CLOSE = 7,
+	SLIP_CONFIG_DETAIL_TITLE = 8,
+	SLIP_CONFIG_DETAIL_OPTION_COUNT = SLIP_CONFIG_DETAIL_CLOSE - 1
+};
+
+enum {
+	SLIP_CONFIG_SOUND_CLOSE = 5,
+	SLIP_CONFIG_SOUND_TITLE = 6,
+	SLIP_CONFIG_SOUND_OPTION_COUNT = SLIP_CONFIG_SOUND_CLOSE - 1
+};
+
+enum {
+	SLIP_CONFIG_CONTROLS_PLAYER_ONE = 1,
+	SLIP_CONFIG_CONTROLS_PLAYER_TWO = 2,
+	SLIP_CONFIG_CONTROLS_CALIBRATE_ONE = 3,
+	SLIP_CONFIG_CONTROLS_CALIBRATE_TWO = 4,
+	SLIP_CONFIG_CONTROLS_REVERSE_ACCELERATOR = 5,
+	SLIP_CONFIG_CONTROLS_CLOSE = 6,
+	SLIP_CONFIG_CONTROLS_TITLE = 7
+};
+
+enum {
+	SLIP_CONFIG_BINDINGS_MOVEMENT_LABEL = 1,
+	SLIP_CONFIG_BINDINGS_MOVEMENT_VALUE = 2,
+	SLIP_CONFIG_BINDINGS_UP = 3,
+	SLIP_CONFIG_BINDINGS_LEFT = 4,
+	SLIP_CONFIG_BINDINGS_RIGHT = 5,
+	SLIP_CONFIG_BINDINGS_DOWN = 6,
+	SLIP_CONFIG_BINDINGS_SELECT = 7,
+	SLIP_CONFIG_BINDINGS_FIRE = 8,
+	SLIP_CONFIG_BINDINGS_ACCELERATE = 9,
+	SLIP_CONFIG_BINDINGS_CLOSE = 10,
+};
+
+enum {
+	SLIP_CONFIG_MAIN_RECTANGLE_COUNT = SLIP_CONFIG_MAIN_SOUND,
+	SLIP_CONFIG_DIFFICULTY_RECTANGLE_COUNT = SLIP_CONFIG_DIFFICULTY_TITLE,
+	SLIP_CONFIG_GENERAL_RECTANGLE_COUNT = SLIP_CONFIG_GENERAL_TITLE,
+	SLIP_CONFIG_DETAIL_RECTANGLE_COUNT = SLIP_CONFIG_DETAIL_TITLE,
+	SLIP_CONFIG_SOUND_RECTANGLE_COUNT = SLIP_CONFIG_SOUND_TITLE,
+	SLIP_CONFIG_CONTROLS_RECTANGLE_COUNT = SLIP_CONFIG_CONTROLS_TITLE
+};
 
 typedef struct SlipConfigMenuPoint {
 	int16_t x, y;
@@ -51,7 +119,7 @@ typedef struct SlipConfigMenuCalls {
 	void (*textColor)(void *, uint16_t);
 	void (*palette)(void *, uint16_t);
 	void (*language)(void *);
-	bool (*strings)(void *, const char name[8], SlipStringTableSlot **);
+	bool (*strings)(void *, const char name[SLIP_RESOURCE_BASE_NAME_BYTES], SlipStringTableSlot **);
 	void (*releaseStrings)(void *, SlipStringTableSlot *);
 	void (*resourceError)(void *);
 	void (*navigation)(void *, SlipConfigMenuTable);
@@ -71,10 +139,10 @@ typedef struct SlipConfigMenuCalls {
 	void (*drawGeneral)(void *, SlipConfigMenuState *);
 	void (*drawDetail)(void *, SlipConfigMenuState *);
 	void (*drawSound)(void *, SlipConfigMenuState *);
-	void (*generalOptions[5])(void *);
+	void (*generalOptions[SLIP_CONFIG_GENERAL_OPTION_COUNT])(void *);
 	void (*toggleHighRes)(void *);
-	void (*detailOptions[6])(void *);
-	void (*soundOptions[4])(void *);
+	void (*detailOptions[SLIP_CONFIG_DETAIL_OPTION_COUNT])(void *);
+	void (*soundOptions[SLIP_CONFIG_SOUND_OPTION_COUNT])(void *);
 	void (*cycleLanguage)(void *);
 	void (*cycleMusic)(void *);
 	void (*applyMusic)(void *);

@@ -1,5 +1,6 @@
 #include "actor_pool.h"
 #include "runtime.h"
+#include "track_world.h"
 #include <stddef.h>
 
 void SlipActorPool_InitializeActors(SlipActorPool *pool) {
@@ -106,13 +107,15 @@ void SlipActorPool_FreeActor(SlipActorPool *pool, SlipActorRecord *actor) {
 }
 
 bool SlipActorPool_Initialize(SlipActorPool *pool, uint16_t actors, const SlipActorPoolCalls *calls) {
-	pool->partCount = 80;
+	pool->partCount = SLIP_ACTOR_DEFAULT_PART_CAPACITY;
 	if (pool->initialized != 0)
 		return true; /* CMP initialized,0 leaves carry clear. */
 	pool->initialized = UINT32_MAX;
 	pool->actorCount = actors;
-	const uint32_t actorBytes = (uint32_t)(uint16_t)(actors + 2u) * 216u;
-	const uint32_t partBytes = (uint32_t)(uint16_t)(pool->partCount + 1u) * 352u;
+	const uint32_t actorBytes =
+	    (uint32_t)(uint16_t)(actors + SLIP_ACTOR_POOL_SENTINEL_COUNT) * SLIP_ACTOR_RECORD_DOS_BYTES;
+	const uint32_t partBytes =
+	    (uint32_t)(uint16_t)(pool->partCount + SLIP_ACTOR_PART_POOL_SENTINEL_COUNT) * SLIP_ACTOR_PART_DOS_BYTES;
 	const uint32_t bytes = partBytes + actorBytes;
 	pool->partRegionOffset = actorBytes;
 	if (bytes < partBytes)
@@ -128,12 +131,12 @@ bool SlipActorPool_Initialize(SlipActorPool *pool, uint16_t actors, const SlipAc
 	SlipActorPool_InitializeActors(pool);
 	SlipActorPool_InitializeParts(pool);
 	calls->registerExit(calls->context, SlipActorPool_Shutdown);
-	calls->registerEvent(calls->context, 1, SlipActorPool_ObjectEvent);
+	calls->registerEvent(calls->context, SLIP_OBJECT_SERVER_EVENT_FREE, SlipActorPool_ObjectEvent);
 	return true;
 }
 
 void SlipActorPool_ObjectEvent(SlipActorPool *pool, uint16_t object, uint16_t events, const SlipActorPoolCalls *calls) {
-	if (object == 0 || (events & 1u) == 0 || pool->initialized == 0)
+	if (object == 0 || (events & SLIP_OBJECT_SERVER_EVENT_FREE) == 0 || pool->initialized == 0)
 		return;
 	SlipActorRecord *actor = pool->activeSentinel->next;
 	for (;;) {

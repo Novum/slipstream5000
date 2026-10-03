@@ -1,9 +1,19 @@
 #include "map.h"
 #include "byte_order.h"
+#include "fixed_point.h"
 #include "renderer.h"
+#include "track_format.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+enum {
+	/* One source node plus both possible linked route nodes. */
+	SLIP_MAP_NODES_PER_ROUTE = 1 + SLIP_TRD_ROUTE_LINK_COUNT,
+	SLIP_MAP_EDGES_PER_ROUTE = SLIP_TRD_ROUTE_LINK_COUNT,
+	/* Each path has one more vertex than edges, at most two per edge. */
+	SLIP_MAP_PATH_VERTICES_PER_ROUTE = 2 * SLIP_MAP_EDGES_PER_ROUTE
+};
 
 typedef struct {
 	uint32_t a, b;
@@ -15,8 +25,8 @@ static SDL_FPoint Project(const SlipView3DMatrix *matrix, const SlipView3DVec32 
 	/* Keep fractions through matrix multiplication and orthographic projection. */
 	double dx = (double)world.x - camera->x;
 	double dz = (double)world.z - camera->z;
-	double x = (matrix->m[0] * dx + matrix->m[2] * dz) / 16384.;
-	double y = (matrix->m[3] * dx + matrix->m[5] * dz) / 16384.;
+	double x = (matrix->m[0] * dx + matrix->m[2] * dz) / SLIP_Q14_ONE;
+	double y = (matrix->m[3] * dx + matrix->m[5] * dz) / SLIP_Q14_ONE;
 	return (SDL_FPoint){(float)(project->centerX + x / project->modeOneScale),
 	                    (float)(project->centerY - y / project->modeOneScale)};
 }
@@ -53,14 +63,14 @@ void SlipRaceGpu_DrawMapRoute(const SlipView3DMatrix *matrix, const SlipView3DVe
 	if (ribbonCache.source != data || ribbonCache.bytes != bytes || ribbonCache.base != base ||
 	    ribbonCache.count != count) {
 		SlipRaceGpu_ResetMap();
-		uint32_t capacity = (uint32_t)count * 3;
+		uint32_t capacity = (uint32_t)count * SLIP_MAP_NODES_PER_ROUTE;
 		uint16_t *offsets = malloc(capacity * sizeof(*offsets));
 		SlipView3DVec32 *world = malloc(capacity * sizeof(*world));
-		MapEdge *edges = calloc(count * 2u, sizeof(*edges));
+		MapEdge *edges = calloc(count * SLIP_MAP_EDGES_PER_ROUTE, sizeof(*edges));
 		/* Each path consumes at least one edge and adds one starting vertex. */
-		ribbonCache.ribbons = malloc(count * 2u * sizeof(*ribbonCache.ribbons));
-		ribbonCache.world = malloc(count * 4u * sizeof(*ribbonCache.world));
-		ribbonCache.points = malloc(count * 4u * sizeof(*ribbonCache.points));
+		ribbonCache.ribbons = malloc(count * SLIP_MAP_EDGES_PER_ROUTE * sizeof(*ribbonCache.ribbons));
+		ribbonCache.world = malloc(count * SLIP_MAP_PATH_VERTICES_PER_ROUTE * sizeof(*ribbonCache.world));
+		ribbonCache.points = malloc(count * SLIP_MAP_PATH_VERTICES_PER_ROUTE * sizeof(*ribbonCache.points));
 		if (!offsets || !world || !edges || !ribbonCache.ribbons || !ribbonCache.world || !ribbonCache.points) {
 			free(offsets);
 			free(world);
@@ -69,11 +79,13 @@ void SlipRaceGpu_DrawMapRoute(const SlipView3DMatrix *matrix, const SlipView3DVe
 			return;
 		}
 		uint32_t nodes = 0, edgeCount = 0;
-		for (uint32_t i = 0; i < count && base + i * 0x32u + 0x32u <= bytes; i++) {
-			uint16_t offset = (uint16_t)(base + i * 0x32u);
-			for (unsigned link = 0; link < 2; link++) {
-				uint16_t target = SlipBytes_ReadLE16(data + offset + link * 4);
-				if (!target || (size_t)target + 0x18u > bytes)
+		for (uint32_t i = 0; i < count && base + i * SLIP_TRD_ROUTE_RECORD_BYTES + SLIP_TRD_ROUTE_RECORD_BYTES <= bytes;
+		     i++) {
+			uint16_t offset = (uint16_t)(base + i * SLIP_TRD_ROUTE_RECORD_BYTES);
+			for (unsigned link = 0; link < SLIP_TRD_ROUTE_LINK_COUNT; link++) {
+				uint16_t target = SlipBytes_ReadLE16(data + offset + SLIP_TRD_ROUTE_FIRST_LINK_OFFSET +
+				                                     link * SLIP_TRD_ROUTE_LINK_STRIDE);
+				if (!target || (size_t)target + SLIP_TRD_POSITION_RECORD_BYTES > bytes)
 					continue;
 				uint16_t ends[] = {offset, target};
 				uint32_t ids[2];
@@ -84,8 +96,9 @@ void SlipRaceGpu_DrawMapRoute(const SlipView3DMatrix *matrix, const SlipView3DVe
 					if (id == nodes) {
 						offsets[nodes] = ends[end];
 						const uint8_t *r = data + ends[end];
-						world[nodes++] = (SlipView3DVec32){SlipBytes_ReadLEI32(r + 12), SlipBytes_ReadLEI32(r + 16),
-						                                   SlipBytes_ReadLEI32(r + 20)};
+						world[nodes++] = (SlipView3DVec32){SlipBytes_ReadLEI32(r + SLIP_TRD_POSITION_X_OFFSET),
+						                                   SlipBytes_ReadLEI32(r + SLIP_TRD_POSITION_Y_OFFSET),
+						                                   SlipBytes_ReadLEI32(r + SLIP_TRD_POSITION_Z_OFFSET)};
 					}
 					ids[end] = id;
 				}

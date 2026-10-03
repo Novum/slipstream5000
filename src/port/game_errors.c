@@ -50,9 +50,10 @@ SLIP_RUNTIME_NORETURN void SlipGame_UnexpectedFailure(void) {
 
 SLIP_RUNTIME_NORETURN void SlipGame_ResourceFailure(void) {
 	const uint32_t error = SlipRuntime_error;
-	if (error == 2 || error == 3 || error == 4 || error == 5)
+	if (error == SLIP_RUNTIME_ERROR_FILE_UNAVAILABLE || error == SLIP_RUNTIME_ERROR_READ_FAILED ||
+	    error == SLIP_RUNTIME_ERROR_CREATE_FAILED || error == SLIP_RUNTIME_ERROR_WRITE_FAILED)
 		SlipGame_FileFailure();
-	if (error == 6)
+	if (error == SLIP_RUNTIME_ERROR_MEMORY_EXHAUSTED)
 		SlipGame_MemoryFailure();
 	SlipRuntime_Shutdown();
 	SlipGame_WriteDosMessage(
