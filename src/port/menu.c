@@ -1893,10 +1893,7 @@ static void SlipSdlInput_ApplyEvent(const SDL_Event *event, SDL_Renderer *render
 }
 
 static void SlipMenu_SetStatusWindowTitle(SDL_Window *window, const char *status) {
-	char title[SLIP_MENU_WINDOW_TITLE_BYTES];
-
-	snprintf(title, sizeof(title), "Slipstream 5000 SDL Port - %s", status);
-	SDL_SetWindowTitle(window, title);
+	SDL_SetWindowTitle(window, "Slipstream 5000");
 	fprintf(stderr, "%s\n", status);
 }
 

@@ -519,7 +519,7 @@ static int SlipSdl_Run(int argc, char **argv) {
 	 * stretched into a 320x240 logical space, nearest filtered.
 	 */
 	SlipSdl_LoadDisplaySettings();
-	window = SDL_CreateWindow("Slipstream 5000 SDL Port", displaySettings.width, displaySettings.height,
+	window = SDL_CreateWindow("Slipstream 5000", displaySettings.width, displaySettings.height,
 	                          SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
 	if (window == NULL) {
 		fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
