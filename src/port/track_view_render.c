@@ -12971,43 +12971,6 @@ bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DM
 	return ok;
 }
 
-bool TrackView_DrawVehicleView(const char *resPath, int driver) {
-	SlipResourcePayload fontPayload;
-	SlipFont font;
-	uint16_t frameStep;
-
-	Raster_Clear(0, sizeof(g_framebuffer));
-	Raster_SetClipRect(0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
-
-	if (!SlipMenu_DrawVehiclePanel(resPath, driver)) {
-		return false;
-	}
-	if (!g_vehicleViewActorMatrixValid) {
-		TrackView_VehicleViewResetActorState();
-	}
-	frameStep = TrackView_VehicleViewFrameTimerUpdate();
-	TrackView_DrawVehicleViewModel(resPath, driver, &g_vehicleViewActorMatrix, frameStep);
-
-	if (g_driverDescriptions[driver][0] == '\0') {
-		return true;
-	}
-
-	if (!SlipResource_LoadByName(&resPath, 1u, "VIEWDESC.FNT", &fontPayload)) {
-		return true;
-	}
-	if (!SlipFont_FromPayload(&fontPayload, &font)) {
-		return true;
-	}
-
-	SlipText_SelectFont(&SlipText_state, &font);
-	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, SLIP_VEHICLE_DESCRIPTION_LEFT,
-	                  SLIP_VEHICLE_DESCRIPTION_RIGHT);
-	SlipText_SetColor(&SlipText_state, UINT16_MAX);
-	SlipText_DrawCentered(&SlipText_state, g_driverDescriptions[driver], NULL, 0, SLIP_VEHICLE_DESCRIPTION_TOP,
-	                      SLIP_VEHICLE_DESCRIPTION_BOTTOM);
-	return true;
-}
-
 static bool TrackView_MaterialPayloadExpandedBytes(const SlipResourcePayload *payload, size_t *expandedBytes) {
 	uint16_t count;
 

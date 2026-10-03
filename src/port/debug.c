@@ -5012,7 +5012,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		return SlipDebug_VerifyVisibility();
 	if (argc == 2 && strcmp(argv[1], "--verify-split-selection") == 0) {
 		bool passed = SlipMenu_DebugAcceptSplitDrivers();
-		printf("split_selection two_selectors_and_local_racers=%s\n", passed ? "passed" : "FAILED");
+		printf("split_selection local_racer_assignment=%s\n", passed ? "passed" : "FAILED");
 		return passed ? 0 : 4;
 	}
 	if (argc == 3 && strcmp(argv[1], "--verify-split-garage") == 0) {

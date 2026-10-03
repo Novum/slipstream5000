@@ -228,6 +228,7 @@ sources = files(
     'src/port/vehicle_view_camera.c',
     'src/port/vehicle_view_camera_host.c',
     'src/port/vehicle_viewer.c',
+    'src/port/vehicle_viewer_host.c',
     'src/port/vga_dac.c',
     'src/port/view3d.c',
     'src/opal/opal.c',

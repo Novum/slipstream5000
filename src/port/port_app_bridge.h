@@ -52,7 +52,6 @@ enum {
 };
 
 extern const int16_t g_trackGlobeOrientation[SLIPSTREAM_DRIVER_COUNT][SLIP_GLOBE_ORIENTATION_COMPONENT_COUNT];
-extern char g_driverDescriptions[SLIPSTREAM_DRIVER_COUNT][SLIP_MENU_DRIVER_DESCRIPTION_BYTES];
 
 uint64_t SlipSdl_TicksMs(void);
 union SDL_Event;
@@ -64,7 +63,6 @@ size_t SlipMenu_BuildArchiveList(const char *resPath, char *secondaryPath,
                                  const char *archives[SLIP_MENU_ARCHIVE_CAPACITY]);
 void SlipMenu_MakeDriverSpriteName(char *dst, size_t dstSize, const char *prefix, int driver, const char *suffix);
 bool SlipMenu_DrawSpriteFromRes(const char *resPath, const char *name, bool applySpritePalette);
-bool SlipMenu_DrawVehiclePanel(const char *resPath, int driver);
 bool SlipMenu_ApplyPaletteResource(const char *const *archives, size_t archiveCount, const char *paletteName);
 
 #endif

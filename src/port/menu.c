@@ -50,6 +50,7 @@
 #include "track_view_render.h"
 #include "vehicle_select.h"
 #include "vehicle_selector_host.h"
+#include "vehicle_viewer_host.h"
 #include "vga_dac.h"
 #include "view3d.h"
 
@@ -164,15 +165,7 @@ enum {
 	kCampaignCaptionTop = 127,
 	kCampaignCaptionBottom = 196,
 	kCampaignCaptionShadowOffset = -1,
-	kDriverCardOriginX = 27,
-	kDriverCardOriginY = 10,
-	kDriverCardZoomStepQ14 = SLIP_Q14_ONE / 16,
 	kDriverCount = 10,
-	kDriverActionAccept = 0,
-	kDriverActionCancel = 1,
-	kDriverActionView = 2,
-	kDriverActionCount = 3,
-	kDriverActionPlaySpeech = 3,
 	kGarageActionWeapons = 0,
 	kGarageActionTurbo = 1,
 	kGarageActionSystems = 2,
@@ -241,9 +234,6 @@ typedef enum MainMenuDispatchResult {
 typedef enum AppMode {
 	APP_MODE_MENU,
 	APP_MODE_VEHICLE_SELECT,
-	APP_MODE_VEHICLE_TO_DRIVER,
-	APP_MODE_DRIVER_SELECT,
-	APP_MODE_VEHICLE_VIEW,
 	APP_MODE_TRACK_SELECT,
 	APP_MODE_GARAGE,
 	APP_MODE_RACE,
@@ -256,16 +246,9 @@ static bool returnToResultsAfterReplay;
 
 typedef enum FocusSource { FOCUS_NONE, FOCUS_KEYBOARD, FOCUS_MOUSE } FocusSource;
 
-typedef enum VehicleDriverTransitionPhase {
-	VEHICLE_DRIVER_TRANSITION_FADE,
-	VEHICLE_DRIVER_TRANSITION_BACKGROUND,
-	VEHICLE_DRIVER_TRANSITION_ZOOM
-} VehicleDriverTransitionPhase;
-
 static int g_selectedDriver;
 static uint16_t g_playerOneDriver;
 static uint16_t g_playerTwoDriver;
-static uint16_t g_excludedDriver;
 static OnePlayerRaceType g_selectedRaceType;
 static int g_selectedTrack;
 static uint16_t g_trackHover;
@@ -280,19 +263,11 @@ static SlipMenuSdlPresentFrame g_mainMenuPresentFrame;
 static void *g_mainMenuPresentFrameContext;
 static int32_t SlipMainMenu_hiddenToggle;
 static int32_t SlipMainMenu_demoSelection;
-static int g_hoveredVehicle = -1;
-static FocusSource g_vehicleFocus = FOCUS_NONE;
 static SlipVehicleSelector vehicleResources = {
     .actionRects = {{208, 138, 257, 147}, {208, 150, 257, 159}, {208, 162, 257, 171}, {69, 24, 113, 74}}};
 static SlipVehicleSelectorCalls vehicleResourceCalls;
 static SlipVehicleSelectorHost vehicleResourceHost;
-static bool vehicleResourcesActive;
-static uint64_t g_screenStartMs;
 
-enum { DRIVER_ZOOM_COMPLETE = 0x4000, DRIVER_ZOOM_STEP = 0x400, DRIVER_CARD_X = 27, DRIVER_CARD_Y = 10 };
-
-static int g_transitionDriver;
-static int g_selectedDriverAction;
 static int g_selectedGarageAction;
 static int g_selectedGaragePanelItem;
 static int g_selectedGarageWeaponPod;
@@ -310,23 +285,15 @@ static uint16_t g_garageFont, g_garageResultsFont, g_garageWeaponFont;
 static uint16_t g_garageBackground, g_garageInactiveBackground, g_garageMarker;
 static SlipStringTableSlot *g_garageStrings;
 static uint16_t g_garageStatusZoom, g_garageStatusZoomTarget;
-static int g_hoveredDriverAction = -1;
 
 static int g_hoveredTrack = -1;
 static int g_hoveredGarageAction = -1;
 static int g_hoveredGaragePanelItem = -1;
 static int g_garagePanel = -1;
-static uint32_t g_vehicleZoomScale;
-static VehicleDriverTransitionPhase g_vehicleDriverTransitionPhase;
 
 static FocusSource g_trackFocus = FOCUS_NONE;
 static FocusSource g_garageActionFocus = FOCUS_NONE;
 static FocusSource g_garagePanelFocus = FOCUS_NONE;
-static AppMode g_trackReturnMode = APP_MODE_DRIVER_SELECT;
-static char g_vehicleTitleLabel[SLIP_MENU_LABEL_BYTES];
-static char g_vehiclePlayerLabels[2][SLIP_MENU_LABEL_BYTES];
-char g_driverDescriptions[kDriverCount][SLIP_MENU_DRIVER_DESCRIPTION_BYTES];
-static char g_driverActionLabels[kDriverActionCount][SLIP_MENU_LABEL_BYTES];
 static char g_trackTitleLabel[SLIP_MENU_LABEL_BYTES];
 static char g_garageActionLabels[kGarageActionCount][SLIP_MENU_LABEL_BYTES];
 static char g_garageWeaponPodLabels[kGarageWeaponPodActionCount][SLIP_MENU_LABEL_BYTES];
@@ -384,9 +351,6 @@ static SpriteButton g_trackButtons[kDriverCount] = {
     {"TRKBT_8.SPR", "TRKBTH8.SPR", 0, 0, 0, 0}, {"TRKBT_9.SPR", "TRKBTH9.SPR", 0, 0, 0, 0}};
 
 static SpriteButton g_trackTitlePanel = {"CH_TRACK.SPR", NULL, 0, 0, 0, 0};
-
-static SpriteButton g_driverActionButtons[kDriverActionCount] = {
-    {"DRIVER0A.SPR", NULL, 0, 0, 0, 0}, {"DRIVER0B.SPR", NULL, 0, 0, 0, 0}, {"DRIVER0C.SPR", NULL, 0, 0, 0, 0}};
 
 static SpriteButton g_garageActionButtons[kGarageActionCount] = {{NULL, NULL, 13, 83, 101, 23},
                                                                  {NULL, NULL, 13, 111, 101, 23},
@@ -578,8 +542,6 @@ static bool SlipMenu_InspectStringMetadata(const char *resPath, const char name[
 
 bool SlipMenu_LoadMainMenuModel(const char *resPath) {
 	SlipResourcePayload strings;
-	SlipResourcePayload viewCarStrings;
-	SlipResourcePayload vehicleSelectStrings;
 	SlipResourcePayload trackStrings;
 	SlipResourcePayload garageStrings;
 	bool ok;
@@ -600,49 +562,6 @@ bool SlipMenu_LoadMainMenuModel(const char *resPath) {
 				snprintf(g_menuPages[page].labels[itemIndex], sizeof(g_menuPages[page].labels[itemIndex]), "%s", tag);
 			}
 		}
-	}
-
-	if (SlipMenu_InspectStringMetadata(resPath, "VIEWCAR ", &viewCarStrings)) {
-		for (itemIndex = 0; itemIndex < kDriverCount; ++itemIndex) {
-			char tag[SLIP_STRING_TABLE_TAG_BYTES + 1];
-			snprintf(tag, sizeof(tag), "CAR%d", itemIndex);
-			if (!SlipStringTable_FindText(&viewCarStrings, tag, g_driverDescriptions[itemIndex],
-			                              sizeof(g_driverDescriptions[itemIndex]))) {
-				g_driverDescriptions[itemIndex][0] = '\0';
-			}
-		}
-	}
-
-	if (SlipMenu_InspectStringMetadata(resPath, "CH_TEAM ", &vehicleSelectStrings)) {
-		static const char *actionTags[kDriverActionCount] = {"OPT1", "OPT2", "OPT3"};
-		for (itemIndex = 0; itemIndex < kDriverActionCount; ++itemIndex) {
-			if (!SlipStringTable_FindText(&vehicleSelectStrings, actionTags[itemIndex], g_driverActionLabels[itemIndex],
-			                              sizeof(g_driverActionLabels[itemIndex]))) {
-				snprintf(g_driverActionLabels[itemIndex], sizeof(g_driverActionLabels[itemIndex]), "%s",
-				         actionTags[itemIndex]);
-			}
-		}
-		if (!SlipStringTable_FindText(&vehicleSelectStrings, "TITL", g_vehicleTitleLabel,
-		                              sizeof(g_vehicleTitleLabel))) {
-			snprintf(g_vehicleTitleLabel, sizeof(g_vehicleTitleLabel), "SELECT YOUR VEHICLE");
-		}
-		if (!SlipStringTable_FindText(&vehicleSelectStrings, "PLY1", g_vehiclePlayerLabels[0],
-		                              sizeof(g_vehiclePlayerLabels[0]))) {
-			snprintf(g_vehiclePlayerLabels[0], sizeof(g_vehiclePlayerLabels[0]), "PLAYER ONE");
-		}
-		if (!SlipStringTable_FindText(&vehicleSelectStrings, "PLY2", g_vehiclePlayerLabels[1],
-		                              sizeof(g_vehiclePlayerLabels[1]))) {
-			snprintf(g_vehiclePlayerLabels[1], sizeof(g_vehiclePlayerLabels[1]), "PLAYER TWO");
-		}
-	} else {
-		snprintf(g_driverActionLabels[kDriverActionAccept], sizeof(g_driverActionLabels[kDriverActionAccept]),
-		         "Accept");
-		snprintf(g_driverActionLabels[kDriverActionCancel], sizeof(g_driverActionLabels[kDriverActionCancel]),
-		         "Cancel");
-		snprintf(g_driverActionLabels[kDriverActionView], sizeof(g_driverActionLabels[kDriverActionView]), "View");
-		snprintf(g_vehicleTitleLabel, sizeof(g_vehicleTitleLabel), "SELECT YOUR VEHICLE");
-		snprintf(g_vehiclePlayerLabels[0], sizeof(g_vehiclePlayerLabels[0]), "PLAYER ONE");
-		snprintf(g_vehiclePlayerLabels[1], sizeof(g_vehiclePlayerLabels[1]), "PLAYER TWO");
 	}
 
 	if (SlipMenu_InspectStringMetadata(resPath, "CHTRACK ", &trackStrings)) {
@@ -690,13 +609,6 @@ bool SlipMenu_LoadMainMenuModel(const char *resPath) {
 	for (itemIndex = 0; itemIndex < kMaxMenuButtons; ++itemIndex) {
 		if (!SlipMenu_LoadMenuButtonRect(resPath, &g_menuButtons[itemIndex])) {
 			fprintf(stderr, "Could not inspect button sprite %s\n", g_menuButtons[itemIndex].normalSpriteName);
-			return false;
-		}
-	}
-	for (itemIndex = 0; itemIndex < kDriverActionCount; ++itemIndex) {
-		if (!SlipMenu_LoadSpriteButtonRect(resPath, &g_driverActionButtons[itemIndex])) {
-			fprintf(stderr, "Could not inspect driver action sprite %s\n",
-			        g_driverActionButtons[itemIndex].normalSpriteName);
 			return false;
 		}
 	}
@@ -1020,166 +932,6 @@ static int SlipMenu_FocusedItemIndex(FocusSource focus, int selectedItem, int ho
 		return selectedItem;
 	}
 	return -1;
-}
-
-static void SlipMenu_BeginVehicleSelection(void) {
-	void *const context = vehicleResourceCalls.context;
-	vehicleResources.fadeTarget = 0;
-	vehicleResources.animation.backgroundRedraws = SLIP_VEHICLE_SELECTION_REDRAW_PASSES;
-	vehicleResources.animation.doorElapsed = 0;
-	SlipFrameTimer_Reset();
-	vehicleResourceCalls.setNavigation(context, &SlipVehicleSelector_vehicleNavigation);
-}
-
-static int SlipMenu_VehicleZoneAt(const SlipResourcePayload *zones, int x, int y) {
-	const uint8_t *data;
-	uint16_t rows;
-	uint16_t offset;
-	size_t spanOffset;
-
-	if (zones == NULL || zones->data == NULL || zones->size < SLIP_INPUT_ZONE_HEADER_BYTES || y < 0) {
-		return -1;
-	}
-
-	data = zones->data;
-	rows = SlipBytes_ReadLE16(data);
-	if (y >= (int)rows ||
-	    zones->size < SLIP_INPUT_ZONE_HEADER_BYTES + (size_t)rows * SLIP_INPUT_ZONE_ROW_OFFSET_BYTES) {
-		return -1;
-	}
-
-	offset = SlipBytes_ReadLE16(data + SLIP_INPUT_ZONE_HEADER_BYTES + (size_t)y * SLIP_INPUT_ZONE_ROW_OFFSET_BYTES);
-	if (offset >= zones->size) {
-		return -1;
-	}
-
-	spanOffset = offset;
-	while (spanOffset + SLIP_INPUT_ZONE_SPAN_BYTES <= zones->size) {
-		const int zoneId = data[spanOffset];
-		const int spanX = SlipBytes_ReadLE16(data + spanOffset + SLIP_INPUT_ZONE_SELECTION_BYTES);
-		const int vehicle = zoneId == 0 ? -1 : zoneId - 1;
-
-		spanOffset += SLIP_INPUT_ZONE_SPAN_BYTES;
-		if (spanX == UINT16_MAX || x < spanX) {
-			return vehicle >= 0 && vehicle < kDriverCount ? vehicle : -1;
-		}
-	}
-
-	return -1;
-}
-
-static int SlipMenu_HitTestVehicleZone(const char *resPath, int x, int y) {
-	SlipResourcePayload zones;
-	int hit = -1;
-
-	(void)resPath;
-	const uint16_t resource = vehicleResources.zones;
-	if (SlipResourceHost_Lock(NULL, resource) != NULL) {
-		zones = SlipResourceHost_Payload(resource);
-		hit = SlipMenu_VehicleZoneAt(&zones, x, y);
-		SlipResourceHost_Unlock(NULL, resource);
-	}
-
-	if (hit + 1 == g_excludedDriver)
-		hit = -1;
-
-	return hit;
-}
-
-static bool SlipMenu_DrawVehicleSelect(const char *resPath, bool confirmed) {
-	SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
-
-	SlipVehicleSelection_Update(&vehicleResources.animation, SlipRace_gameMode, g_excludedDriver);
-
-	if (!confirmed) {
-		SlipInputPointerPosition pointer = SlipInput_Pointer();
-		const int activeVehicle = SlipMenu_HitTestVehicleZone(resPath, pointer.x, pointer.y);
-		vehicleResources.animation.selectedVehicle = (uint16_t)(activeVehicle + 1);
-	}
-
-	SlipVehicleSelector_Draw(&vehicleResources, &vehicleResourceCalls);
-	SlipVehicleSelector_UpdateFade(&vehicleResources, &vehicleResourceCalls);
-
-	return true;
-}
-
-static int SlipMenu_HitTestDriverAction(int x, int y);
-
-static bool driverCardResourcesActive;
-static SlipSelectorCardSetupResult driverCardSetupExit;
-
-static bool SlipMenu_BakeDriverCardLabels(const char *resPath, int driver) {
-	(void)resPath;
-	(void)driver;
-	if (driverCardResourcesActive)
-		return true;
-	driverCardSetupExit = SlipVehicleSelector_CardSetup(&vehicleResources, &vehicleResourceCalls,
-	                                                    SlipResourceHost_Modify, SlipResourceHost_ModifyReturnedSI);
-	if (driverCardSetupExit.modify.exit == SLIP_RESOURCE_MODIFY_DISPLACED_RETURN) {
-		SlipResourceHost_ReportModifyContinuation(
-		    driverCardSetupExit.continuationReturnAddress, driverCardSetupExit.continuationOperand,
-		    driverCardSetupExit.continuationReturnAddress == SLIP_SELECTOR_CARD_MODIFY_CONTINUATION
-		        ? vehicleResources.grayPalette
-		        : NULL,
-		    driverCardSetupExit.modify);
-		return false;
-	}
-	driverCardResourcesActive = true;
-	return true;
-}
-
-static bool SlipMenu_DrawDriverSelect(const char *resPath, int driver) {
-	(void)resPath;
-	(void)driver;
-	void *const context = vehicleResourceCalls.context;
-	vehicleResourceCalls.drawSprite(context, vehicleResources.assets.driverBackground, 0, 0);
-	vehicleResourceCalls.drawSprite(context, vehicleResources.card, kDriverCardOriginX, kDriverCardOriginY);
-	g_hoveredDriverAction = SlipMenu_HitTestDriverAction(SlipInput_Pointer().x, SlipInput_Pointer().y);
-	if (g_hoveredDriverAction >= 0 && g_hoveredDriverAction < kDriverActionCount)
-		vehicleResourceCalls.drawSprite(context, vehicleResources.hover[g_hoveredDriverAction],
-		                                SLIP_SPRITE_USE_STORED_POSITION, 0);
-	return true;
-}
-
-static bool SlipMenu_DrawVehicleToDriverTransition(const char *resPath, int driver) {
-
-	if (g_vehicleDriverTransitionPhase == VEHICLE_DRIVER_TRANSITION_FADE) {
-		if (!SlipMenu_DrawVehicleSelect(resPath, true))
-			return false;
-		if (vehicleResources.fade == vehicleResources.fadeTarget)
-			g_vehicleDriverTransitionPhase = VEHICLE_DRIVER_TRANSITION_BACKGROUND;
-
-		return true;
-	}
-
-	if (g_vehicleDriverTransitionPhase == VEHICLE_DRIVER_TRANSITION_BACKGROUND) {
-		if (!SlipMenu_BakeDriverCardLabels(resPath, driver))
-			return false;
-		vehicleResourceCalls.drawSprite(vehicleResourceCalls.context, vehicleResources.assets.driverBackground, 0, 0);
-		g_vehicleDriverTransitionPhase = VEHICLE_DRIVER_TRANSITION_ZOOM;
-		return true;
-	}
-
-	if (g_vehicleZoomScale == 0) {
-		vehicleResourceCalls.drawSprite(vehicleResourceCalls.context, vehicleResources.assets.driverBackground, 0, 0);
-		vehicleResourceCalls.setNavigation(vehicleResourceCalls.context, &SlipVehicleSelector_driverNavigation);
-		RasterSurfaceBounds bounds = Raster_GetSurfaceBounds();
-		Raster_SetClipRect((int16_t)bounds.left, (int16_t)bounds.top, (int16_t)bounds.right, (int16_t)bounds.bottom);
-	}
-	vehicleResourceCalls.zoom(vehicleResourceCalls.context, vehicleResources.card, (int16_t)g_vehicleZoomScale,
-	                          vehicleResources.zoomCenter, (SlipSelectorPoint){kDriverCardOriginX, kDriverCardOriginY});
-	g_vehicleZoomScale += DRIVER_ZOOM_STEP;
-	return true;
-}
-
-bool SlipMenu_DrawVehiclePanel(const char *resPath, int driver) {
-	char spriteName[SLIP_MENU_DRIVER_SPRITE_NAME_BYTES];
-
-	SlipMenu_MakeDriverSpriteName(spriteName, sizeof(spriteName), "VIEWCAR", driver, ".SPR");
-	if (!SlipMenu_DrawSpriteFromRes(resPath, spriteName, true)) {
-		return false;
-	}
-	return true;
 }
 
 typedef struct VehicleArtActor VehicleArtActor;
@@ -1779,21 +1531,6 @@ static int SlipMenu_HitTestTrackButton(int x, int y) {
 		const SpriteButton *const button = &g_trackButtons[buttonIndex];
 		if (x >= button->x && x < button->x + button->width && y >= button->y && y < button->y + button->height) {
 			return buttonIndex;
-		}
-	}
-
-	return -1;
-}
-
-static int SlipMenu_HitTestDriverAction(int x, int y) {
-	const int localX = x - kDriverCardOriginX;
-	const int localY = y - kDriverCardOriginY;
-	int actionIndex;
-
-	for (actionIndex = 0; actionIndex < SLIP_SELECTOR_ACTION_COUNT; ++actionIndex) {
-		const SlipSelectorRectangle *const zone = &vehicleResources.actionRects[actionIndex];
-		if (localX >= zone->left && localX <= zone->right && localY >= zone->top && localY <= zone->bottom) {
-			return actionIndex;
 		}
 	}
 
@@ -2452,74 +2189,6 @@ static void SlipMenu_RaceConfiguration(void) {
 	SlipRaceHud_ResetConsole(&SlipRaceSession_hudState);
 }
 
-static void SlipMenu_ReleaseVehicleResources(void) {
-	if (!vehicleResourcesActive)
-		return;
-	SlipVehicleSelector_Release(&vehicleResources, &vehicleResourceCalls);
-	vehicleResourcesActive = false;
-}
-
-static void SlipMenu_EnterVehicleSelect(SDL_Window *window, AppMode *mode, OnePlayerRaceType raceType,
-                                        int *hoveredButton, bool *redraw, uint16_t excludedDriver) {
-
-	g_excludedDriver = excludedDriver;
-	vehicleResourceHost = (SlipVehicleSelectorHost){.smallFontHandle = SlipMenu_resources.smallFont};
-	vehicleResourceCalls.context = &vehicleResourceHost;
-	SlipVehicleSelector_BindNativeCalls(&vehicleResourceCalls);
-	SlipVehicleSelector_Setup(&vehicleResources, excludedDriver, NULL, SlipMenu_resources.smallFont,
-	                          (uint16_t)SlipConfig_language, &SlipStringTable_state, &vehicleResourceCalls);
-	vehicleResourcesActive = true;
-	g_selectedRaceType = raceType;
-	g_selectedDriver = 0;
-	g_hoveredVehicle = -1;
-	g_vehicleFocus = FOCUS_NONE;
-	SlipMenu_BeginVehicleSelection();
-	*mode = APP_MODE_VEHICLE_SELECT;
-	*hoveredButton = -1;
-	*redraw = true;
-	g_screenStartMs = SlipSdl_TicksMs();
-	SlipMenu_SetStatusWindowTitle(window, "Select your vehicle");
-}
-
-static void SlipMenu_EnterVehicleToDriver(SDL_Window *window, AppMode *mode, int driver, bool *redraw) {
-	g_selectedDriver = driver;
-	g_transitionDriver = driver;
-	vehicleResources.confirmed = 1;
-	vehicleResources.fadeTarget = SLIP_Q14_ONE;
-	g_vehicleDriverTransitionPhase = VEHICLE_DRIVER_TRANSITION_FADE;
-	g_vehicleZoomScale = 0;
-	*mode = APP_MODE_VEHICLE_TO_DRIVER;
-	*redraw = true;
-	SlipMenu_SetDriverWindowTitle(window, "Vehicle selection", driver);
-}
-
-static void SlipMenu_EnterDriverSelect(SDL_Window *window, AppMode *mode, int *hoveredButton, bool *redraw) {
-	vehicleResources.voice = 0;
-	g_selectedDriverAction = kDriverActionAccept;
-	g_hoveredDriverAction = -1;
-	*mode = APP_MODE_DRIVER_SELECT;
-	*hoveredButton = -1;
-	*redraw = true;
-	g_screenStartMs = SlipSdl_TicksMs();
-	SlipMenu_SetDriverWindowTitle(window, "Driver selection", g_selectedDriver);
-}
-
-static void SlipMenu_EnterVehicleView(SDL_Window *window, AppMode *mode, bool *redraw) {
-	*mode = APP_MODE_VEHICLE_VIEW;
-	g_hoveredDriverAction = -1;
-	*redraw = true;
-	g_screenStartMs = SlipSdl_TicksMs();
-	TrackView_VehicleViewResetActorState();
-	SlipMenu_SetDriverWindowTitle(window, "Vehicle view", g_selectedDriver);
-}
-
-static void SlipMenu_DriverViewReturn(void) {
-	RasterSurfaceBounds bounds = Raster_GetSurfaceBounds();
-	Raster_SetClipRect((int16_t)bounds.left, (int16_t)bounds.top, (int16_t)bounds.right, (int16_t)bounds.bottom);
-	vehicleResourceCalls.spritePalette(vehicleResourceCalls.context, vehicleResources.card);
-	vehicleResourceCalls.spritePalette(vehicleResourceCalls.context, vehicleResources.assets.driverBackground);
-}
-
 static void SlipMenu_TrackSelectBegin(void) {
 
 	g_trackHover = 0;
@@ -2527,10 +2196,8 @@ static void SlipMenu_TrackSelectBegin(void) {
 	TrackView_TrackGlobeResetActorState();
 }
 
-static void SlipMenu_EnterTrackSelect(SDL_Window *window, AppMode *mode, AppMode returnMode, bool *redraw) {
+static void SlipMenu_EnterTrackSelect(SDL_Window *window, AppMode *mode, bool *redraw) {
 	*mode = APP_MODE_TRACK_SELECT;
-	g_trackReturnMode = returnMode;
-	g_hoveredDriverAction = -1;
 	g_selectedTrack = 0;
 	g_hoveredTrack = -1;
 	g_trackFocus = FOCUS_NONE;
@@ -3097,92 +2764,74 @@ static void SlipCampaign_Continue(SDL_Window *window, AppMode *mode, bool *redra
 	SlipCampaign_Stage(window, mode, redraw);
 }
 
-static void SlipDriverSelect_Action(SDL_Window *window, AppMode *mode, int action, int *hoveredButton, bool *redraw) {
-	if (driverCardResourcesActive && menuSound != NULL)
-		SlipGameSound_Stop(menuSound, vehicleResources.voice);
-	if (action == kDriverActionAccept) {
-		if (driverCardResourcesActive)
-			SlipVehicleSelector_CardRelease(&vehicleResources, &vehicleResourceCalls);
-		driverCardResourcesActive = false;
-		SlipMenu_ReleaseVehicleResources();
-		/* The SDL event already consumed the key/click that accepted the driver. */
-		SlipInput_pressed[SLIP_INPUT_SCAN_ENTER] = false;
-		SlipInput_pressed[SLIP_INPUT_MOUSE_LEFT] = false;
-		if (g_selectedRaceType == ONE_PLAYER_RACE_CHAMPIONSHIP)
-			SlipCampaign_Continue(window, mode, redraw);
-		else {
-
-			if (g_excludedDriver == 0) {
-				g_playerOneDriver = (uint16_t)(g_selectedDriver + 1);
-				g_playerTwoDriver = 0;
-				if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN) {
-					SlipMenu_EnterVehicleSelect(window, mode, g_selectedRaceType, hoveredButton, redraw,
-					                            g_playerOneDriver);
-					return;
-				}
-			} else {
-				g_playerTwoDriver = (uint16_t)(g_selectedDriver + 1);
-			}
-			g_selectedDriver = g_playerOneDriver - 1;
-			SlipMenu_EnterTrackSelect(window, mode, APP_MODE_DRIVER_SELECT, redraw);
-		}
-	} else if (action == kDriverActionCancel) {
-
-		SlipMenuMusic_Branch(0);
-		if (driverCardResourcesActive) {
-			void *const context = vehicleResourceCalls.context;
-			RasterSurfaceBounds bounds = Raster_GetSurfaceBounds();
-			Raster_SetClipRect((int16_t)bounds.left, (int16_t)bounds.top, (int16_t)bounds.right,
-			                   (int16_t)bounds.bottom);
-			for (int16_t scale = SLIP_Q14_ONE; scale >= 0; scale -= kDriverCardZoomStepQ14) {
-				vehicleResourceCalls.poll(context);
-				vehicleResourceCalls.drawSprite(context, vehicleResources.assets.driverBackground, 0, 0);
-				vehicleResourceCalls.zoom(context, vehicleResources.card, scale, vehicleResources.zoomCenter,
-				                          (SlipSelectorPoint){kDriverCardOriginX, kDriverCardOriginY});
-				vehicleResourceCalls.present(context);
-			}
-			if (vehicleResources.speech != 0) {
-				SlipResourceHost_Unlock(NULL, vehicleResources.speech);
-				SlipResourceHost_Release(NULL, vehicleResources.speech);
-			}
-			SlipResourceHost_Release(NULL, vehicleResources.card);
-			for (unsigned hoverSpriteIndex = 0;
-			     hoverSpriteIndex < sizeof(vehicleResources.hover) / sizeof(vehicleResources.hover[0]);
-			     ++hoverSpriteIndex)
-				SlipResourceHost_Release(NULL, vehicleResources.hover[hoverSpriteIndex]);
-			driverCardResourcesActive = false;
-			vehicleResources.confirmed = 0;
-		}
-		*mode = APP_MODE_VEHICLE_SELECT;
-		g_hoveredVehicle = -1;
-		g_vehicleFocus = FOCUS_NONE;
-		SlipMenu_BeginVehicleSelection();
-		*hoveredButton = -1;
-		g_screenStartMs = SlipSdl_TicksMs();
-		*redraw = true;
-		SlipMenu_SetStatusWindowTitle(window, "Select your vehicle");
-	} else {
-		SlipMenu_EnterVehicleView(window, mode, redraw);
-	}
+static bool SlipMenu_ModifySelectorResource(void *context, uint16_t *resource) {
+	SlipResourceModifyResult result = SlipResourceHost_Modify(context, *resource);
+	if (result.exit == SLIP_RESOURCE_MODIFY_DISPLACED_RETURN)
+		SlipRuntime_Fatal("Unimplemented DOS selector resource modification continuation.");
+	*resource = SlipResourceHost_ModifyReturnedSI(result);
+	return true;
 }
 
-/* Diagnostic entry exercises the same Accept dispatch as keyboard/mouse input. */
+static void SlipMenu_StopSelectorVoice(void *context, uint32_t voice) {
+	(void)context;
+	SlipGameSound_Stop(menuSound, voice);
+}
+
+static uint32_t SlipMenu_PlaySelectorVoice(void *context, const uint8_t *data, uint32_t bytes) {
+	(void)context;
+	return SlipGameSound_PlayAlternate(menuSound, data, bytes);
+}
+
+static void SlipMenu_ViewSelectedVehicle(void *context, uint16_t vehicle) {
+	(void)context;
+	SlipVehicleViewerHost_Run(vehicle, menuSound);
+}
+
+static void SlipMenu_BindSelector(void) {
+	vehicleResourceHost.smallFontHandle = SlipMenu_resources.smallFont;
+	vehicleResourceCalls.context = &vehicleResourceHost;
+	SlipVehicleSelector_BindNativeCalls(&vehicleResourceCalls);
+	vehicleResourceCalls.modify = SlipMenu_ModifySelectorResource;
+	vehicleResourceCalls.stopVoice = SlipMenu_StopSelectorVoice;
+	vehicleResourceCalls.playVoice = SlipMenu_PlaySelectorVoice;
+	vehicleResourceCalls.viewVehicle = SlipMenu_ViewSelectedVehicle;
+}
+
+static void SlipMenu_RunVehicleSelection(SDL_Window *window, AppMode *mode, bool *redraw) {
+	SlipMenu_BindSelector();
+	SlipMenu_SetStatusWindowTitle(window, "Select your vehicle");
+	for (;;) {
+		g_playerOneDriver = SlipVehicleSelector_Run(&vehicleResources, 0, NULL, SlipMenu_resources.smallFont,
+		                                            (uint16_t)SlipConfig_language, SlipRace_gameMode,
+		                                            &SlipStringTable_state, &vehicleResourceCalls);
+		if (g_playerOneDriver == 0) {
+			*mode = APP_MODE_MENU;
+			return;
+		}
+		g_playerTwoDriver = 0;
+		if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN) {
+			g_playerTwoDriver = SlipVehicleSelector_Run(
+			    &vehicleResources, g_playerOneDriver, NULL, SlipMenu_resources.smallFont, (uint16_t)SlipConfig_language,
+			    SlipRace_gameMode, &SlipStringTable_state, &vehicleResourceCalls);
+			if (g_playerTwoDriver == 0)
+				continue;
+		}
+		break;
+	}
+	g_selectedDriver = g_playerOneDriver - 1;
+	if (g_selectedRaceType == ONE_PLAYER_RACE_CHAMPIONSHIP)
+		SlipCampaign_Continue(window, mode, redraw);
+	else
+		SlipMenu_EnterTrackSelect(window, mode, redraw);
+}
+
+/* Fixtures for the post-selector race/garage continuations. */
 bool SlipMenu_DebugAcceptSplitDrivers(void) {
-	AppMode mode = APP_MODE_DRIVER_SELECT;
-	int hovered = -1;
-	bool redraw = false;
 	g_selectedRaceType = ONE_PLAYER_RACE_SINGLE;
 	SlipRace_gameMode = SLIP_RACE_GAME_SPLIT_SCREEN;
-	g_excludedDriver = 0;
-	g_selectedDriver = 3;
-	SlipDriverSelect_Action(NULL, &mode, 0, &hovered, &redraw);
-	if (mode != APP_MODE_VEHICLE_SELECT || g_excludedDriver != 4 || g_playerOneDriver != 4 || g_playerTwoDriver != 0)
-		return false;
-	g_selectedDriver = 7;
-	mode = APP_MODE_DRIVER_SELECT;
-	SlipDriverSelect_Action(NULL, &mode, 0, &hovered, &redraw);
-	if (mode != APP_MODE_TRACK_SELECT || g_playerTwoDriver != 8)
-		return false;
+	g_playerOneDriver = 4;
+	g_playerTwoDriver = 8;
+	g_selectedDriver = g_playerOneDriver - 1;
 	SlipRaceRacerTable racers = {0};
 	racers.racerCount = 2;
 	SlipRace_BuildRacerTable(&racers, g_playerOneDriver, g_playerTwoDriver);
@@ -3191,15 +2840,15 @@ bool SlipMenu_DebugAcceptSplitDrivers(void) {
 }
 
 bool SlipMenu_DebugAcceptChampionship(void) {
-	AppMode mode = APP_MODE_DRIVER_SELECT;
-	int hovered = -1;
+	AppMode mode = APP_MODE_VEHICLE_SELECT;
 	bool redraw = false;
 	g_selectedRaceType = ONE_PLAYER_RACE_CHAMPIONSHIP;
 	SlipRace_type = SLIP_RACE_TYPE_CHAMPIONSHIP;
 	SlipRace_gameMode = SLIP_RACE_GAME_SINGLE_PLAYER;
 	SlipRace_racerCount = 10;
 	g_selectedDriver = 0;
-	SlipDriverSelect_Action(NULL, &mode, 0, &hovered, &redraw);
+	SlipMenu_BindSelector();
+	SlipCampaign_Continue(NULL, &mode, &redraw);
 	return mode == APP_MODE_GARAGE && !g_sdlQuitRequested;
 }
 
@@ -3332,6 +2981,7 @@ const char *SlipMenu_FindResPath(int argc, char **argv) { return SlipMenu_FindRe
 
 void SlipMenu_Init(const char *resPath, SDL_Window *window, SDL_Renderer *renderer,
                    SlipMenuSdlPresentFrame presentFrame, void *presentFrameContext) {
+	SlipMenu_BindSelector();
 	g_mainMenuResPath = resPath;
 	g_mainMenuWindow = window;
 	g_mainMenuRenderer = renderer;
@@ -3369,7 +3019,8 @@ void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer 
 		mouseInputCode = SlipMenu_SdlMouseButtonToInputCode(event->button.button);
 	}
 
-	if (haveMainMenu && (appMode == APP_MODE_MENU || appMode == APP_MODE_RESULTS)) {
+	if (haveMainMenu &&
+	    (appMode == APP_MODE_MENU || appMode == APP_MODE_RESULTS || appMode == APP_MODE_VEHICLE_SELECT)) {
 		if (quitRequested) {
 			*running = false;
 		}
@@ -3399,76 +3050,11 @@ void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer 
 				}
 			} else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT) {
 				SlipMenu_TrackButtonRelease();
-				if (g_selectedRaceType != ONE_PLAYER_RACE_CHAMPIONSHIP) {
-
-					SlipMenu_EnterVehicleSelect(window, &appMode, g_selectedRaceType, &hoveredButton, &redraw, 0);
-				} else {
-					appMode = g_trackReturnMode;
-					g_hoveredTrack = -1;
-					redraw = true;
-					if (appMode == APP_MODE_VEHICLE_VIEW) {
-						SlipMenu_SetDriverWindowTitle(window, "Vehicle view", g_selectedDriver);
-					} else {
-						appMode = APP_MODE_DRIVER_SELECT;
-						g_hoveredDriverAction = -1;
-						g_trackFocus = FOCUS_NONE;
-						SlipMenu_SetDriverWindowTitle(window, "Driver selection", g_selectedDriver);
-					}
-				}
-			} else if (haveMainMenu && appMode == APP_MODE_VEHICLE_VIEW) {
-				SlipMenu_DriverViewReturn();
-				appMode = APP_MODE_DRIVER_SELECT;
-				g_hoveredDriverAction = -1;
+				appMode = APP_MODE_VEHICLE_SELECT;
 				redraw = true;
-				SlipMenu_SetDriverWindowTitle(window, "Driver selection", g_selectedDriver);
-			} else if (haveMainMenu && appMode == APP_MODE_DRIVER_SELECT) {
-				SlipDriverSelect_Action(window, &appMode, 1, &hoveredButton, &redraw);
-			} else if (haveMainMenu && appMode == APP_MODE_VEHICLE_TO_DRIVER) {
-
-			} else if (haveMainMenu && appMode == APP_MODE_VEHICLE_SELECT) {
-				vehicleResources.animation.selectedVehicle = 0;
-				SlipMenu_ReleaseVehicleResources();
-				if (g_excludedDriver != 0) {
-
-					SlipMenu_EnterVehicleSelect(window, &appMode, g_selectedRaceType, &hoveredButton, &redraw, 0);
-				} else {
-					appMode = APP_MODE_MENU;
-					hoveredButton = -1;
-					redraw = true;
-				}
 			} else {
 				*running = false;
 			}
-		} else if (haveMainMenu && appMode == APP_MODE_VEHICLE_SELECT &&
-		           (scanCode == SLIP_INPUT_SCAN_ENTER || scanCode == SLIP_INPUT_SCAN_SPACE)) {
-			const int vehicle = SlipMenu_FocusedItemIndex(g_vehicleFocus, g_selectedDriver, g_hoveredVehicle);
-			if (vehicle >= 0) {
-				g_selectedDriver = vehicle;
-			}
-			if (g_selectedDriver + 1 != g_excludedDriver)
-				SlipMenu_EnterVehicleToDriver(window, &appMode, g_selectedDriver, &redraw);
-		} else if (haveMainMenu && appMode == APP_MODE_DRIVER_SELECT &&
-		           (scanCode == SLIP_INPUT_SCAN_DOWN || scanCode == SLIP_INPUT_SCAN_UP)) {
-			if (scanCode == SLIP_INPUT_SCAN_DOWN) {
-				g_selectedDriverAction = (g_selectedDriverAction + 1) % kDriverActionCount;
-			} else {
-				g_selectedDriverAction = (g_selectedDriverAction + kDriverActionCount - 1) % kDriverActionCount;
-			}
-			g_hoveredDriverAction = -1;
-			redraw = true;
-		} else if (haveMainMenu && appMode == APP_MODE_DRIVER_SELECT &&
-		           (scanCode == SLIP_INPUT_SCAN_ENTER || scanCode == SLIP_INPUT_SCAN_SPACE)) {
-			int action = g_hoveredDriverAction >= 0 ? g_hoveredDriverAction : g_selectedDriverAction;
-			if (action == kDriverActionPlaySpeech)
-				action = kDriverActionAccept;
-			SlipDriverSelect_Action(window, &appMode, action, &hoveredButton, &redraw);
-		} else if (haveMainMenu && appMode == APP_MODE_VEHICLE_VIEW &&
-		           (scanCode == SLIP_INPUT_SCAN_ENTER || scanCode == SLIP_INPUT_SCAN_SPACE)) {
-			SlipMenu_DriverViewReturn();
-			appMode = APP_MODE_DRIVER_SELECT;
-			g_hoveredDriverAction = -1;
-			redraw = true;
-			SlipMenu_SetDriverWindowTitle(window, "Driver selection", g_selectedDriver);
 		} else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT && scanCode == SLIP_INPUT_SCAN_ENTER) {
 			const int track = SlipMenu_FocusedItemIndex(g_trackFocus, g_selectedTrack, g_hoveredTrack);
 			if (track >= 0) {
@@ -3495,19 +3081,7 @@ void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer 
 		}
 	}
 
-	else if (haveMainMenu && appMode == APP_MODE_VEHICLE_SELECT && event->type == SDL_EVENT_MOUSE_MOTION) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->motion.x, event->motion.y, &x, &y)) {
-			hit = SlipMenu_HitTestVehicleZone(resPath, x, y);
-			if (g_vehicleFocus != FOCUS_MOUSE || hit != g_hoveredVehicle) {
-				g_vehicleFocus = FOCUS_MOUSE;
-				g_hoveredVehicle = hit;
-				redraw = true;
-			}
-		}
-	} else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT && event->type == SDL_EVENT_MOUSE_MOTION) {
+	else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT && event->type == SDL_EVENT_MOUSE_MOTION) {
 		int x;
 		int y;
 		int hit;
@@ -3543,42 +3117,6 @@ void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer 
 				g_garagePanelFocus = FOCUS_MOUSE;
 				g_hoveredGaragePanelItem = hit;
 				redraw = true;
-			}
-		}
-	} else if (haveMainMenu && appMode == APP_MODE_VEHICLE_SELECT && event->type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
-	           mouseInputCode == SLIP_INPUT_MOUSE_LEFT) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->button.x, event->button.y, &x, &y)) {
-			hit = SlipMenu_HitTestVehicleZone(resPath, x, y);
-			if (hit >= 0) {
-				g_selectedDriver = hit;
-				g_hoveredVehicle = hit;
-				g_vehicleFocus = FOCUS_MOUSE;
-				SlipMenu_EnterVehicleToDriver(window, &appMode, hit, &redraw);
-			}
-		}
-	} else if (haveMainMenu && appMode == APP_MODE_DRIVER_SELECT && event->type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
-	           mouseInputCode == SLIP_INPUT_MOUSE_LEFT) {
-		int x;
-		int y;
-		int hit;
-		if (SlipMenu_WindowToLogical(renderer, event->button.x, event->button.y, &x, &y)) {
-			hit = SlipMenu_HitTestDriverAction(x, y);
-			if (hit == kDriverActionPlaySpeech) {
-				if (vehicleResources.speech != 0 && menuSound != NULL) {
-					SlipGameSound_Stop(menuSound, vehicleResources.voice);
-					uint32_t bytes;
-					SlipResourceHost_Size(NULL, vehicleResources.speech, &bytes);
-					vehicleResources.voice = SlipGameSound_PlayAlternate(menuSound, vehicleResources.speechData, bytes);
-				}
-				return;
-			}
-			if (hit >= 0) {
-				g_hoveredDriverAction = hit;
-				g_selectedDriverAction = hit;
-				SlipDriverSelect_Action(window, &appMode, hit, &hoveredButton, &redraw);
 			}
 		}
 	} else if (haveMainMenu && appMode == APP_MODE_TRACK_SELECT && event->type == SDL_EVENT_MOUSE_BUTTON_DOWN &&
@@ -3731,7 +3269,7 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 			break;
 		case MAIN_MENU_DISPATCH_RACE_SETUP:
 			g_selectedRaceType = (OnePlayerRaceType)(SlipRace_type - SLIP_RACE_TYPE_PRACTICE);
-			SlipMenu_EnterVehicleSelect(window, &appMode, g_selectedRaceType, &hoveredButton, &redraw, 0);
+			appMode = APP_MODE_VEHICLE_SELECT;
 			break;
 		case MAIN_MENU_DISPATCH_SHOWCASE: {
 			char secondaryPath[SLIP_MENU_ARCHIVE_PATH_BYTES];
@@ -3785,24 +3323,13 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 			return true;
 		}
 	}
-	if (haveMainMenu && appMode == APP_MODE_VEHICLE_TO_DRIVER) {
-		if (g_vehicleZoomScale > DRIVER_ZOOM_COMPLETE) {
-			SlipMenu_EnterDriverSelect(window, &appMode, &hoveredButton, &redraw);
-		}
-	}
 
 	if (haveMainMenu) {
 
 		bool raceFrame = appMode == APP_MODE_RACE || appMode == APP_MODE_RESULTS;
 		if (appMode == APP_MODE_VEHICLE_SELECT) {
-			SlipMenu_DrawVehicleSelect(resPath, false);
-		} else if (appMode == APP_MODE_VEHICLE_TO_DRIVER) {
-			if (!SlipMenu_DrawVehicleToDriverTransition(resPath, g_transitionDriver))
-				return false; /* Host cannot execute the displaced guest RET. */
-		} else if (appMode == APP_MODE_DRIVER_SELECT) {
-			SlipMenu_DrawDriverSelect(resPath, g_selectedDriver);
-		} else if (appMode == APP_MODE_VEHICLE_VIEW) {
-			TrackView_DrawVehicleView(resPath, g_selectedDriver);
+			SlipMenu_RunVehicleSelection(window, &appMode, &redraw);
+			return !g_sdlQuitRequested;
 		} else if (appMode == APP_MODE_TRACK_SELECT) {
 			SlipMenu_DrawTrackSelectFrame(resPath, g_selectedTrack, g_hoveredTrack, g_trackFocus);
 		} else if (appMode == APP_MODE_RACE) {

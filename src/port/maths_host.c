@@ -66,3 +66,5 @@ static const SlipMathsCalls mathsCalls = {.find = SlipResourceHost_Find,
                                           .release = SlipResourceHost_Release};
 
 bool SlipMathsHost_Initialize(void) { return SlipMaths_Initialize(&maths, &mathsCalls) == 0; }
+
+SlipView3DMaths *SlipMathsHost_Tables(void) { return &maths.tables; }
