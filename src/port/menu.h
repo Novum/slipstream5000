@@ -17,6 +17,7 @@ bool SlipMenu_DebugAcceptSplitDrivers(void);
 bool SlipMenu_DebugSplitGarage(const char *resPath);
 bool SlipMenu_PollInput(void);
 void SlipMenu_PresentFrame(void);
+void SlipMenu_UpdateSystemCursor(void);
 bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview);
 
 const char *SlipMenu_FindResPath(int argc, char **argv);

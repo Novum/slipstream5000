@@ -2403,11 +2403,9 @@ static void SlipMenu_RaceConfiguration(void) {
 	const uint16_t font = SlipConfigHost_calls.currentFont(SlipConfigHost_calls.context);
 	uint8_t palette[256][3];
 	SlipVgaDac_ReadRange(0, 256, palette[0]);
-	SDL_ShowCursor();
 	SlipConfigMenu_state.allowDifficulty = 0;
 	SlipConfigMenu_Run(&SlipConfigMenu_state, &SlipConfigHost_calls);
 	SlipConfigMenu_state.allowDifficulty = 1;
-	SDL_HideCursor();
 	SlipVgaDac_WriteRange(0, 256, palette[0]);
 	SlipConfigHost_calls.selectFont(SlipConfigHost_calls.context, font);
 	SlipRaceSession_ApplyConfigurationValues();
@@ -3020,7 +3018,6 @@ static void SlipCampaign_Stage(SDL_Window *window, AppMode *mode, bool *redraw) 
 	    NULL};
 	SlipRacePlayer_track = track;
 	g_selectedTrack = (int)championshipStage - 1;
-	SDL_HideCursor();
 	if (!SlipMenu_CampaignPresenter(track, 0))
 		return;
 	if (g_sdlQuitRequested)
@@ -3038,7 +3035,6 @@ static void SlipCampaign_Stage(SDL_Window *window, AppMode *mode, bool *redraw) 
 		return;
 	if (g_sdlQuitRequested)
 		return;
-	SDL_ShowCursor();
 	SlipMenu_EnterGarageView(window, mode, redraw, 1u);
 }
 
@@ -3266,6 +3262,13 @@ static bool haveMainMenu;
 static bool redraw = true;
 static AppMode appMode = APP_MODE_MENU;
 static int hoveredButton = -1;
+
+void SlipMenu_UpdateSystemCursor(void) {
+	if (appMode == APP_MODE_RACE && !SlipRaceSession_IsPaused() && SDL_GetKeyboardFocus() != NULL)
+		SDL_HideCursor();
+	else
+		SDL_ShowCursor();
+}
 
 const char *SlipMenu_FindResPath(int argc, char **argv) { return SlipMenu_FindResPathInternal(argc, argv); }
 
@@ -3606,7 +3609,6 @@ static bool SlipMainMenu_Attract(const char *resPath) {
 		g_playerTwoDriver = 0;
 		SlipRace_racerTable.racerCount = (uint16_t)SlipRace_racerCount;
 		SlipRace_BuildRacerTable(&SlipRace_racerTable, driver, 0);
-		SDL_HideCursor();
 		SlipMenuMusic_Stop();
 		SlipMenuSound_Release();
 		SlipRaceSession_StartNew(resPath, track, &SlipRace_racerTable, SlipConfig_environmentDetail, SlipConfig_shading,
@@ -3633,7 +3635,6 @@ static bool SlipMainMenu_Attract(const char *resPath) {
 	SlipRacePlayer_demoAiEnabled = 0;
 	SlipRace_demoChaseEnabled = 0;
 	SlipRacePlayer_demoMode = 0;
-	SDL_ShowCursor();
 	return running;
 }
 
@@ -3656,7 +3657,6 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 		case -1:
 			SlipMenuMusic_Stop();
 			SlipMenuSound_Release();
-			SDL_HideCursor();
 			if (!SlipMainMenu_Attract(resPath))
 				return false;
 			SlipMenuMusic_Start();
@@ -3665,10 +3665,8 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 		case MAIN_MENU_DISPATCH_RESTART:
 			SlipMenuMusic_Stop();
 			SlipMenuSound_Release();
-			SDL_HideCursor();
 			if (!SlipSdl_RunStartupIntro(resPath))
 				return false;
-			SDL_ShowCursor();
 			SlipMenuMusic_Start();
 			hoveredButton = -1;
 			redraw = true;
@@ -3763,7 +3761,6 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 				redraw = true;
 				break;
 			case SLIP_RACE_FRAME_ENDED:
-				SDL_ShowCursor();
 				if (returnToResultsAfterReplay ||
 				    (SlipRace_type != SLIP_RACE_TYPE_PRACTICE && SlipRaceSession_exitRequested == 0)) {
 					if (!returnToResultsAfterReplay) {
@@ -3797,7 +3794,6 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 			if (action != SLIP_RESULTS_WAIT) {
 				SlipRaceResults_EndDisplay(&resultsScreen, menuSound);
 				if (action == SLIP_RESULTS_REPLAY) {
-					SDL_HideCursor();
 					returnToResultsAfterReplay = true;
 					SlipRaceSession_Replay(resPath, SlipRacePlayer_track, &SlipRace_racerTable,
 					                       SlipConfig_environmentDetail, SlipConfig_shading, SlipConfig_textures,
@@ -3807,9 +3803,7 @@ bool SlipMenu_UpdateAndDraw(const char *resPath, SDL_Window *window) {
 
 					if (SlipRace_type == SLIP_RACE_TYPE_CHAMPIONSHIP)
 						SlipRaceRecording_Release();
-					SDL_HideCursor();
 					SlipLapRecordsHost_Update(SlipRacePlayer_track, &SlipRace_racerTable, &SlipRaceSession_maths);
-					SDL_ShowCursor();
 					if (SlipRace_type != SLIP_RACE_TYPE_CHAMPIONSHIP) {
 
 						SlipRaceRecording_Release();

@@ -2147,6 +2147,8 @@ static SlipRacePauseAction SlipRaceSession_UpdatePauseMenu(bool inputPressed[256
 	return (SlipRacePauseAction)SlipRaceSession_pauseSelection;
 }
 
+bool SlipRaceSession_IsPaused(void) { return SlipRaceSession_pauseState != SLIP_RACE_PAUSE_RUNNING; }
+
 void SlipRaceSession_ConfigurationReturn(void) {
 
 	SlipMenuMusic_RaceConfigurationReturn();

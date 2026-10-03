@@ -45,6 +45,7 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
                                              uint32_t windowSize, int mouseX, int mouseY);
 
 void SlipRaceSession_ConfigurationReturn(void);
+bool SlipRaceSession_IsPaused(void);
 void SlipRaceSession_ApplyConfigurationValues(void);
 
 void SlipRaceSession_BindSoundHost(SlipGameSoundState *gameSound, uint16_t soundSet, SlipSoundEffectLock lockSound,

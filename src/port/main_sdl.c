@@ -113,6 +113,8 @@ bool SlipSdl_PollEvent(SDL_Event *event) {
 	while (SDL_PollEvent(event)) {
 		SlipControllerSdl_ObserveEvent(event);
 		SlipSdl_ObserveDisplayEvent(event);
+		if (event->type == SDL_EVENT_WINDOW_FOCUS_GAINED || event->type == SDL_EVENT_WINDOW_FOCUS_LOST)
+			SlipMenu_UpdateSystemCursor();
 		if (event->type == SDL_EVENT_KEY_DOWN || event->type == SDL_EVENT_KEY_UP) {
 			if (event->key.key == SDLK_RETURN || event->key.key == SDLK_KP_ENTER) {
 				const unsigned index = event->key.key == SDLK_KP_ENTER;
@@ -250,6 +252,7 @@ typedef struct SlipSdlStartupIntroContext {
 } SlipSdlStartupIntroContext;
 
 static void SlipSdl_PresentFrame(void *context) {
+	SlipMenu_UpdateSystemCursor();
 	SlipSdlPresentContext *const presentContext = (SlipSdlPresentContext *)context;
 	SDL_Texture *const texture = presentContext->texture;
 	SDL_Renderer *const renderer = presentContext->renderer;
@@ -460,6 +463,7 @@ static int SlipSdl_Run(int argc, char **argv) {
 		displaySettings.fullscreen = false;
 	}
 	SDL_ShowWindow(window);
+	SDL_ShowCursor();
 
 	rendererProperties = SDL_CreateProperties();
 	if (rendererProperties != 0 &&
