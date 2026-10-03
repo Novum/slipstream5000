@@ -16,8 +16,7 @@ enum {
 	SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE = 4,
 	SLIP_RACE_DISPLAY_HUD_REGION_COUNT = 5,
 	SLIP_RACE_DISPLAY_LEFT_HUD_MARGIN = 8,
-	SLIP_RACE_DISPLAY_LEFT_HUD_ART_OFFSET = 14,
-	SLIP_RACE_DISPLAY_BOTTOM_HUD_SHIFT = 7
+	SLIP_RACE_DISPLAY_LEFT_HUD_ART_OFFSET = 14
 };
 
 bool SlipRaceDisplay_highRes;
@@ -198,7 +197,7 @@ void SlipRaceDisplay_DrawOverlay(void) {
 		    [SLIP_RACE_DISPLAY_HUD_CENTER_MIDDLE] = {0, 38, 250, 150},
 		    [SLIP_RACE_DISPLAY_HUD_RIGHT_EDGE] = {250, 0, SLIPSTREAM_SCREEN_WIDTH, 150},
 		    [SLIP_RACE_DISPLAY_HUD_LEFT_EDGE] = {0, 0, 110, 38},
-		    [SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE] = {0, 150, SLIPSTREAM_SCREEN_WIDTH, 193}};
+		    [SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE] = {0, 150, SLIPSTREAM_SCREEN_WIDTH, SLIPSTREAM_SCREEN_HEIGHT}};
 		for (int i = 0; i < SLIP_RACE_DISPLAY_HUD_REGION_COUNT; i++) {
 			const int *r = rects[i];
 			float x = left + r[0] * sx, y = r[1] * sy;
@@ -207,8 +206,6 @@ void SlipRaceDisplay_DrawOverlay(void) {
 			if (i == SLIP_RACE_DISPLAY_HUD_LEFT_EDGE)
 				x = h * SLIP_RACE_DISPLAY_LEFT_HUD_MARGIN / SLIPSTREAM_SCREEN_HEIGHT -
 				    SLIP_RACE_DISPLAY_LEFT_HUD_ART_OFFSET * sx;
-			if (i == SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE)
-				y += SLIP_RACE_DISPLAY_BOTTOM_HUD_SHIFT * sy;
 			SlipRaceDisplay_DrawHudRegion(r, (SDL_FRect){x, y, (r[2] - r[0]) * sx, (r[3] - r[1]) * sy});
 		}
 		if (monitor.w)
