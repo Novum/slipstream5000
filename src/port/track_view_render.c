@@ -9741,11 +9741,6 @@ bool TrackView_ExecuteBonusDrawCallback(TrackViewRawBspContext *context, uint32_
 	return TrackView_DrawSprite(context, view, (int32_t)object->drawExtent, (uint16_t)object->drawData);
 }
 
-static SlipDraw3DVec32 TrackView_crossPosition;
-static int16_t TrackView_crossX, TrackView_crossY;
-static int16_t TrackView_crossSize, TrackView_crossSin, TrackView_crossCos;
-static uint16_t TrackView_crossAngle, TrackView_crossColor;
-
 bool TrackView_QueueCrossEffect(TrackViewRawBspContext *context, uint32_t objectRecord) {
 	SlipView3DVec32 view;
 	if (context == NULL || SlipDraw3D_listPool == NULL ||
@@ -9761,60 +9756,49 @@ bool TrackView_QueueCrossEffect(TrackViewRawBspContext *context, uint32_t object
 bool TrackView_DrawCrossEffect(TrackViewRawBspContext *context, uint32_t objectRecord) {
 	SlipObjectExtentReadResult radius;
 	SlipView3DVec32 view;
+	SlipObjectSlotDataReadResult slot;
 	if (context == NULL || context->projectState == NULL ||
 	    !SlipObject_GetDrawExtent(context->objectTable, context->objectTableBytes, objectRecord, &radius) ||
-	    !SlipObject_ViewPosition(context->objectTable, context->objectTableBytes, (uint16_t)objectRecord, &view))
+	    !SlipObject_ViewPosition(context->objectTable, context->objectTableBytes, objectRecord, &view) ||
+	    !SlipObject_GetDrawData(context->objectTable, context->objectTableBytes, objectRecord, &slot))
 		return false;
-	TrackView_crossPosition = (SlipDraw3DVec32){view.x, view.y, view.z};
 	SlipDraw3DProjectState *const state = context->projectState;
+	const SlipDraw3DVec32 position = {view.x, view.y, view.z};
 	const int32_t detail = (int32_t)SlipDraw3D_DetailValue(state->projectionMode, SlipDraw3D_minimumDepth,
 	                                                       radius.drawExtent, (uint32_t)view.z);
 	if (detail > SLIP_CROSS_EFFECT_MAXIMUM_DETAIL)
 		return true;
-	SlipObjectSlotDataReadResult slot;
+	const uint8_t color = slot.drawData >> SLIP_WORD_BITS;
 	if (detail <= SLIP_CROSS_EFFECT_POINT_MAXIMUM_DETAIL) {
-		if (!SlipObject_GetDrawData(context->objectTable, context->objectTableBytes, objectRecord, &slot))
-			return false;
-		SlipDraw3D_DrawPoint(TrackView_crossPosition, (uint16_t)(slot.drawData >> SLIP_WORD_BITS), state);
+		SlipDraw3D_DrawPoint(position, color, state);
 		return true;
 	}
-	TrackView_crossSize = (int16_t)detail;
 	int32_t x, y;
-	if (!SlipDraw3D_ProjectVisiblePoint(TrackView_crossPosition, state, &x, &y))
+	if (!SlipDraw3D_ProjectVisiblePoint(position, state, &x, &y))
 		return true;
-	TrackView_crossX = (int16_t)x;
-	TrackView_crossY = (int16_t)y;
 	if (context->maths == NULL)
 		return false;
+
+	/* Keep the original detail gates, but project the radius with the current camera. */
+	int32_t radiusX, radiusY;
+	state->projectPrimary((SlipDraw3DVec32){(int32_t)radius.drawExtent, (int32_t)radius.drawExtent, view.z}, &radiusX,
+	                      &radiusY, state);
+	radiusX -= state->centerX;
+	radiusY = state->centerY - radiusY;
+	const int16_t angle = slot.drawData;
+	const int16_t sine = SlipView3D_SinQ14(context->maths, angle);
+	const int16_t cosine = SlipView3D_CosQ14(context->maths, angle);
+	const int32_t firstX = (int32_t)(((int64_t)radiusX * sine) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
+	const int32_t firstY = (int32_t)(((int64_t)radiusY * cosine) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
+	const int32_t secondX = (int32_t)((-(int64_t)radiusX * cosine) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
+	const int32_t secondY = (int32_t)(((int64_t)radiusY * sine) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
 	int16_t minX, minY, maxX, maxY;
 	Raster_GetClipRect(&minX, &minY, &maxX, &maxY);
 	Raster_SetClipRect((int16_t)state->minX, (int16_t)state->minY, (int16_t)state->maxX, (int16_t)state->maxY);
-	if (!SlipObject_GetDrawData(context->objectTable, context->objectTableBytes, objectRecord, &slot)) {
-		Raster_SetClipRect(minX, minY, maxX, maxY);
-		return false;
-	}
-	TrackView_crossAngle = (uint16_t)slot.drawData;
-	TrackView_crossSin = SlipView3D_SinQ14(context->maths, (int16_t)TrackView_crossAngle);
-	TrackView_crossCos = SlipView3D_CosQ14(context->maths, (int16_t)TrackView_crossAngle);
-	int16_t horizontalOffset =
-	    (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossSin) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
-	int16_t dy =
-	    (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossCos) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
-	if (!SlipObject_GetDrawData(context->objectTable, context->objectTableBytes, objectRecord, &slot)) {
-		Raster_SetClipRect(minX, minY, maxX, maxY);
-		return false;
-	}
-	TrackView_crossColor = (uint16_t)(slot.drawData >> SLIP_WORD_BITS);
-	Raster_DrawLineClipped((uint8_t)TrackView_crossColor, (int16_t)(TrackView_crossX - horizontalOffset),
-	                       (int16_t)(TrackView_crossY - dy), (int16_t)(TrackView_crossX + horizontalOffset),
-	                       (int16_t)(TrackView_crossY + dy));
-	horizontalOffset =
-	    (int16_t)((uint32_t)((int32_t)(int16_t)(0u - (uint16_t)TrackView_crossSize) * TrackView_crossCos) >>
-	              SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
-	dy = (int16_t)((uint32_t)((int32_t)TrackView_crossSize * TrackView_crossSin) >> SLIP_CROSS_EFFECT_ARM_SCALE_SHIFT);
-	Raster_DrawLineClipped((uint8_t)TrackView_crossColor, (int16_t)(TrackView_crossX - horizontalOffset),
-	                       (int16_t)(TrackView_crossY - dy), (int16_t)(TrackView_crossX + horizontalOffset),
-	                       (int16_t)(TrackView_crossY + dy));
+	Raster_DrawLineClipped(color, (int16_t)(x - firstX), (int16_t)(y - firstY), (int16_t)(x + firstX),
+	                       (int16_t)(y + firstY));
+	Raster_DrawLineClipped(color, (int16_t)(x - secondX), (int16_t)(y - secondY), (int16_t)(x + secondX),
+	                       (int16_t)(y + secondY));
 	Raster_SetClipRect(minX, minY, maxX, maxY);
 	return true;
 }
