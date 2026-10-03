@@ -209,6 +209,59 @@ void SlipVehicleSelector_Draw(SlipVehicleSelector *selector, const SlipVehicleSe
 	}
 }
 
+/* Palette update and signed word step from the DOS selector loop. */
+void SlipVehicleSelector_UpdateFade(SlipVehicleSelector *selector, const SlipVehicleSelectorCalls *calls) {
+	void *const context = calls->context;
+	if (selector->fadeTarget != selector->fade) {
+		/* SPR and palette packet fields below are serialized resource data. */
+		const uint8_t *const sprite = calls->lock(context, selector->assets.background);
+		const uint8_t *const palette = sprite + (uint16_t)(sprite[SLIP_SPRITE_PALETTE_OFFSET] |
+		                                                   (uint16_t)sprite[SLIP_SPRITE_PALETTE_OFFSET + 1] << 8);
+		const uint16_t count =
+		    (uint16_t)(palette[SLIP_PALETTE_COUNT_OFFSET] | (uint16_t)palette[SLIP_PALETTE_COUNT_OFFSET + 1] << 8);
+		const uint16_t bytes = (uint16_t)(count * SLIP_PALETTE_RGB_BYTES + SLIP_PALETTE_HEADER_BYTES);
+		uint32_t remaining = bytes;
+		uint32_t position = 0;
+		do {
+			selector->sourcePalette[position] = palette[position];
+			selector->grayPalette[position] = palette[position];
+			++position;
+		} while (--remaining != 0);
+		calls->resources.unlock(calls->resources.context, selector->assets.background);
+		remaining = (uint16_t)(selector->grayPalette[SLIP_PALETTE_COUNT_OFFSET] |
+		                       (uint16_t)selector->grayPalette[SLIP_PALETTE_COUNT_OFFSET + 1] << 8);
+		uint8_t *rgb = selector->grayPalette + SLIP_PALETTE_HEADER_BYTES;
+		do {
+			uint8_t gray =
+			    (uint8_t)(((uint16_t)rgb[0] * SLIP_SELECTOR_GREY_WEIGHT_Q8) >> SLIP_SELECTOR_GREY_FRACTION_BITS);
+			gray = (uint8_t)(gray +
+			                 (((uint16_t)rgb[1] * SLIP_SELECTOR_GREY_WEIGHT_Q8) >> SLIP_SELECTOR_GREY_FRACTION_BITS));
+			gray = (uint8_t)(gray +
+			                 (((uint16_t)rgb[2] * SLIP_SELECTOR_GREY_WEIGHT_Q8) >> SLIP_SELECTOR_GREY_FRACTION_BITS));
+			rgb[0] = rgb[1] = rgb[2] = gray;
+			rgb += SLIP_PALETTE_RGB_BYTES;
+		} while (--remaining != 0);
+		const uint16_t blended =
+		    calls->blendPalette(context, selector->sourcePalette, selector->grayPalette, selector->fade);
+		const uint8_t *const blendedData = calls->lock(context, blended);
+		calls->palette(context, blendedData);
+		calls->resources.unlock(calls->resources.context, blended);
+		calls->resources.release(calls->resources.context, blended);
+		const uint16_t step =
+		    (uint16_t)(((uint32_t)(uint16_t)SlipFrameTimer_Values().stepQ14 * SLIP_SELECTOR_FADE_RATE_Q14) >>
+		               SLIP_Q14_FRACTION_BITS);
+		if (selector->fadeTarget < selector->fade) {
+			selector->fade = (int16_t)((uint16_t)selector->fade - step);
+			if (selector->fade < selector->fadeTarget)
+				selector->fade = selector->fadeTarget;
+		} else if (selector->fadeTarget > selector->fade) {
+			selector->fade = (int16_t)((uint16_t)selector->fade + step);
+			if (selector->fade > selector->fadeTarget)
+				selector->fade = selector->fadeTarget;
+		}
+	}
+}
+
 uint16_t SlipVehicleSelector_Run(SlipVehicleSelector *selector, uint16_t excludedVehicle, const uint16_t *demo,
                                  uint16_t smallFont, uint16_t language, uint32_t gameMode,
                                  SlipStringTableState *strings, const SlipVehicleSelectorCalls *calls) {
@@ -260,55 +313,7 @@ uint16_t SlipVehicleSelector_Run(SlipVehicleSelector *selector, uint16_t exclude
 					selector->animation.selectedVehicle = selection == selector->excludedVehicle ? 0 : selection;
 			}
 			SlipVehicleSelector_Draw(selector, calls);
-			if (selector->fadeTarget != selector->fade) {
-				/* SPR and palette packet fields below are serialized resource data. */
-				const uint8_t *const sprite = calls->lock(context, selector->assets.background);
-				const uint8_t *const palette =
-				    sprite + (uint16_t)(sprite[SLIP_SPRITE_PALETTE_OFFSET] |
-				                        (uint16_t)sprite[SLIP_SPRITE_PALETTE_OFFSET + 1] << 8);
-				const uint16_t count = (uint16_t)(palette[SLIP_PALETTE_COUNT_OFFSET] |
-				                                  (uint16_t)palette[SLIP_PALETTE_COUNT_OFFSET + 1] << 8);
-				const uint16_t bytes = (uint16_t)(count * SLIP_PALETTE_RGB_BYTES + SLIP_PALETTE_HEADER_BYTES);
-				uint32_t remaining = bytes;
-				uint32_t position = 0;
-				do {
-					selector->sourcePalette[position] = palette[position];
-					selector->grayPalette[position] = palette[position];
-					++position;
-				} while (--remaining != 0);
-				calls->resources.unlock(calls->resources.context, selector->assets.background);
-				remaining = (uint16_t)(selector->grayPalette[SLIP_PALETTE_COUNT_OFFSET] |
-				                       (uint16_t)selector->grayPalette[SLIP_PALETTE_COUNT_OFFSET + 1] << 8);
-				uint8_t *rgb = selector->grayPalette + SLIP_PALETTE_HEADER_BYTES;
-				do {
-					uint8_t gray = (uint8_t)(((uint16_t)rgb[0] * SLIP_SELECTOR_GREY_WEIGHT_Q8) >>
-					                         SLIP_SELECTOR_GREY_FRACTION_BITS);
-					gray = (uint8_t)(gray + (((uint16_t)rgb[1] * SLIP_SELECTOR_GREY_WEIGHT_Q8) >>
-					                         SLIP_SELECTOR_GREY_FRACTION_BITS));
-					gray = (uint8_t)(gray + (((uint16_t)rgb[2] * SLIP_SELECTOR_GREY_WEIGHT_Q8) >>
-					                         SLIP_SELECTOR_GREY_FRACTION_BITS));
-					rgb[0] = rgb[1] = rgb[2] = gray;
-					rgb += SLIP_PALETTE_RGB_BYTES;
-				} while (--remaining != 0);
-				const uint16_t blended =
-				    calls->blendPalette(context, selector->sourcePalette, selector->grayPalette, selector->fade);
-				const uint8_t *const blendedData = calls->lock(context, blended);
-				calls->palette(context, blendedData);
-				calls->resources.unlock(calls->resources.context, blended);
-				calls->resources.release(calls->resources.context, blended);
-				const uint16_t step =
-				    (uint16_t)(((uint32_t)(uint16_t)SlipFrameTimer_Values().stepQ14 * SLIP_SELECTOR_FADE_RATE_Q14) >>
-				               SLIP_Q14_FRACTION_BITS);
-				if (selector->fadeTarget < selector->fade) {
-					selector->fade = (int16_t)((uint16_t)selector->fade - step);
-					if (selector->fade < selector->fadeTarget)
-						selector->fade = selector->fadeTarget;
-				} else if (selector->fadeTarget > selector->fade) {
-					selector->fade = (int16_t)((uint16_t)selector->fade + step);
-					if (selector->fade > selector->fadeTarget)
-						selector->fade = selector->fadeTarget;
-				}
-			}
+			SlipVehicleSelector_UpdateFade(selector, calls);
 			calls->present(context);
 			bool accept = false;
 			if (selector->demo != NULL) {

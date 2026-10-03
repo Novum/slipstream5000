@@ -95,6 +95,7 @@ void SlipVehicleSelector_Setup(SlipVehicleSelector *selector, uint16_t excludedV
                                const SlipVehicleSelectorCalls *calls);
 void SlipVehicleSelector_Release(SlipVehicleSelector *selector, const SlipVehicleSelectorCalls *calls);
 void SlipVehicleSelector_Draw(SlipVehicleSelector *selector, const SlipVehicleSelectorCalls *calls);
+void SlipVehicleSelector_UpdateFade(SlipVehicleSelector *selector, const SlipVehicleSelectorCalls *calls);
 
 typedef struct SlipSelectorCardSetupResult {
 	SlipResourceModifyResult modify;

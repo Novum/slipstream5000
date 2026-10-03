@@ -121,9 +121,7 @@ enum {
 	kMaxMenuButtons = 6,
 	SLIP_MENU_LABEL_BYTES = 64,
 	SLIP_MENU_DRIVER_SPRITE_NAME_BYTES = 32,
-	SLIP_MENU_WINDOW_TITLE_BYTES = 128,
-	SLIP_MENU_GREYSCALE_FRACTION_BITS = 8,
-	SLIP_MENU_GREYSCALE_CHANNEL_WEIGHT_Q8 = UINT8_MAX / SLIP_VGA_DAC_CHANNEL_COUNT
+	SLIP_MENU_WINDOW_TITLE_BYTES = 128
 };
 
 typedef struct MenuPage {
@@ -291,15 +289,7 @@ static SlipVehicleSelectorHost vehicleResourceHost;
 static bool vehicleResourcesActive;
 static uint64_t g_screenStartMs;
 
-enum {
-	VEHICLE_FADE_COMPLETE = 0x4000,
-	VEHICLE_FADE_RATE = 0x8000,
-	VEHICLE_FADE_FRACTION_BITS = 14,
-	DRIVER_ZOOM_COMPLETE = 0x4000,
-	DRIVER_ZOOM_STEP = 0x400,
-	DRIVER_CARD_X = 27,
-	DRIVER_CARD_Y = 10
-};
+enum { DRIVER_ZOOM_COMPLETE = 0x4000, DRIVER_ZOOM_STEP = 0x400, DRIVER_CARD_X = 27, DRIVER_CARD_Y = 10 };
 
 static int g_transitionDriver;
 static int g_selectedDriverAction;
@@ -327,7 +317,6 @@ static int g_hoveredGarageAction = -1;
 static int g_hoveredGaragePanelItem = -1;
 static int g_garagePanel = -1;
 static uint32_t g_vehicleZoomScale;
-static uint16_t g_vehicleGrayMix;
 static VehicleDriverTransitionPhase g_vehicleDriverTransitionPhase;
 
 static FocusSource g_trackFocus = FOCUS_NONE;
@@ -787,51 +776,6 @@ static bool SlipMenu_DrawVehicleResource(uint16_t resource, int x, int y, bool r
 	return ok;
 }
 
-static bool SlipMenu_ApplyVehicleDriverFadePalette(const char *resPath, uint16_t mix) {
-	(void)resPath;
-	const uint16_t resource = vehicleResources.assets.background;
-	if (SlipResourceHost_Lock(NULL, resource) == NULL)
-		return false;
-	SlipResourcePayload payload = SlipResourceHost_Payload(resource);
-	SlipSprite sprite;
-	if (!SlipSprite_FromPayload(&payload, &sprite) || sprite.paletteOffset == 0 ||
-	    (size_t)sprite.paletteOffset + SLIP_PALETTE_HEADER_BYTES > payload.size) {
-		SlipResourceHost_Unlock(NULL, resource);
-		return false;
-	}
-	const uint8_t *const packet = payload.data + sprite.paletteOffset;
-	const uint16_t count = SlipBytes_ReadLE16(packet + SLIP_PALETTE_COUNT_OFFSET);
-	const size_t bytes = (size_t)count * SLIP_PALETTE_RGB_BYTES + SLIP_PALETTE_HEADER_BYTES;
-	if (bytes > sizeof(vehicleResources.sourcePalette) || payload.size - sprite.paletteOffset < bytes) {
-		SlipResourceHost_Unlock(NULL, resource);
-		return false;
-	}
-	memcpy(vehicleResources.sourcePalette, packet, bytes);
-	memcpy(vehicleResources.grayPalette, packet, bytes);
-	SlipResourceHost_Unlock(NULL, resource);
-	uint8_t *rgb = vehicleResources.grayPalette + SLIP_PALETTE_HEADER_BYTES;
-	/* Truncate each channel contribution separately, preserving the original palette. */
-	for (unsigned paletteEntry = 0; paletteEntry < count; ++paletteEntry) {
-		uint8_t gray =
-		    (uint8_t)(((uint16_t)rgb[0] * SLIP_MENU_GREYSCALE_CHANNEL_WEIGHT_Q8) >> SLIP_MENU_GREYSCALE_FRACTION_BITS);
-		gray = (uint8_t)(gray + (((uint16_t)rgb[1] * SLIP_MENU_GREYSCALE_CHANNEL_WEIGHT_Q8) >>
-		                         SLIP_MENU_GREYSCALE_FRACTION_BITS));
-		gray = (uint8_t)(gray + (((uint16_t)rgb[2] * SLIP_MENU_GREYSCALE_CHANNEL_WEIGHT_Q8) >>
-		                         SLIP_MENU_GREYSCALE_FRACTION_BITS));
-		rgb[0] = rgb[1] = rgb[2] = gray;
-		rgb += SLIP_PALETTE_RGB_BYTES;
-	}
-
-	const uint16_t blended = SlipPalette_Blend(vehicleResources.sourcePalette, vehicleResources.grayPalette,
-	                                           (int16_t)mix, &SlipSpriteHost_effectResources);
-	const uint8_t *const blendedData = SlipResourceHost_Lock(NULL, blended);
-	SlipVgaDac_WriteRange(SlipBytes_ReadLE16(blendedData), SlipBytes_ReadLE16(blendedData + SLIP_PALETTE_COUNT_OFFSET),
-	                      blendedData + SLIP_PALETTE_HEADER_BYTES);
-	SlipResourceHost_Unlock(NULL, blended);
-	SlipResourceHost_Release(NULL, blended);
-	return true;
-}
-
 static bool SlipMenu_ApplyVehicleDriverBackdropPalette(void) {
 	const uint16_t resource = vehicleResources.assets.driverBackground;
 	if (SlipResourceHost_Lock(NULL, resource) == NULL)
@@ -1078,9 +1022,13 @@ static int SlipMenu_FocusedItemIndex(FocusSource focus, int selectedItem, int ho
 	return -1;
 }
 
-static void SlipMenu_VehicleDoorAnimationBegin(void) {
+static void SlipMenu_BeginVehicleSelection(void) {
+	void *const context = vehicleResourceCalls.context;
+	vehicleResources.fadeTarget = 0;
+	vehicleResources.animation.backgroundRedraws = SLIP_VEHICLE_SELECTION_REDRAW_PASSES;
 	vehicleResources.animation.doorElapsed = 0;
 	SlipFrameTimer_Reset();
+	vehicleResourceCalls.setNavigation(context, &SlipVehicleSelector_vehicleNavigation);
 }
 
 static int SlipMenu_VehicleZoneAt(const SlipResourcePayload *zones, int x, int y) {
@@ -1150,6 +1098,7 @@ static bool SlipMenu_DrawVehicleSelect(const char *resPath, bool confirmed) {
 	}
 
 	SlipVehicleSelector_Draw(&vehicleResources, &vehicleResourceCalls);
+	SlipVehicleSelector_UpdateFade(&vehicleResources, &vehicleResourceCalls);
 
 	return true;
 }
@@ -1195,26 +1144,10 @@ static bool SlipMenu_DrawDriverSelect(const char *resPath, int driver) {
 static bool SlipMenu_DrawVehicleToDriverTransition(const char *resPath, int driver) {
 
 	if (g_vehicleDriverTransitionPhase == VEHICLE_DRIVER_TRANSITION_FADE) {
-		uint16_t frameStep;
-		uint32_t fadeStep;
-
-		if (!SlipMenu_DrawVehicleSelect(resPath, true)) {
+		if (!SlipMenu_DrawVehicleSelect(resPath, true))
 			return false;
-		}
-		if (!SlipMenu_ApplyVehicleDriverFadePalette(resPath, g_vehicleGrayMix)) {
-			return false;
-		}
-
-		frameStep = (uint16_t)SlipFrameTimer_Values().stepQ14;
-		fadeStep = (uint16_t)(((uint32_t)frameStep * VEHICLE_FADE_RATE) >> VEHICLE_FADE_FRACTION_BITS);
-		if ((int16_t)g_vehicleGrayMix < VEHICLE_FADE_COMPLETE) {
-			g_vehicleGrayMix = (uint16_t)(g_vehicleGrayMix + fadeStep);
-			if ((int16_t)g_vehicleGrayMix > VEHICLE_FADE_COMPLETE)
-				g_vehicleGrayMix = VEHICLE_FADE_COMPLETE;
-		}
-		if (g_vehicleGrayMix == VEHICLE_FADE_COMPLETE) {
+		if (vehicleResources.fade == vehicleResources.fadeTarget)
 			g_vehicleDriverTransitionPhase = VEHICLE_DRIVER_TRANSITION_BACKGROUND;
-		}
 
 		return true;
 	}
@@ -2536,12 +2469,11 @@ static void SlipMenu_EnterVehicleSelect(SDL_Window *window, AppMode *mode, OnePl
 	SlipVehicleSelector_Setup(&vehicleResources, excludedDriver, NULL, SlipMenu_resources.smallFont,
 	                          (uint16_t)SlipConfig_language, &SlipStringTable_state, &vehicleResourceCalls);
 	vehicleResourcesActive = true;
-	vehicleResources.animation.backgroundRedraws = 2;
 	g_selectedRaceType = raceType;
 	g_selectedDriver = 0;
 	g_hoveredVehicle = -1;
 	g_vehicleFocus = FOCUS_NONE;
-	SlipMenu_VehicleDoorAnimationBegin();
+	SlipMenu_BeginVehicleSelection();
 	*mode = APP_MODE_VEHICLE_SELECT;
 	*hoveredButton = -1;
 	*redraw = true;
@@ -2552,7 +2484,8 @@ static void SlipMenu_EnterVehicleSelect(SDL_Window *window, AppMode *mode, OnePl
 static void SlipMenu_EnterVehicleToDriver(SDL_Window *window, AppMode *mode, int driver, bool *redraw) {
 	g_selectedDriver = driver;
 	g_transitionDriver = driver;
-	g_vehicleGrayMix = 0;
+	vehicleResources.confirmed = 1;
+	vehicleResources.fadeTarget = SLIP_Q14_ONE;
 	g_vehicleDriverTransitionPhase = VEHICLE_DRIVER_TRANSITION_FADE;
 	g_vehicleZoomScale = 0;
 	*mode = APP_MODE_VEHICLE_TO_DRIVER;
@@ -3223,7 +3156,7 @@ static void SlipDriverSelect_Action(SDL_Window *window, AppMode *mode, int actio
 		*mode = APP_MODE_VEHICLE_SELECT;
 		g_hoveredVehicle = -1;
 		g_vehicleFocus = FOCUS_NONE;
-		SlipMenu_VehicleDoorAnimationBegin();
+		SlipMenu_BeginVehicleSelection();
 		*hoveredButton = -1;
 		g_screenStartMs = SlipSdl_TicksMs();
 		*redraw = true;
