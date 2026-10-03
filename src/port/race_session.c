@@ -3787,7 +3787,8 @@ bool SlipRaceSession_DebugRenderCapturedState(const uint32_t cameraPosition[3], 
 	                              &matrixInstall)) {
 		return false;
 	}
-	SlipRaceDisplay_BeginFrame(g_framebuffer);
+	SlipRaceDisplay_BeginFrame(g_framebuffer,
+	                           (SlipRaceSession_hudAssets.flags & SLIP_RACE_HUD_INTRO_PRESENTATION) == 0);
 	return SlipRaceSession_RenderFrame();
 }
 
@@ -3953,7 +3954,8 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 
 	SlipRace_PreCameraInput(inputHeld, inputPressed, &SlipRace_controls);
 
-	SlipRaceDisplay_BeginFrame(g_framebuffer);
+	SlipRaceDisplay_BeginFrame(g_framebuffer,
+	                           (SlipRaceSession_hudAssets.flags & SLIP_RACE_HUD_INTRO_PRESENTATION) == 0);
 	if (SlipRaceDisplay_highRes) {
 		SlipRaceSession_hudState.playerOneConsoleRedrawFrames = SLIP_RACE_HUD_REDRAW_FRAME_COUNT;
 		if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN)
@@ -4549,7 +4551,8 @@ void SlipRaceSession_PlayIntro(const char *resPath, uint16_t axTrack, uint16_t s
 		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
 		if (!SlipMenu_PollInput())
 			break;
-		SlipRaceDisplay_BeginFrame(g_framebuffer);
+		SlipRaceDisplay_BeginFrame(g_framebuffer,
+		                           (SlipRaceSession_hudAssets.flags & SLIP_RACE_HUD_INTRO_PRESENTATION) == 0);
 		if (SlipRaceDisplay_highRes) {
 			SlipRaceSession_hudState.playerOneConsoleRedrawFrames = SLIP_RACE_HUD_REDRAW_FRAME_COUNT;
 			if (SlipRace_gameMode == SLIP_RACE_GAME_SPLIT_SCREEN)

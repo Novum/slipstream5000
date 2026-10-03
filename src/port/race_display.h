@@ -15,7 +15,7 @@ typedef struct SlipRaceDisplayView {
 
 void SlipRaceDisplay_Configure(bool (*size)(int *, int *), void (*save)(void));
 void SlipRaceDisplay_Toggle(void *context);
-void SlipRaceDisplay_BeginFrame(uint8_t *overlay);
+void SlipRaceDisplay_BeginFrame(uint8_t *overlay, bool alignCockpit);
 bool SlipRaceDisplay_BeginWorld(SlipDraw3DProjectState *project, SlipRaceDisplayView *saved, uint32_t gameMode);
 int32_t SlipRaceDisplay_ScaleWorldOffset(int32_t offset);
 void SlipRaceDisplay_EndWorld(const SlipRaceDisplayView *saved);

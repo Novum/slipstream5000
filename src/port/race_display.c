@@ -2,6 +2,7 @@
 #include "gpu/renderer.h"
 #include "port_app_bridge.h"
 #include "race.h"
+#include "race_hud.h"
 #include "raster/overlay.h"
 #include "vga_dac.h"
 #include <string.h>
@@ -22,6 +23,7 @@ enum {
 bool SlipRaceDisplay_highRes;
 bool SlipRaceDisplay_ready;
 static bool alignHudEdges;
+static bool bottomAlignCockpit;
 static int width, height;
 static uint8_t overlayCoverage[SLIPSTREAM_SCREEN_WIDTH * SLIPSTREAM_SCREEN_HEIGHT];
 static bool (*outputSize)(int *, int *);
@@ -43,9 +45,10 @@ void SlipRaceDisplay_Toggle(void *context) {
 		saveSettings();
 }
 
-void SlipRaceDisplay_BeginFrame(uint8_t *overlay) {
+void SlipRaceDisplay_BeginFrame(uint8_t *overlay, bool alignCockpit) {
 	SlipRaceDisplay_EndFrame();
 	monitor = (SDL_Rect){0};
+	bottomAlignCockpit = alignCockpit;
 	if (!SlipRaceDisplay_highRes || outputSize == NULL || !outputSize(&width, &height) || width < 2 || height < 2 ||
 	    width > SLIP_RACE_DISPLAY_MAXIMUM_OUTPUT_DIMENSION || height > SLIP_RACE_DISPLAY_MAXIMUM_OUTPUT_DIMENSION)
 		return;
@@ -192,12 +195,15 @@ void SlipRaceDisplay_DrawOverlay(void) {
 		SlipRaceGpu_Overlay(overlayPixels, overlayCoverage, 0, 0, SLIPSTREAM_SCREEN_WIDTH, SLIPSTREAM_SCREEN_HEIGHT,
 		                    (SDL_FRect){left, 0, hudWidth, h});
 	} else {
+		/* Cockpit art excludes the original bottom border; intro captions use all 200 source rows. */
 		const int rects[SLIP_RACE_DISPLAY_HUD_REGION_COUNT][4] = {
 		    [SLIP_RACE_DISPLAY_HUD_CENTER_TOP] = {110, 0, 250, 38},
 		    [SLIP_RACE_DISPLAY_HUD_CENTER_MIDDLE] = {0, 38, 250, 150},
 		    [SLIP_RACE_DISPLAY_HUD_RIGHT_EDGE] = {250, 0, SLIPSTREAM_SCREEN_WIDTH, 150},
 		    [SLIP_RACE_DISPLAY_HUD_LEFT_EDGE] = {0, 0, 110, 38},
-		    [SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE] = {0, 150, SLIPSTREAM_SCREEN_WIDTH, SLIPSTREAM_SCREEN_HEIGHT}};
+		    [SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE] = {0, 150, SLIPSTREAM_SCREEN_WIDTH,
+		                                           bottomAlignCockpit ? SLIP_RACE_HUD_BOTTOM_BORDER_TOP
+		                                                              : SLIPSTREAM_SCREEN_HEIGHT}};
 		for (int i = 0; i < SLIP_RACE_DISPLAY_HUD_REGION_COUNT; i++) {
 			const int *r = rects[i];
 			float x = left + r[0] * sx, y = r[1] * sy;
@@ -206,6 +212,8 @@ void SlipRaceDisplay_DrawOverlay(void) {
 			if (i == SLIP_RACE_DISPLAY_HUD_LEFT_EDGE)
 				x = h * SLIP_RACE_DISPLAY_LEFT_HUD_MARGIN / SLIPSTREAM_SCREEN_HEIGHT -
 				    SLIP_RACE_DISPLAY_LEFT_HUD_ART_OFFSET * sx;
+			if (i == SLIP_RACE_DISPLAY_HUD_BOTTOM_EDGE && bottomAlignCockpit)
+				y += (SLIPSTREAM_SCREEN_HEIGHT - SLIP_RACE_HUD_BOTTOM_BORDER_TOP) * sy;
 			SlipRaceDisplay_DrawHudRegion(r, (SDL_FRect){x, y, (r[2] - r[0]) * sx, (r[3] - r[1]) * sy});
 		}
 		if (monitor.w)
