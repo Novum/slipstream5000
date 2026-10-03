@@ -3,7 +3,6 @@
 #include "fixed_point.h"
 
 #include "draw3d.h"
-#include "resource.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -329,19 +328,6 @@ int SlipView3D_InitMathsFromPayload(SlipView3DMaths *maths, const uint8_t *data,
 	maths->arcsineTableOffset = SlipBytes_ReadLE16(data + SLIP_MATHS_ARCSINE_TABLE_OFFSET);
 	maths->arctangentTableOffset = SlipBytes_ReadLE16(data + SLIP_MATHS_ARCTANGENT_TABLE_OFFSET);
 	return 1;
-}
-
-int SlipView3D_LoadMathsFromArchives(SlipView3DMaths *maths, const char *const *resPaths, size_t resPathCount) {
-	SlipResourcePayload payload;
-	int ok;
-
-	if (!SlipResource_LoadByName(resPaths, resPathCount, "MATHS.BIN", &payload)) {
-		return 0;
-	}
-
-	ok = SlipView3D_InitMathsFromPayload(maths, payload.data, payload.size);
-	SlipResource_ReleaseHandle(&payload);
-	return ok;
 }
 
 int16_t SlipView3D_SinQ14(const SlipView3DMaths *maths, int16_t angle) {

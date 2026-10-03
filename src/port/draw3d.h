@@ -19,8 +19,6 @@ uint8_t *SlipDraw3D_PointBuffer(void);
 #include "raster/raster.h"
 #include "view3d.h"
 
-extern uint32_t SlipDraw3D_minimumDepth;
-extern uint32_t SlipDraw3D_maximumDepth;
 extern uint32_t SlipDraw3D_fadeStart;
 extern uint32_t SlipDraw3D_fadeEnd;
 extern uint32_t SlipDraw3D_fadeRange;
@@ -33,6 +31,8 @@ extern int32_t SlipDraw3D_lightZ;
 
 void SlipDraw3D_SetMinimumDepth(uint32_t minimumDepth);
 void SlipDraw3D_SetMaximumDepth(uint32_t maximumDepth);
+uint32_t SlipDraw3D_GetMinimumDepth(void);
+uint32_t SlipDraw3D_GetMaximumDepth(void);
 void SlipDraw3D_SetDepthFade(uint32_t fadeStart, uint32_t fadeEnd, uint16_t fadeColour);
 void SlipDraw3D_ResetLighting(void);
 void SlipDraw3D_NormalizeLighting(void);
@@ -385,7 +385,6 @@ typedef struct SlipDraw3DVertexLighting {
 } SlipDraw3DVertexLighting;
 
 void SlipDraw3D_BindSpecularTable(const uint16_t *table, uint32_t threshold);
-void SlipDraw3D_InstallSpecularTable(void);
 uint32_t SlipDraw3D_VertexColor(const SlipDraw3DMaterialRecord *material, SlipDraw3DVertexRecord *vertex,
                                 int16_t normalX, int16_t normalY, int16_t normalZ,
                                 const SlipDraw3DVertexLighting *state);

@@ -16,7 +16,6 @@ extern uint16_t SlipRaceSession_exitRequested;
 extern const SlipRaceRecordingHost SlipRaceSession_recordingHost;
 extern bool SlipRaceSession_lastRenderSucceeded;
 
-extern SlipView3DMaths SlipRaceSession_maths;
 void SlipRaceSession_FireSuperSeeker(uint16_t shooter, uint16_t target);
 void SlipRaceSession_FireSuperFrag(uint16_t shooter, uint16_t target);
 void SlipRaceSession_FireFrag(uint16_t shooter, uint16_t target);

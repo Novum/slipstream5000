@@ -131,7 +131,7 @@ void SlipRaceMap_Draw(int32_t cameraDistance, uint8_t routeColor, uint8_t finish
 		return;
 	}
 
-	savedMaximumDepth = SlipDraw3D_maximumDepth;
+	savedMaximumDepth = SlipDraw3D_GetMaximumDepth();
 	SlipDraw3D_SetMaximumDepth(INT32_MAX);
 	Raster_GetClipRect(&savedClipMinX, &savedClipMinY, &savedClipMaxX, &savedClipMaxY);
 	if (!SlipDraw3D_LoadClipAndCenter(projectState, &savedViewport)) {

@@ -14,11 +14,6 @@ typedef struct SlipRaceRecordingStart {
 	SlipRaceRacerTable playbackRacers;
 } SlipRaceRecordingStart;
 
-typedef struct SlipRaceRecordingFrame {
-	uint16_t milliseconds;
-	SlipRacePlayerControl controls[2];
-} SlipRaceRecordingFrame;
-
 typedef struct SlipRaceRecordingResources {
 	void *context;
 	bool (*allocate)(void *, uint32_t bytes, uint32_t flags, uint16_t *);
@@ -36,9 +31,6 @@ typedef struct SlipRaceRecordingHost {
 } SlipRaceRecordingHost;
 
 typedef struct SlipRaceRecording {
-	/* Typed frame backend is retained for isolated recorder callers/tests.
-	 * Resource-backed race callers consume the serialized locked stream. */
-	SlipRaceRecordingFrame *frames;
 	uint8_t *data;
 	uint16_t resource;
 	bool installed;

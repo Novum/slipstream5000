@@ -654,8 +654,8 @@ static int SlipSdl_Run(int argc, char **argv) {
 
 	while (running) {
 		SDL_Event event;
-		/* The DOS garage polls its input after presenting each sampled frame. */
-		if (SlipMenu_GarageActive()) {
+		/* Modal screens poll their input after presenting each sampled frame. */
+		if (SlipMenu_PollsOwnInput()) {
 			if (!SlipMenu_UpdateAndDraw(resPath, window))
 				break;
 			continue;

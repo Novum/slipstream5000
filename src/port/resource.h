@@ -128,7 +128,6 @@ typedef struct SlipResourceResidentCalls {
 	uint8_t *(*payload)(void *, SlipResourceBlock *);
 } SlipResourceResidentCalls;
 
-extern const SlipResourceResidentCalls SlipResource_cachedResidentCalls;
 extern uint32_t SlipResource_visitExtension;
 extern SlipResourceResidentCallback SlipResource_residentCallback;
 extern const char *SlipResource_residentName;
@@ -139,17 +138,9 @@ uint8_t SlipResource_Uppercase(uint8_t character);
 typedef struct SlipResourcePayload {
 	uint8_t *data;
 	size_t size;
-	bool ownsData;
 
 	uint32_t address;
 } SlipResourcePayload;
-
-void SlipResource_ReleaseHandle(SlipResourcePayload *payload);
-void SlipResource_ReleaseSequence(SlipResourcePayload *payloads, uint16_t count);
-int SlipResource_LoadByName(const char *const *archives, size_t archiveCount, const char *name,
-                            SlipResourcePayload *payload);
-int SlipResource_LoadWildcardSequence(const char *const *archives, size_t archiveCount, const char *pattern,
-                                      uint32_t firstIndex, uint16_t count, SlipResourcePayload *payloads);
 
 typedef struct SlipResourceUsage {
 	uint32_t totalBytes;

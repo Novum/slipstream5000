@@ -91,7 +91,6 @@ SlipRaceCollisionPostStep SlipRaceCollision_postStep;
 SlipRaceCollisionTrackQuery SlipRaceCollision_trackQuery;
 SlipRaceCollisionSegmentQuery SlipRaceCollision_segmentQuery;
 SlipRaceCollisionLineOfSight SlipRaceCollision_lineOfSight;
-static SlipRaceCollisionVertex SlipRaceCollision_vertexPool[SLIP_COLLISION_VERTEX_COUNT];
 
 static uint8_t *SlipRaceCollision_CollisionBodyFromOffset(uint32_t offset) {
 	return SlipRaceCollision_physicsTable + offset;
@@ -113,11 +112,6 @@ void SlipRaceCollision_InitializeResourceVertices(SlipRaceCollisionVertex *pool)
 	pool[SLIP_COLLISION_VERTEX_COUNT - 1u].next = pool;
 	pool[0].previous = &pool[SLIP_COLLISION_VERTEX_COUNT - 1u];
 	SlipRaceCollision_freeList = pool;
-}
-
-void SlipRaceCollision_InitializeVertexPool(void) {
-	SlipRaceCollision_InitializeResourceVertices(SlipRaceCollision_vertexPool);
-	SlipRaceCollision_activeList = NULL;
 }
 
 void SlipRaceCollision_SetCallbacks(SlipRaceCollisionSegmentQuery segmentQuery, SlipRaceCollisionPreStep preStep,
@@ -777,11 +771,6 @@ bool SlipRaceCollision_RemoveBody(uint16_t object) {
 	body->nextBodyOffset = freeNextOffset;
 	body->previousBodyOffset = SlipRaceCollision_freeBodyOffset;
 	return false;
-}
-
-void SlipRaceCollision_Shutdown(void) {
-	if (SlipRaceCollision_enabled != 0)
-		SlipRaceCollision_enabled = 0;
 }
 
 uint32_t SlipRaceCollision_RemoveBodyIfFlagged(uint32_t eventCode, uint32_t eventPayload, uint32_t eventValue,

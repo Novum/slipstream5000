@@ -8,12 +8,15 @@
 #include "material_format.h"
 #include "material_frames.h"
 #include "material_host.h"
+#include "maths_host.h"
 #include "menu_resources.h"
+#include "raster/affine.h"
 #include "raster/raster.h"
 #include "renderer_allocation.h"
 #include "renderer_bounds.h"
 #include "renderer_flags.h"
 #include "renderer_host.h"
+#include "renderer_projection.h"
 #include "renderer_state.h"
 #include "renderer_vertices.h"
 #include "shape_format.h"
@@ -37,6 +40,7 @@
 #include "resource_storage.h"
 #include "shape3d.h"
 #include "shape_dispatch.h"
+#include "shape_host.h"
 #include "shape_primitives.h"
 #include "sprite.h"
 #include "sprite_resource_host.h"
@@ -149,11 +153,6 @@ enum {
 	SLIP_TRACK_CALLBACK_GLOBAL_GATE_REJECTED = 16u,
 	SLIP_TRACK_CALLBACK_HIGH_TEXTURED_PATH = 32u,
 	SLIP_TRACK_SPRITE_MINIMUM_SOLID_RADIUS = 16384,
-	SLIP_VEHICLE_PREVIEW_ANIMATED_PART_COUNT = 4,
-	SLIP_VEHICLE_PREVIEW_INITIAL_TIMER_SAMPLES = 2,
-	SLIP_VEHICLE_PREVIEW_ACTOR_ANGLE_STEP = SLIP_ANGLE_QUARTER_TURN,
-	SLIP_VEHICLE_PREVIEW_FAN_ANGLE_STEP = SLIP_ANGLE_HALF_TURN - 1,
-	SLIP_VEHICLE_PREVIEW_JET_RATE_SHIFT = 1,
 	SLIP_REFUEL_COLOUR_RAMP_START = 0x40,
 	SLIP_REFUEL_COLOUR_RAMP_END = 0x4f,
 };
@@ -370,33 +369,13 @@ const SlipRaceTrackFrameCallback g_trackViewFrameCallbacks[kDriverCount] = {
     SlipRaceTrack_DrawFranceBackground,        SlipRaceTrack_DrawHawaiiBackground,
     SlipRaceTrack_DrawTokyoBackground,         SlipRaceTrack_DrawNewYorkBackground};
 
-static SlipView3DMaths g_maths;
-static bool g_mathsLoaded;
-
-static bool TrackView_LoadMaths(SlipView3DMaths *maths, const char *const *archives, size_t archiveCount) {
-	if (g_mathsLoaded) {
-		*maths = g_maths;
-		return true;
-	}
-	if (archiveCount == 0 || !SlipView3D_LoadMathsFromArchives(maths, archives, archiveCount)) {
-		return false;
-	}
-	g_maths = *maths;
-	g_mathsLoaded = true;
-	return true;
-}
-
-static bool TrackView_DrawShape(const SlipResourcePayload *residentShape, TrackViewRawBspContext *context,
-                                const char *shapeName, const SlipView3DMatrix *objectMatrix,
+static bool TrackView_DrawShape(TrackViewRawBspContext *context, bool emptyShape, const SlipView3DMatrix *objectMatrix,
                                 const SlipView3DMatrix *viewMatrix, SlipView3DVec32 viewPosition,
                                 SlipView3DVec32 worldPosition);
 
-bool TrackView_LoadResourceHandlePayload(const TrackViewResourceHandleRegistry *registry, uint32_t resourceHandle,
-                                         SlipResourcePayload *payload);
 static bool TrackView_LockResourceHandlePayload(const TrackViewResourceHandleRegistry *registry, uint32_t handle,
                                                 SlipResourcePayload *payload);
 static void TrackView_UnlockResourceHandlePayload(const TrackViewResourceHandleRegistry *registry, uint32_t handle);
-static const char *TrackView_ResourceNameFromHandle(const TrackViewResourceHandleRegistry *registry, uint16_t handle);
 bool TrackViewDrawSceneryShape(TrackViewRawBspContext *context, const uint8_t *record, size_t recordBytes,
                                const SlipView3DMatrix *objectMatrix, const SlipView3DMatrix *viewMatrix,
                                SlipView3DVec32 viewPosition, SlipView3DVec32 worldPosition);
@@ -814,15 +793,8 @@ static bool TrackView_ExecuteObjectEntry(TrackViewRawBspContext *context, const 
                                          size_t objectBytesRemaining, uint32_t objectAddress, uint32_t counterBefore);
 
 static bool g_vehicleViewDumpDiagnostics;
-static SlipView3DMatrix g_vehicleViewActorMatrix;
-static bool g_vehicleViewActorMatrixValid;
-static uint64_t g_vehicleViewLastTickMs;
-static int g_vehicleViewTimerSuppressedSamples;
 static SlipView3DMatrix g_trackSelectGlobeMatrix;
 static bool g_trackSelectGlobeMatrixValid;
-static int16_t g_vehicleViewFanAngles[SLIP_VEHICLE_PREVIEW_ANIMATED_PART_COUNT];
-static int16_t g_vehicleViewJetAngle;
-static int16_t g_vehicleViewJetDirection;
 
 static void TrackView_DumpTexturedDispatch(size_t recordOffset, uint32_t inputActiveHeadOffset,
                                            const SlipDraw3DTexturedDispatch *dispatch,
@@ -1225,17 +1197,15 @@ static bool TrackView_ApplyLoadedDrawState(TrackViewRawBspContext *context, uint
 
 	context->transform = load.recordPointer->transform;
 	context->sourcePoint = load.recordPointer->sourcePoint;
-	if (context->hostRenderer != NULL) {
-		SlipRendererDrawState *const state = &context->hostRenderer->states[stateIndex];
-		state->vertices =
-		    context->hostRenderer->vertexBase + load.recordPointer->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-		state->transform = context->transform;
-		state->source = context->sourcePoint;
-		state->origin = load.recordPointer->origin;
-		state->light = load.recordPointer->lightVector;
-		state->matrix = load.recordPointer->matrix;
-		SlipRenderer_SelectState(context->hostRenderer, stateIndex);
-	}
+	SlipRendererDrawState *const state = &context->hostRenderer->states[stateIndex];
+	state->vertices =
+	    context->hostRenderer->vertexBase + load.recordPointer->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	state->transform = context->transform;
+	state->source = context->sourcePoint;
+	state->origin = load.recordPointer->origin;
+	state->light = load.recordPointer->lightVector;
+	state->matrix = load.recordPointer->matrix;
+	SlipRenderer_SelectState(context->hostRenderer, stateIndex);
 
 	context->origin.x = load.recordPointer->origin.x;
 	context->origin.y = load.recordPointer->origin.y;
@@ -1289,9 +1259,8 @@ static bool TrackView_RestoreVertexBufferCursor(TrackViewRawBspContext *context,
 		        restore.discardedVertexBufferBytes);
 	}
 	context->vertexBufferCursor = restore.vertexBufferCursorAfter;
-	if (context->hostRenderer != NULL)
-		context->hostRenderer->vertexCursor =
-		    context->hostRenderer->vertexBase + context->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	context->hostRenderer->vertexCursor =
+	    context->hostRenderer->vertexBase + context->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE;
 
 	return true;
 }
@@ -1410,76 +1379,43 @@ static bool TrackView_BuildVertexRecords(TrackViewRawBspContext *context, uint32
                                          const uint8_t *vertexSource, size_t sourceBytes, uint16_t vertexCount,
                                          int16_t sourceStride, SlipDraw3DTransformFn transform,
                                          SlipDraw3DSourcePointFn sourcePoint, SlipDraw3DBuildVertexRecords *result) {
-	size_t capacityBytes;
-	size_t recordOffset;
-	size_t recordCapacity;
-	uint32_t cursorBefore;
+	(void)callerAddress;
+	(void)sourceBytes;
 
 	if (context == NULL || vertexSource == NULL || context->vertexBufferBase == NULL ||
 	    context->drawStateRecord == NULL) {
 		return false;
 	}
-	if (context->hostRenderer != NULL) {
-		SlipRendererState *const renderer = context->hostRenderer;
+	SlipRendererState *const renderer = context->hostRenderer;
 
-		SlipRendererDrawState *const state = &renderer->states[context->recordIndex];
-		state->vertices =
-		    renderer->vertexBase + context->drawStateRecord->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-		state->transform = context->drawStateRecord->transform;
-		state->source = context->drawStateRecord->sourcePoint;
-		state->origin = context->drawStateRecord->origin;
-		state->light = context->drawStateRecord->lightVector;
-		state->matrix = context->drawStateRecord->matrix;
-		renderer->vertexCursor = renderer->vertexBase + context->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-		SlipRenderer_SelectState(renderer, context->recordIndex);
-		SlipRenderer_BuildVertices(renderer, vertexSource, vertexCount, sourceStride, transform, sourcePoint,
-		                           &SlipRendererHost_allocationCalls);
-		context->vertexBufferBase = renderer->vertexBase;
-		context->vertexBufferRecordCapacity = renderer->vertexCapacity;
-		context->vertexBufferLimit = renderer->vertexCapacity * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-		context->vertexBufferCursor =
-		    (uint32_t)(renderer->vertexCursor - renderer->vertexBase) * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-		context->vertexRecords = renderer->activeVertices;
-		context->vertexRecordCount = (size_t)(renderer->vertexLimit - renderer->activeVertices);
-		context->drawStateRecord->vertexBufferCursor =
-		    (uint32_t)(renderer->activeVertices - renderer->vertexBase) * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-		context->drawStateRecord->transform = transform;
-		context->drawStateRecord->sourcePoint = sourcePoint;
-		context->transform = transform;
-		context->sourcePoint = sourcePoint;
-		if (result != NULL) {
-			memset(result, 0, sizeof(*result));
-			result->vertexBufferCursorAfter = context->vertexBufferCursor;
-		}
-		return true;
-	}
-	capacityBytes = TrackView_VertexBufferCapacityBytes(context);
-	cursorBefore = context->vertexBufferCursor;
-	if (context->vertexBufferLimit == 0 || (size_t)context->vertexBufferLimit > capacityBytes) {
-		context->vertexBufferLimit = (uint32_t)capacityBytes;
-	}
-	if (!TrackView_SetActiveVertexBuffer(context, context->vertexBufferCursor)) {
-		return false;
-	}
-	recordOffset = (size_t)(context->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE);
-	recordCapacity = capacityBytes / sizeof(context->vertexBufferBase[0]) - recordOffset;
-	if (!SlipDraw3D_BuildVertexRecords(context->vertexRecords, recordCapacity, vertexSource, sourceBytes, vertexCount,
-	                                   sourceStride, transform, sourcePoint, context->drawStateRecord,
-	                                   context->vertexBufferCursor, context->vertexBufferLimit, result)) {
-		return false;
-	}
-
+	SlipRendererDrawState *const state = &renderer->states[context->recordIndex];
+	state->vertices =
+	    renderer->vertexBase + context->drawStateRecord->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	state->transform = context->drawStateRecord->transform;
+	state->source = context->drawStateRecord->sourcePoint;
+	state->origin = context->drawStateRecord->origin;
+	state->light = context->drawStateRecord->lightVector;
+	state->matrix = context->drawStateRecord->matrix;
+	renderer->vertexCursor = renderer->vertexBase + context->vertexBufferCursor / SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	SlipRenderer_SelectState(renderer, context->recordIndex);
+	SlipRenderer_BuildVertices(renderer, vertexSource, vertexCount, sourceStride, transform, sourcePoint,
+	                           &SlipRendererHost_allocationCalls);
+	context->vertexBufferBase = renderer->vertexBase;
+	context->vertexBufferRecordCapacity = renderer->vertexCapacity;
+	context->vertexBufferLimit = renderer->vertexCapacity * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	context->vertexBufferCursor =
+	    (uint32_t)(renderer->vertexCursor - renderer->vertexBase) * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	context->vertexRecords = renderer->activeVertices;
+	context->vertexRecordCount = (size_t)(renderer->vertexLimit - renderer->activeVertices);
+	context->drawStateRecord->vertexBufferCursor =
+	    (uint32_t)(renderer->activeVertices - renderer->vertexBase) * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
+	context->drawStateRecord->transform = transform;
+	context->drawStateRecord->sourcePoint = sourcePoint;
 	context->transform = transform;
 	context->sourcePoint = sourcePoint;
-	context->vertexBufferCursor =
-	    result != NULL ? result->vertexBufferCursorAfter
-	                   : context->vertexBufferCursor + (uint32_t)vertexCount * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-	if (g_vehicleViewDumpDiagnostics) {
-		fprintf(stderr,
-		        "track_view_build_vertex_records_0001dcf7 caller=0x%08x bp=%u cursor_before=0x%08x cursor_after=0x%08x "
-		        "active=0x%08zx count=%u stride=%d transform=%p source_callback=%p\n",
-		        callerAddress, context->recordIndex, cursorBefore, context->vertexBufferCursor, recordOffset,
-		        (unsigned)vertexCount, (int)sourceStride, (void *)transform, (void *)sourcePoint);
+	if (result != NULL) {
+		memset(result, 0, sizeof(*result));
+		result->vertexBufferCursorAfter = context->vertexBufferCursor;
 	}
 	return true;
 }
@@ -4013,14 +3949,9 @@ static bool TrackView_ExecuteHighTexturedCallback(TrackViewRawBspContext *contex
 		SlipDraw3DTexturedDispatchPoint texturedDispatchPoints[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 		SlipDraw3DTexturedDispatchVisit texturedDispatchVisits[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT];
 		SlipDraw3DTexturedDispatch texturedDispatch;
-		uint8_t standalonePointBuffer[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT * sizeof(RasterTexturedPoint)];
-		uint8_t *texturedPointBuffer = standalonePointBuffer;
-		size_t texturedPointBufferBytes = sizeof(standalonePointBuffer);
-		if (context->hostRenderer != NULL) {
-			SlipResourcePayload points = SlipResourceHost_Payload(context->hostRenderer->pointResource);
-			texturedPointBuffer = points.data;
-			texturedPointBufferBytes = points.size;
-		}
+		SlipResourcePayload points = SlipResourceHost_Payload(context->hostRenderer->pointResource);
+		uint8_t *texturedPointBuffer = points.data;
+		size_t texturedPointBufferBytes = points.size;
 		const uint32_t savedRenderFlags = context->rendererFlags;
 		uint32_t dispatchRenderFlags = savedRenderFlags;
 		if (!primitiveContext->shapePath)
@@ -8838,14 +8769,10 @@ typedef struct VehicleViewRenderContext {
 	SlipView3DVec32 lightVector;
 	uint16_t shapeScaleShift;
 	SlipDraw3DProjectState projectState;
-	const struct VehicleArtActor *actor;
-	const char *const *archives;
-	size_t archiveCount;
 	const struct VehicleViewMaterialTable *materials;
 	TrackViewRawBspContext *trackContext;
 	uint32_t ambientLight;
 	uint32_t directLight;
-	int lod;
 	int primitiveCount;
 	int drawnCount;
 	int bspCarrySetCount;
@@ -8884,7 +8811,6 @@ typedef struct VehicleViewMaterialTable {
 	bool hasTexture[SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY];
 } VehicleViewMaterialTable;
 
-static int TrackView_VehicleViewDrawSortChild(VehicleViewRenderContext *ctx, uint32_t childIndex);
 static int TrackView_ArticSortCallback(VehicleViewRenderContext *ctx, const SlipShape3DPrimitive *primitive);
 static bool TrackView_ArticDrawOne(TrackViewRawBspContext *context, uint8_t *part);
 
@@ -9110,84 +9036,6 @@ static int TrackView_ActorBuildIndexedRing(VehicleViewRenderContext *ctx, TrackV
 	return 1;
 }
 
-static bool TrackView_VehicleViewMaterialsFromPayload(const SlipResourcePayload *payload,
-                                                      VehicleViewMaterialTable *materials) {
-	const uint8_t *raw;
-	SlipDraw3DMaterialInstall install;
-	size_t expandedTableBytes;
-	uint16_t count;
-	uint16_t i;
-
-	if (payload == NULL || payload->data == NULL || materials == NULL || payload->size < SLIP_MAT_HEADER_BYTES) {
-		return false;
-	}
-	count = SlipBytes_ReadLE16(payload->data);
-	if (SlipBytes_ReadLE16(payload->data + SLIP_MAT_VERSION_OFFSET) != SLIP_MAT_VERSION) {
-		return false;
-	}
-	if ((size_t)count > (payload->size - SLIP_MAT_HEADER_BYTES) / SLIP_MAT_RECORD_BYTES) {
-		return false;
-	}
-
-	memset(materials, 0, sizeof(*materials));
-	materials->count = count > SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY ? SLIP_VEHICLE_PREVIEW_MATERIAL_CAPACITY : count;
-	expandedTableBytes =
-	    SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES + (size_t)count * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
-	materials->expandedTable = (uint8_t *)malloc(expandedTableBytes);
-	if (materials->expandedTable == NULL ||
-	    !SlipDraw3D_SetMaterialsNoExisting(payload->data, payload->size, 0, 1u, materials->expandedTable,
-	                                       expandedTableBytes, &install)) {
-		free(materials->expandedTable);
-		materials->expandedTable = NULL;
-		return false;
-	}
-	materials->expandedTableBytes = expandedTableBytes;
-	materials->materialResourceHandle = install.storedMaterialGlobal;
-	raw = payload->data + SLIP_MAT_HEADER_BYTES;
-	for (i = 0; i < materials->count; ++i) {
-		const uint8_t *const record = raw + (size_t)i * SLIP_MAT_RECORD_BYTES;
-		const uint8_t start = record[SLIP_MAT_RAMP_START_OFFSET];
-		const uint8_t rawEnd = record[SLIP_MAT_RAMP_END_OFFSET];
-		const uint16_t rampBits = SlipBytes_ReadLE16(record + SLIP_MAT_DITHER_BITS_OFFSET);
-		const uint32_t countAdjust =
-		    rampBits < SLIP_MAT_DITHER_SHIFT_MASK ? ((uint32_t)1u << rampBits) - 1u : UINT32_MAX;
-		uint32_t diff = (uint32_t)rawEnd - (uint32_t)start;
-		int32_t end;
-
-		memcpy(materials->materialName[i], record, SLIP_MAT_NAME_BYTES);
-		materials->materialName[i][SLIP_MAT_NAME_BYTES] = '\0';
-		for (uint16_t j = 0; j < SLIP_MAT_NAME_BYTES; ++j) {
-			if (materials->materialName[i][j] == ' ') {
-				materials->materialName[i][j] = '\0';
-				break;
-			}
-		}
-		if (diff > SLIP_MAT_MAXIMUM_RAMP_RANGE) {
-			diff = SLIP_MAT_MAXIMUM_RAMP_RANGE;
-		}
-		end = (int32_t)((uint32_t)start + diff - countAdjust);
-		materials->rampStart[i] = (int32_t)(uint32_t)start;
-		materials->rampEnd[i] = end;
-		materials->textureTransparency[i] = (int16_t)(int8_t)record[SLIP_MAT_TRANSPARENCY_OFFSET];
-		materials->skipFlatPolygon[i] = (int16_t)(int8_t)record[SLIP_MAT_SKIP_FLAT_OFFSET];
-		materials->fixedShade[i] = SlipBytes_ReadLE16(record + SLIP_MAT_FIXED_SHADE_OFFSET);
-
-		materials->vertexShading[i] = (uint32_t)(int32_t)(int8_t)record[SLIP_MAT_VERTEX_SHADING_OFFSET];
-		materials->ambientCoefficient[i] = SlipBytes_ReadLE16(record + SLIP_MAT_AMBIENT_OFFSET);
-		materials->diffuseCoefficient[i] = SlipBytes_ReadLE16(record + SLIP_MAT_DIFFUSE_OFFSET);
-		materials->specularCoefficient[i] = SlipBytes_ReadLE16(record + SLIP_MAT_SPECULAR_OFFSET);
-		memcpy(materials->textureName[i], record + SLIP_MAT_TEXTURE_NAME_OFFSET, SLIP_MAT_TEXTURE_NAME_BYTES);
-		materials->textureName[i][SLIP_MAT_TEXTURE_NAME_BYTES] = '\0';
-		for (uint16_t j = 0; j < SLIP_MAT_TEXTURE_NAME_BYTES; ++j) {
-			if (materials->textureName[i][j] == ' ') {
-				materials->textureName[i][j] = '\0';
-				break;
-			}
-		}
-	}
-	return true;
-}
-
 static bool TrackView_VehicleViewMaterialsFromTrackTable(const uint8_t *expandedTable, size_t tableBytes,
                                                          VehicleViewMaterialTable *materials) {
 	uint32_t count;
@@ -9244,62 +9092,6 @@ static bool TrackView_VehicleViewMaterialsFromTrackTable(const uint8_t *expanded
 	return true;
 }
 
-static void TrackView_VehicleViewMaterialsFreeTextures(VehicleViewMaterialTable *materials) {
-	uint16_t i;
-
-	if (materials == NULL) {
-		return;
-	}
-
-	for (i = 0; i < materials->count; ++i) {
-		materials->hasTexture[i] = false;
-	}
-	free(materials->expandedTable);
-	materials->expandedTable = NULL;
-	materials->expandedTableBytes = 0;
-	materials->materialResourceHandle = 0;
-}
-
-static bool TrackView_LoadMaterialTexturePayload(const char *const *archives, size_t archiveCount, const char *name,
-                                                 SlipResourcePayload *payload) {
-	const char *wildcard;
-	char resolvedName[SLIP_RESOURCE_NAME_BUFFER_BYTES];
-	char digit;
-
-	if (SlipResource_LoadByName(archives, archiveCount, name, payload)) {
-		return true;
-	}
-	wildcard = strchr(name, '*');
-	if (wildcard == NULL || strlen(name) >= sizeof(resolvedName)) {
-		return false;
-	}
-
-	memcpy(resolvedName, name, strlen(name) + 1u);
-	for (digit = '0'; digit <= '9'; ++digit) {
-		resolvedName[wildcard - name] = digit;
-		if (SlipResource_LoadByName(archives, archiveCount, resolvedName, payload)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-int TrackView_FindNameRecord(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint32_t *handle) {
-	TrackViewResourceHandleRegistry *const registry = user;
-	if (registry->hostResources)
-		return TrackView_FindNamedResource(user, name, handle);
-	char key[SLIP_RESOURCE_NAME_BUFFER_BYTES] = {0};
-	for (size_t index = 0; index < SLIP_RESOURCE_NAME_BYTES && name[index] != 0; ++index)
-		key[index] = (char)SlipResource_Uppercase((uint8_t)name[index]);
-	for (size_t index = 0; index < registry->entryCount; ++index) {
-		if (memcmp(registry->entries[index].name, key, sizeof(key)) == 0) {
-			*handle = registry->entries[index].resourceHandle;
-			return 1;
-		}
-	}
-	return 0;
-}
-
 int TrackView_FindNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES],
                                 uint32_t *resourceHandle) {
 	TrackViewResourceHandleRegistry *const registry = user;
@@ -9323,7 +9115,6 @@ int TrackView_FindNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_B
 int TrackView_LoadNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES],
                                 uint32_t *resourceHandle) {
 	TrackViewResourceHandleRegistry *const registry = (TrackViewResourceHandleRegistry *)user;
-	SlipResourcePayload payload = {0};
 	char canonicalName[SLIP_RESOURCE_NAME_BUFFER_BYTES] = {0};
 	size_t i;
 
@@ -9333,58 +9124,25 @@ int TrackView_LoadNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_B
 	for (i = 0; i + 1u < sizeof(canonicalName) && name[i] != '\0'; ++i) {
 		canonicalName[i] = (char)SlipResource_Uppercase((uint8_t)name[i]);
 	}
-	if (registry->hostResources) {
-		uint16_t handle;
-		if (!SlipResourceHost_Load(NULL, canonicalName, &handle))
-			return 0;
-		*resourceHandle = handle;
-		for (i = 0; i < registry->entryCount; ++i)
-			if (registry->entries[i].resourceHandle == handle)
-				return 1;
-		if (registry->entryCount >= sizeof(registry->entries) / sizeof(registry->entries[0]))
-			return 0;
-		TrackViewResourceHandleEntry *const entry = &registry->entries[registry->entryCount++];
-		memcpy(entry->name, canonicalName, sizeof(canonicalName));
-		entry->resourceHandle = handle;
-		entry->payload = SlipResourceHost_Payload(handle);
-		return 1;
-	}
-
-	uint16_t namedHandle;
-	if (!SlipResourceHost_Find(NULL, canonicalName, &namedHandle))
+	uint16_t handle;
+	if (!SlipResourceHost_Load(NULL, canonicalName, &handle))
 		return 0;
+	*resourceHandle = handle;
 	for (i = 0; i < registry->entryCount; ++i) {
-		if (memcmp(registry->entries[i].name, canonicalName, sizeof(canonicalName)) == 0) {
-			*resourceHandle = registry->entries[i].resourceHandle;
+		if (registry->entries[i].resourceHandle == handle)
 			return 1;
-		}
 	}
-	if (!SlipResource_LoadByName(registry->archives, registry->archiveCount, canonicalName, &payload)) {
+	if (registry->entryCount >= sizeof(registry->entries) / sizeof(registry->entries[0]))
 		return 0;
-	}
-	if (registry->entryCount >= sizeof(registry->entries) / sizeof(registry->entries[0])) {
-		return 0;
-	}
-	*resourceHandle = namedHandle;
-	memcpy(registry->entries[registry->entryCount].name, canonicalName, sizeof(canonicalName));
-	registry->entries[registry->entryCount].resourceHandle = *resourceHandle;
-	registry->entries[registry->entryCount].payload = payload;
-	++registry->entryCount;
+	TrackViewResourceHandleEntry *const entry = &registry->entries[registry->entryCount++];
+	memcpy(entry->name, canonicalName, sizeof(canonicalName));
+	entry->resourceHandle = handle;
 	return 1;
 }
 
 void TrackView_ReleaseResource(void *user, uint32_t handle) {
-	TrackViewResourceHandleRegistry *const registry = user;
-	if (registry->hostResources) {
-		SlipResourceHost_Release(NULL, (uint16_t)handle);
-		return;
-	}
-	for (size_t index = 0; index < registry->entryCount; ++index) {
-		if (registry->entries[index].resourceHandle == handle) {
-			SlipResource_ReleaseHandle(&registry->entries[index].payload);
-			return;
-		}
-	}
+	(void)user;
+	SlipResourceHost_Release(NULL, (uint16_t)handle);
 }
 
 void TrackView_ReleaseSequence(TrackViewResourceHandleRegistry *registry, const uint16_t *handles, uint16_t count) {
@@ -9394,41 +9152,18 @@ void TrackView_ReleaseSequence(TrackViewResourceHandleRegistry *registry, const 
 	}
 }
 
-bool TrackView_LoadResourceHandlePayload(const TrackViewResourceHandleRegistry *registry, uint32_t resourceHandle,
-                                         SlipResourcePayload *payload) {
-	size_t i;
-
-	if (registry == NULL || payload == NULL || resourceHandle == 0u) {
-		return false;
-	}
-	memset(payload, 0, sizeof(*payload));
-	if (registry->hostResources) {
-		if (!SlipResourceHost_IsResident(NULL, (uint16_t)resourceHandle))
-			return false;
-		*payload = SlipResourceHost_Payload((uint16_t)resourceHandle);
-		return true;
-	}
-	for (i = 0; i < registry->entryCount; ++i) {
-		if (registry->entries[i].resourceHandle == resourceHandle) {
-			return SlipResource_LoadByName(registry->archives, registry->archiveCount, registry->entries[i].name,
-			                               payload);
-		}
-	}
-	return false;
-}
-
 /* Native bindings for the resource calls in raster and radius-query entries. */
 static bool TrackView_LockResourceHandlePayload(const TrackViewResourceHandleRegistry *registry, uint32_t handle,
                                                 SlipResourcePayload *payload) {
-	if (registry == NULL || !registry->hostResources)
-		return TrackView_LoadResourceHandlePayload(registry, handle, payload);
+	if (registry == NULL || payload == NULL || handle == 0u)
+		return false;
 	(void)SlipResourceHost_Lock(NULL, (uint16_t)handle);
 	*payload = SlipResourceHost_Payload((uint16_t)handle);
 	return true;
 }
 
 static void TrackView_UnlockResourceHandlePayload(const TrackViewResourceHandleRegistry *registry, uint32_t handle) {
-	if (registry != NULL && registry->hostResources)
+	if (registry != NULL)
 		SlipResourceHost_Unlock(NULL, (uint16_t)handle);
 }
 
@@ -9718,14 +9453,9 @@ bool TrackView_DrawSprite(TrackViewRawBspContext *context, SlipView3DVec32 view,
 	Raster_SetClipRect((int16_t)context->projectState->minX, (int16_t)context->projectState->minY,
 	                   (int16_t)context->projectState->maxX, (int16_t)context->projectState->maxY);
 
-	if (context->resourceRegistry != NULL && context->resourceRegistry->hostResources)
+	if (context->resourceRegistry != NULL)
 		SlipSpriteHost_effectResources.drawScaled(SlipSpriteHost_effectResources.context, spriteHandle, (int16_t)left,
 		                                          (int16_t)top, (int16_t)right, (int16_t)bottom);
-	else if (TrackView_LoadResourceHandlePayload(context->resourceRegistry, spriteHandle, &sprite) &&
-	         sprite.size > SLIP_SPRITE_HEADER_BYTES)
-		Raster_DrawSpriteScaled(sprite.data, sprite.size, sprite.data + SLIP_SPRITE_HEADER_BYTES,
-		                        sprite.size - SLIP_SPRITE_HEADER_BYTES, (int16_t)left, (int16_t)top, (int16_t)right,
-		                        (int16_t)bottom);
 	Raster_SetClipRect(savedMinX, savedMinY, savedMaxX, savedMaxY);
 	return true;
 }
@@ -9764,7 +9494,7 @@ bool TrackView_DrawCrossEffect(TrackViewRawBspContext *context, uint32_t objectR
 		return false;
 	SlipDraw3DProjectState *const state = context->projectState;
 	const SlipDraw3DVec32 position = {view.x, view.y, view.z};
-	const int32_t detail = (int32_t)SlipDraw3D_DetailValue(state->projectionMode, SlipDraw3D_minimumDepth,
+	const int32_t detail = (int32_t)SlipDraw3D_DetailValue(state->projectionMode, SlipDraw3D_GetMinimumDepth(),
 	                                                       radius.drawExtent, (uint32_t)view.z);
 	if (detail > SLIP_CROSS_EFFECT_MAXIMUM_DETAIL)
 		return true;
@@ -10752,47 +10482,6 @@ static bool TrackView_WriteTexturedPointBuffer(const SlipDraw3DTexturedDispatchP
 	return true;
 }
 
-static void TrackView_VehicleViewMaterialsLoadTextures(VehicleViewMaterialTable *materials, const char *const *archives,
-                                                       size_t archiveCount) {
-	uint16_t i;
-
-	if (materials == NULL) {
-		return;
-	}
-
-	for (i = 0; i < materials->count; ++i) {
-		if (materials->textureName[i][0] == '\0') {
-			continue;
-		}
-		if (!TrackView_LoadMaterialTexturePayload(archives, archiveCount, materials->textureName[i],
-		                                          &materials->texturePayload[i])) {
-			continue;
-		}
-		if (SlipSprite_FromPayload(&materials->texturePayload[i], &materials->texture[i])) {
-			materials->hasTexture[i] = true;
-		} else {
-		}
-	}
-}
-
-static uint32_t TrackView_VehicleViewNormalizedLightComponent(uint32_t value, uint32_t total) {
-	const uint32_t scale = (SLIP_Q14_ONE * SLIP_Q14_ONE) / total;
-
-	return (uint32_t)(((uint64_t)value * scale) >> SLIP_Q14_FRACTION_BITS);
-}
-
-static uint32_t TrackView_VehicleViewNormalizedLightDirect(void) {
-	return TrackView_VehicleViewNormalizedLightComponent(SLIP_VEHICLE_PREVIEW_DIRECT_LIGHT_Q14,
-	                                                     SLIP_VEHICLE_PREVIEW_DIRECT_LIGHT_Q14 +
-	                                                         SLIP_VEHICLE_PREVIEW_AMBIENT_LIGHT_Q14);
-}
-
-static uint32_t TrackView_VehicleViewNormalizedLightAmbient(void) {
-	return TrackView_VehicleViewNormalizedLightComponent(SLIP_VEHICLE_PREVIEW_AMBIENT_LIGHT_Q14,
-	                                                     SLIP_VEHICLE_PREVIEW_DIRECT_LIGHT_Q14 +
-	                                                         SLIP_VEHICLE_PREVIEW_AMBIENT_LIGHT_Q14);
-}
-
 static uint32_t TrackView_VehicleViewProjectMask(SlipDraw3DVec32 point, void *userData) {
 	const VehicleViewRenderContext *const ctx = (const VehicleViewRenderContext *)userData;
 	SlipDraw3DRefreshMode0Projection refresh;
@@ -11127,202 +10816,6 @@ static void TrackView_DispatchShapePrimitive(void *context, const uint8_t *primi
 	SlipShape_DispatchPrimitive(primitive, traversalValue, &calls);
 }
 
-enum {
-	VEHICLE_ART_MAX_SLOTS = 64,
-	VEHICLE_ART_MAX_POINTS = 16,
-	VEHICLE_ART_SHAPE_LOD_COUNT = 8,
-	VEHICLE_ART_SHAPE_NAME_SIZE = 14
-};
-
-typedef struct VehicleArtPoint {
-	uint32_t nameTag;
-	SlipView3DVec32 position;
-} VehicleArtPoint;
-
-typedef struct VehicleArtSlot {
-	uint32_t recordOffset;
-	uint32_t childOffset;
-	uint32_t siblingOffset;
-	uint32_t nameTag;
-	uint32_t rotationCallbackOffset;
-	int32_t localX;
-	int32_t localY;
-	int32_t localZ;
-	char bodyShapes[VEHICLE_ART_SHAPE_LOD_COUNT][VEHICLE_ART_SHAPE_NAME_SIZE];
-	char replayShapes[VEHICLE_ART_SHAPE_LOD_COUNT][VEHICLE_ART_SHAPE_NAME_SIZE];
-	VehicleArtPoint points[VEHICLE_ART_MAX_POINTS];
-	size_t pointCount;
-	struct VehicleArtSlot *firstChild;
-	struct VehicleArtSlot *nextSibling;
-	int16_t animationAngle;
-	SlipView3DMatrix modelMatrix;
-	SlipView3DMatrix drawMatrix;
-	SlipView3DVec32 worldPosition;
-	SlipView3DVec32 drawTranslation;
-	SlipView3DVec32 bspOrigin;
-	SlipView3DVec32 lightVector;
-} VehicleArtSlot;
-
-typedef struct VehicleArtActor {
-	SlipActorRecord record;
-	SlipActorPartRecord parts[VEHICLE_ART_MAX_SLOTS];
-	SlipActorRenderState render;
-	SlipActorRenderCalls calls;
-	SlipView3DMatrix objectMatrix, cameraMatrix;
-	SlipView3DVec32 position, cameraPosition, light;
-	const char *const *archives;
-	size_t archiveCount;
-	SlipDraw3DProjectState *projection;
-	const VehicleViewMaterialTable *materials;
-	TrackViewRawBspContext *trackContext;
-	int drawn;
-	VehicleArtSlot slots[VEHICLE_ART_MAX_SLOTS];
-	size_t slotCount;
-	VehicleArtSlot *root;
-	int32_t lodRanges[VEHICLE_ART_SHAPE_LOD_COUNT];
-	int drawChildrenAfterParent;
-} VehicleArtActor;
-
-static void TrackView_VehicleArtCopyShapeName(char dst[VEHICLE_ART_SHAPE_NAME_SIZE], const uint8_t *src,
-                                              size_t srcAvailable) {
-	size_t i;
-	const size_t limit = srcAvailable < VEHICLE_ART_SHAPE_NAME_SIZE ? srcAvailable : VEHICLE_ART_SHAPE_NAME_SIZE;
-
-	for (i = 0; i + 1u < limit && src[i] != 0; ++i) {
-		dst[i] = (char)src[i];
-	}
-	dst[i] = '\0';
-}
-
-static VehicleArtSlot *TrackView_VehicleArtFindSlot(VehicleArtActor *actor, uint32_t recordOffset) {
-	size_t i;
-
-	for (i = 0; i < actor->slotCount; ++i) {
-		if (actor->slots[i].recordOffset == recordOffset) {
-			return &actor->slots[i];
-		}
-	}
-	return NULL;
-}
-
-static VehicleArtSlot *TrackView_VehicleArtParseRecord(VehicleArtActor *actor, const uint8_t *data, size_t size,
-                                                       uint32_t recordOffset);
-
-static VehicleArtSlot *TrackView_VehicleArtParseList(VehicleArtActor *actor, const uint8_t *data, size_t size,
-                                                     uint32_t firstOffset) {
-	VehicleArtSlot *first = NULL;
-	VehicleArtSlot *previous = NULL;
-	uint32_t offset = firstOffset;
-	size_t guard = 0;
-
-	while (offset != 0 && offset < size && guard++ < VEHICLE_ART_MAX_SLOTS) {
-		VehicleArtSlot *const slot = TrackView_VehicleArtParseRecord(actor, data, size, offset);
-
-		if (slot == NULL) {
-			break;
-		}
-		if (first == NULL) {
-			first = slot;
-		}
-		if (previous != NULL) {
-			previous->nextSibling = slot;
-		}
-		previous = slot;
-		offset = slot->siblingOffset;
-		if (offset == firstOffset) {
-			break;
-		}
-	}
-	return first;
-}
-
-static VehicleArtSlot *TrackView_VehicleArtParseRecord(VehicleArtActor *actor, const uint8_t *data, size_t size,
-                                                       uint32_t recordOffset) {
-	VehicleArtSlot *slot;
-	size_t i;
-
-	if (recordOffset + SLIP_ART_PART_POINT_COUNT_OFFSET > size) {
-		return NULL;
-	}
-	slot = TrackView_VehicleArtFindSlot(actor, recordOffset);
-	if (slot != NULL) {
-		return slot;
-	}
-	if (actor->slotCount >= VEHICLE_ART_MAX_SLOTS) {
-		return NULL;
-	}
-
-	slot = &actor->slots[actor->slotCount++];
-	memset(slot, 0, sizeof(*slot));
-	slot->recordOffset = recordOffset;
-	slot->nameTag = SlipBytes_ReadLE32(data + recordOffset);
-	slot->childOffset = SlipBytes_ReadLE32(data + recordOffset + SLIP_ART_PART_CHILD_OFFSET);
-	slot->siblingOffset = SlipBytes_ReadLE32(data + recordOffset + SLIP_ART_PART_SIBLING_OFFSET);
-	slot->rotationCallbackOffset = SlipBytes_ReadLE32(data + recordOffset + SLIP_ART_PART_ROTATION_CALLBACK_OFFSET);
-	slot->localX = SlipBytes_ReadLEI32(data + recordOffset + SLIP_ART_PART_POSITION_OFFSET);
-	slot->localY =
-	    SlipBytes_ReadLEI32(data + recordOffset + (SLIP_ART_PART_POSITION_OFFSET + SLIP_ART_POSITION_Y_OFFSET));
-	slot->localZ =
-	    SlipBytes_ReadLEI32(data + recordOffset + (SLIP_ART_PART_POSITION_OFFSET + SLIP_ART_POSITION_Z_OFFSET));
-	for (i = 0; i < VEHICLE_ART_SHAPE_LOD_COUNT; ++i) {
-		TrackView_VehicleArtCopyShapeName(
-		    slot->bodyShapes[i],
-		    data + recordOffset + SLIP_ART_PART_SHAPE_NAMES_OFFSET + i * VEHICLE_ART_SHAPE_NAME_SIZE,
-		    size - (recordOffset + SLIP_ART_PART_SHAPE_NAMES_OFFSET + i * VEHICLE_ART_SHAPE_NAME_SIZE));
-		TrackView_VehicleArtCopyShapeName(
-		    slot->replayShapes[i],
-		    data + recordOffset + SLIP_ART_PART_REPLAY_SHAPE_NAMES_OFFSET + i * VEHICLE_ART_SHAPE_NAME_SIZE,
-		    size - (recordOffset + SLIP_ART_PART_REPLAY_SHAPE_NAMES_OFFSET + i * VEHICLE_ART_SHAPE_NAME_SIZE));
-	}
-	if (recordOffset + SLIP_ART_PART_POINTS_OFFSET <= size) {
-		uint32_t pointCount = SlipBytes_ReadLE32(data + recordOffset + SLIP_ART_PART_POINT_COUNT_OFFSET);
-
-		if (pointCount > SLIP_ART_POINT_CAPACITY) {
-			pointCount = SLIP_ART_POINT_CAPACITY;
-		}
-		if (pointCount > VEHICLE_ART_MAX_POINTS) {
-			pointCount = VEHICLE_ART_MAX_POINTS;
-		}
-		for (i = 0; i < pointCount; ++i) {
-			const uint32_t pointOffset =
-			    recordOffset + SLIP_ART_PART_POINTS_OFFSET + (uint32_t)i * SLIP_ART_POINT_BYTES;
-
-			if (pointOffset + SLIP_ART_POINT_BYTES > size) {
-				break;
-			}
-			slot->points[i].nameTag = SlipBytes_ReadLE32(data + pointOffset);
-			slot->points[i].position.x = SlipBytes_ReadLEI32(data + pointOffset + SLIP_ART_POINT_POSITION_OFFSET);
-			slot->points[i].position.y =
-			    SlipBytes_ReadLEI32(data + pointOffset + (SLIP_ART_POINT_POSITION_OFFSET + SLIP_ART_POSITION_Y_OFFSET));
-			slot->points[i].position.z =
-			    SlipBytes_ReadLEI32(data + pointOffset + (SLIP_ART_POINT_POSITION_OFFSET + SLIP_ART_POSITION_Z_OFFSET));
-		}
-		slot->pointCount = i;
-	}
-	if (slot->childOffset != 0) {
-		slot->firstChild = TrackView_VehicleArtParseList(actor, data, size, slot->childOffset);
-	}
-	return slot;
-}
-
-static bool TrackView_VehicleArtActorFromPayload(const SlipResourcePayload *payload, VehicleArtActor *actor) {
-	uint32_t rootOffset;
-	size_t i;
-
-	if (payload == NULL || payload->data == NULL || payload->size < SLIP_ART_PREVIEW_HEADER_BYTES || actor == NULL) {
-		return false;
-	}
-	memset(actor, 0, sizeof(*actor));
-	rootOffset = SlipBytes_ReadLE32(payload->data + SLIP_ART_ROOT_PART_OFFSET);
-	actor->drawChildrenAfterParent = SlipBytes_ReadLEI32(payload->data + SLIP_ART_SORT_CHILDREN_OFFSET) == 0;
-	for (i = 0; i < VEHICLE_ART_SHAPE_LOD_COUNT; ++i) {
-		actor->lodRanges[i] =
-		    SlipBytes_ReadLEI32(payload->data + SLIP_ART_LOD_DISTANCES_OFFSET + i * SLIP_ART_DISTANCE_BYTES);
-	}
-	actor->root = TrackView_VehicleArtParseRecord(actor, payload->data, payload->size, rootOffset);
-	return actor->root != NULL;
-}
-
 SlipView3DMatrix TrackView_VehicleViewIdentityMatrix(void) {
 	SlipView3DMatrix matrix;
 
@@ -11331,16 +10824,6 @@ SlipView3DMatrix TrackView_VehicleViewIdentityMatrix(void) {
 	matrix.m[4] = SLIP_Q14_ONE;
 	matrix.m[8] = SLIP_Q14_ONE;
 	return matrix;
-}
-
-void TrackView_VehicleViewResetActorState(void) {
-	g_vehicleViewActorMatrix = TrackView_VehicleViewIdentityMatrix();
-	g_vehicleViewActorMatrixValid = true;
-	g_vehicleViewLastTickMs = SlipSdl_TicksMs();
-	g_vehicleViewTimerSuppressedSamples = SLIP_VEHICLE_PREVIEW_INITIAL_TIMER_SAMPLES;
-	memset(g_vehicleViewFanAngles, 0, sizeof(g_vehicleViewFanAngles));
-	g_vehicleViewJetAngle = 0;
-	g_vehicleViewJetDirection = 0;
 }
 
 void TrackView_TrackGlobeResetActorState(void) {
@@ -11358,11 +10841,6 @@ uint32_t TrackView_ProjectMask(SlipView3DVec32 point, void *userData) {
 
 bool TrackView_SphereCull(SlipView3DVec32 center, int32_t radius, void *userData) {
 	return TrackView_SphereCullCallback(center, radius, userData);
-}
-
-uint16_t TrackView_VehicleViewFrameStep(uint32_t deltaMs) {
-	SlipFrameTimer_SetDelta((uint16_t)deltaMs);
-	return (uint16_t)SlipFrameTimer_Step();
 }
 
 static uint16_t TrackView_FrameStepRead(void) { return (uint16_t)SlipFrameTimer_Step(); }
@@ -11386,126 +10864,15 @@ void TrackView_MaterialAnimationTick(void) {
 	g_materialAnimLerp = (uint32_t)(product >> SLIP_Q14_FRACTION_BITS) + g_materialAnimRangeLow;
 }
 
-static uint16_t TrackView_VehicleViewFrameTimerUpdate(void) {
-	uint64_t now = SlipSdl_TicksMs();
-	uint64_t elapsed;
-	uint32_t deltaMs;
-	const uint32_t minDeltaMs = 14;
-	const uint32_t maximumDeltaMs = 1000;
-
-	if (g_vehicleViewTimerSuppressedSamples > 0) {
-		--g_vehicleViewTimerSuppressedSamples;
-		g_vehicleViewLastTickMs = now;
-		return 0;
-	}
-
-	elapsed = now - g_vehicleViewLastTickMs;
-	if (elapsed < minDeltaMs) {
-		SlipSdl_DelayMs((uint32_t)(minDeltaMs - elapsed));
-		now = SlipSdl_TicksMs();
-		elapsed = now - g_vehicleViewLastTickMs;
-	}
-	g_vehicleViewLastTickMs = now;
-	deltaMs = elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
-	if (deltaMs > maximumDeltaMs) {
-		deltaMs = maximumDeltaMs;
-	}
-	if (deltaMs < minDeltaMs) {
-		deltaMs = minDeltaMs;
-	}
-	return TrackView_VehicleViewFrameStep(deltaMs);
-}
-
 uint16_t TrackView_TrackGlobeFrameTimerUpdate(void) {
 	SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
 	return (uint16_t)SlipFrameTimer_Step();
-}
-
-static void TrackView_VehicleViewActorCallback(SlipView3DMatrix *actorObjectMatrix, const SlipView3DMaths *maths,
-                                               uint16_t frameStep) {
-	int32_t product;
-	int16_t angle;
-
-	if (actorObjectMatrix == NULL || maths == NULL || frameStep == 0) {
-		return;
-	}
-
-	product = SLIP_VEHICLE_PREVIEW_ACTOR_ANGLE_STEP * (int16_t)frameStep;
-	angle = (int16_t)(product >> SLIP_Q14_FRACTION_BITS);
-	if (angle != 0) {
-		SlipView3D_ApplyRow0Row2Rotation(maths, angle, actorObjectMatrix);
-		SlipView3D_OrthonormalizeForwardBasis(actorObjectMatrix);
-	}
-}
-
-static VehicleArtSlot *TrackView_VehicleArtFindSlotByNameTag(VehicleArtActor *actor, uint32_t nameTag) {
-	size_t i;
-
-	if (actor == NULL) {
-		return NULL;
-	}
-	for (i = 0; i < actor->slotCount; ++i) {
-		if (actor->slots[i].nameTag == nameTag) {
-			return &actor->slots[i];
-		}
-	}
-	return NULL;
-}
-
-static void TrackView_VehicleViewStoreArtSlotAngle(VehicleArtActor *actor, uint32_t nameTag, int16_t angle) {
-	VehicleArtSlot *const slot = TrackView_VehicleArtFindSlotByNameTag(actor, nameTag);
-
-	if (slot != NULL) {
-		slot->animationAngle = angle;
-	}
-}
-
-static void TrackView_VehicleViewUpdateArtAnimations(VehicleArtActor *actor, uint16_t frameStep) {
-	int16_t fanStep;
-	int16_t jetStep;
-	int32_t jetAngle;
-	int i;
-
-	if (actor == NULL || frameStep == 0) {
-		return;
-	}
-
-	fanStep = (int16_t)((SLIP_VEHICLE_PREVIEW_FAN_ANGLE_STEP * (int16_t)frameStep) >> SLIP_Q14_FRACTION_BITS);
-	jetStep = (int16_t)(fanStep >> SLIP_VEHICLE_PREVIEW_JET_RATE_SHIFT);
-	jetAngle = g_vehicleViewJetAngle;
-	if (g_vehicleViewJetDirection == 0) {
-		jetAngle += jetStep;
-		if (jetAngle >= SLIP_ANGLE_QUARTER_TURN) {
-			jetAngle = SLIP_ANGLE_QUARTER_TURN;
-			g_vehicleViewJetDirection = 1;
-		}
-	} else {
-		jetAngle -= jetStep;
-		if (jetAngle <= 0) {
-			jetAngle = 0;
-			g_vehicleViewJetDirection = 0;
-		}
-	}
-	g_vehicleViewJetAngle = (int16_t)jetAngle;
-
-	for (i = 0; i < SLIP_VEHICLE_PREVIEW_ANIMATED_PART_COUNT; ++i) {
-		const uint32_t fanTag = SLIP_ACTOR_FIRST_FAN + (uint32_t)i;
-		const uint32_t jetTag = SLIP_ACTOR_FIRST_JET + (uint32_t)i;
-
-		if (TrackView_VehicleArtFindSlotByNameTag(actor, fanTag) != NULL) {
-			g_vehicleViewFanAngles[i] = (int16_t)(g_vehicleViewFanAngles[i] + fanStep);
-			TrackView_VehicleViewStoreArtSlotAngle(actor, fanTag, g_vehicleViewFanAngles[i]);
-		}
-		TrackView_VehicleViewStoreArtSlotAngle(actor, jetTag, g_vehicleViewJetAngle);
-	}
 }
 
 typedef struct TrackViewShapeBinding {
 	VehicleViewRenderContext render; /* First member is the renderer callback ABI. */
 	SlipActorShapeState shape;
 	SlipResourcePayload payload;
-	const SlipResourcePayload *resident;
-	const char *name;
 	uint16_t resource;
 	SlipShapeSortState sort;
 	SlipActorShapeSortNode sortCallback;
@@ -11535,24 +10902,16 @@ static void TrackView_ShapeMatrices(void *context, const SlipView3DMatrix *world
 
 static uint8_t *TrackView_ShapeLock(void *context, uint16_t resource) {
 	TrackViewShapeBinding *const binding = context;
-	if (binding->resource != 0) {
-		(void)SlipResourceHost_Lock(NULL, resource);
-		binding->payload = SlipResourceHost_Payload(resource);
-	} else if (binding->resident != NULL)
-		binding->payload = *binding->resident;
-	else if (!SlipResource_LoadByName(binding->render.archives, binding->render.archiveCount, binding->name,
-	                                  &binding->payload))
-		SlipRuntime_Fatal("Could not load shape resource");
+	(void)SlipResourceHost_Lock(NULL, resource);
+	binding->payload = SlipResourceHost_Payload(resource);
 	if (!SlipShape3D_FromPayload(binding->payload.data, binding->payload.size, &binding->render.shape))
 		SlipRuntime_Fatal("Invalid shape resource");
 	return binding->payload.data;
 }
 
 static void TrackView_ShapeUnlock(void *context, uint16_t resource) {
-	TrackViewShapeBinding *const binding = context;
-	if (binding->resource != 0)
-		SlipResourceHost_Unlock(NULL, resource);
-	/* Resident payloads belong to the native resource cache. */
+	(void)context;
+	SlipResourceHost_Unlock(NULL, resource);
 }
 
 static void TrackView_ShapePrepare(void *context, uint8_t *shape) {
@@ -11604,23 +10963,12 @@ static void TrackView_ShapeVertices(void *context, uint8_t *shape) {
 	binding->shape.shape = shape;
 	ctx->shapeScaleShift = ctx->shape.scaleShift;
 	ctx->vertexRecordCount = count;
-	SlipRendererState *const hostRenderer = ctx->trackContext->hostRenderer;
-	if (hostRenderer != NULL) {
-		if (!TrackView_BuildVertexRecords(ctx->trackContext, TRACK_VIEW_DIAGNOSTIC_PREVIEW_BUILD_VERTEX_RECORDS,
-		                                  shape + ctx->shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
-		                                  ctx->shape.size - ctx->shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES,
-		                                  count, SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL))
-			SlipRuntime_Fatal("Could not bind shape vertex workspace");
-		ctx->vertexRecords = ctx->trackContext->vertexRecords;
-	} else {
-		ctx->vertexRecords = malloc((size_t)count * sizeof(*ctx->vertexRecords));
-		if (ctx->vertexRecords == NULL ||
-		    !SlipDraw3D_BuildVertexRecords(ctx->vertexRecords, count,
-		                                   shape + ctx->shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
-		                                   ctx->shape.size - ctx->shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES,
-		                                   count, SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL, 0, 0, NULL))
-			SlipRuntime_Fatal("Could not allocate shape vertices");
-	}
+	if (!TrackView_BuildVertexRecords(ctx->trackContext, TRACK_VIEW_DIAGNOSTIC_PREVIEW_BUILD_VERTEX_RECORDS,
+	                                  shape + ctx->shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
+	                                  ctx->shape.size - ctx->shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES, count,
+	                                  SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL))
+		SlipRuntime_Fatal("Could not bind shape vertex workspace");
+	ctx->vertexRecords = ctx->trackContext->vertexRecords;
 	ctx->trackContext->vertexRecords = ctx->vertexRecords;
 	ctx->trackContext->vertexRecordCount = count;
 	ctx->trackContext->projectState = &ctx->projectState;
@@ -11645,36 +10993,22 @@ static void TrackView_ShapeSortNode(void *context, uint32_t index, uint16_t type
                                     const uint8_t *node) {
 	TrackViewShapeBinding *const binding = context;
 	VehicleViewRenderContext *const ctx = &binding->render;
-	if (type == SLIP_SHAPE_SORT_NODE_CHILD && (ctx->actor != NULL || ctx->trackContext->articSortCallback)) {
+	if (type == SLIP_SHAPE_SORT_NODE_CHILD && ctx->trackContext->articSortCallback) {
 		SlipShape3DPrimitive child = {.primitiveOffset = index,
 		                              .nodeKind = type,
 		                              .firstChildOffset = SlipBytes_ReadLE32(node),
 		                              .secondChildOffset = SlipBytes_ReadLE32(node + SLIP_SHAPE_SORT_CHILD_1_OFFSET)};
 		TrackViewRawBspContext *const track = ctx->trackContext;
-		if (ctx->actor != NULL ? ctx->actor->drawChildrenAfterParent : track->articDrawChildren == 0)
+		if (track->articDrawChildren == 0)
 			return;
 		if ((child.firstChildOffset | child.secondChildOffset) != 0)
 			SlipRuntime_Fatal("ArticShapeDrawSortNode - child problem");
 		const uint32_t clipLevel = track->recordIndex;
-		SlipDraw3DStateRecord *const parentRecord = track->drawStateRecord;
-		SlipDraw3DStateRecord nativeChildRecord = {0};
-		bool nativeRecords = track->drawStateRecords == NULL || track->vertexBufferBase == NULL;
 		if (!TrackView_ApplyLoadedDrawState(track, clipLevel + 1u))
 			SlipRuntime_Fatal("ArticShapeDrawSortNode - clip state unavailable");
-		if (nativeRecords)
-			track->drawStateRecord = &nativeChildRecord;
-		if (track->articSortCallback)
-			(void)TrackView_ArticSortCallback(ctx, &child);
-		else
-			(void)TrackView_VehicleViewDrawSortChild(ctx, index);
+		(void)TrackView_ArticSortCallback(ctx, &child);
 		if (!TrackView_ApplyLoadedDrawState(track, clipLevel))
 			SlipRuntime_Fatal("ArticShapeDrawSortNode - clip state unavailable");
-		if (nativeRecords) {
-			track->drawStateRecord = parentRecord;
-			track->origin = (SlipView3DVec32){parentRecord->origin.x, parentRecord->origin.y, parentRecord->origin.z};
-			track->transform = parentRecord->transform;
-			track->sourcePoint = parentRecord->sourcePoint;
-		}
 		return;
 	}
 	binding->sortCallback(&binding->shape, index, type, classification, node, binding->calls);
@@ -11698,25 +11032,17 @@ static void TrackView_ShapeUnsorted(void *context, uint8_t *shape) {
 
 static void TrackView_ShapeRestoreVertexCursor(void *context) {
 	TrackViewShapeBinding *const binding = context;
-	SlipRendererState *const hostRenderer = binding->render.trackContext->hostRenderer;
-	if (hostRenderer != NULL &&
-	    !TrackView_RestoreVertexBufferCursor(binding->render.trackContext,
+	if (!TrackView_RestoreVertexBufferCursor(binding->render.trackContext,
 	                                         TRACK_VIEW_DIAGNOSTIC_ACTOR_PREVIEW_RESTORE_VERTEX_CURSOR))
 		SlipRuntime_Fatal("Could not restore shape vertex workspace");
 }
 
-static int TrackView_DrawVehicleViewShape(const SlipResourcePayload *residentShape, const char *const *archives,
-                                          size_t archiveCount, const char *shapeName, const SlipView3DMatrix *matrix,
-                                          SlipView3DVec32 translation, SlipView3DVec32 bspOrigin,
-                                          SlipView3DVec32 lightVector, SlipDraw3DProjectState *projectState,
-                                          const VehicleArtActor *actor, int lod,
+static int TrackView_DrawVehicleViewShape(const SlipView3DMatrix *matrix, SlipView3DVec32 translation,
+                                          SlipView3DVec32 bspOrigin, SlipView3DVec32 lightVector,
+                                          SlipDraw3DProjectState *projectState,
                                           const VehicleViewMaterialTable *materials, uint32_t ambientLight,
                                           uint32_t directLight, TrackViewRawBspContext *trackContext) {
-	if (residentShape == NULL && (shapeName == NULL || shapeName[0] == '\0'))
-		return 0;
 	TrackViewShapeBinding binding = {
-	    .resident = residentShape,
-	    .name = shapeName,
 	    .resource = trackContext->hostShapeResource,
 	    .shape = {.viewPosition = translation, .primitive = TrackView_DispatchShapePrimitive},
 	    .render = {.matrix = *matrix,
@@ -11724,14 +11050,10 @@ static int TrackView_DrawVehicleViewShape(const SlipResourcePayload *residentSha
 	               .bspOrigin = bspOrigin,
 	               .lightVector = lightVector,
 	               .projectState = *projectState,
-	               .actor = actor,
-	               .archives = archives,
-	               .archiveCount = archiveCount,
 	               .materials = materials,
 	               .trackContext = trackContext,
 	               .ambientLight = ambientLight,
-	               .directLight = directLight,
-	               .lod = lod}};
+	               .directLight = directLight}};
 	SlipDraw3DVertexRecord *const savedVertices = trackContext->vertexRecords;
 	const size_t savedCount = trackContext->vertexRecordCount;
 	SlipDraw3DProjectState *const savedProjection = trackContext->projectState;
@@ -11750,7 +11072,7 @@ static int TrackView_DrawVehicleViewShape(const SlipResourcePayload *residentSha
 	                             .traverse = TrackView_ShapeTraverse,
 	                             .unsorted = TrackView_ShapeUnsorted,
 	                             .restoreVertexCursor = TrackView_ShapeRestoreVertexCursor};
-	if (actor != NULL || trackContext->articSortCallback) {
+	if (trackContext->articSortCallback) {
 		SlipActorRenderState render = {0};
 		SlipActorPartRecord part = {.hasDrawShape = true,
 		                            .drawShape = binding.resource,
@@ -11765,19 +11087,16 @@ static int TrackView_DrawVehicleViewShape(const SlipResourcePayload *residentSha
 	trackContext->vertexRecords = savedVertices;
 	trackContext->vertexRecordCount = savedCount;
 	trackContext->projectState = savedProjection;
-	if (trackContext->hostRenderer == NULL)
-		free(binding.render.vertexRecords);
 	return binding.render.drawnCount > 0;
 }
 
-static bool TrackView_DrawShape(const SlipResourcePayload *residentShape, TrackViewRawBspContext *context,
-                                const char *shapeName, const SlipView3DMatrix *objectMatrix,
+static bool TrackView_DrawShape(TrackViewRawBspContext *context, bool emptyShape, const SlipView3DMatrix *objectMatrix,
                                 const SlipView3DMatrix *viewMatrix, SlipView3DVec32 viewPosition,
                                 SlipView3DVec32 worldPosition) {
 	SlipDraw3DOriginSetup origin;
 
-	if (context == NULL || (residentShape == NULL && shapeName == NULL) || objectMatrix == NULL || viewMatrix == NULL ||
-	    context->resourceRegistry == NULL || context->projectState == NULL || context->drawStateRecord == NULL) {
+	if (context == NULL || objectMatrix == NULL || viewMatrix == NULL || context->resourceRegistry == NULL ||
+	    context->projectState == NULL || context->drawStateRecord == NULL) {
 		return false;
 	}
 	context->directLight = SlipDraw3D_directLight;
@@ -11792,7 +11111,7 @@ static bool TrackView_DrawShape(const SlipResourcePayload *residentShape, TrackV
 		return false;
 	}
 	context->origin = (SlipView3DVec32){origin.origin.x, origin.origin.y, origin.origin.z};
-	if (residentShape == NULL && shapeName[0] == 0) {
+	if (emptyShape) {
 		return true;
 	}
 
@@ -11802,27 +11121,11 @@ static bool TrackView_DrawShape(const SlipResourcePayload *residentShape, TrackV
 		static uint32_t sceneryMaterialsCount = 0;
 		const VehicleViewMaterialTable *materials = NULL;
 
-		if (context->hostShapeResource == 0) {
-			SlipResourcePayload preparePayload = residentShape != NULL ? *residentShape : (SlipResourcePayload){0};
-
-			if (residentShape != NULL ||
-			    SlipResource_LoadByName(context->resourceRegistry->archives, context->resourceRegistry->archiveCount,
-			                            shapeName, &preparePayload)) {
-				SlipShape3DPrepare prepare;
-
-				(void)SlipShape3D_Prepare(0, preparePayload.data, preparePayload.size, context->materialTable,
-				                          context->materialTableBytes, context->materialGlobal, NULL, 0, NULL, 0,
-				                          &prepare);
-			}
-		}
 		if (sceneryMaterialsSource != context->materialTable ||
 		    (context->materialTableBytes >= SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES &&
 		     sceneryMaterialsCount != SlipBytes_ReadLE32(context->materialTable))) {
 			if (TrackView_VehicleViewMaterialsFromTrackTable(context->materialTable, context->materialTableBytes,
 			                                                 &sceneryMaterials)) {
-				if (!context->resourceRegistry->hostResources)
-					TrackView_VehicleViewMaterialsLoadTextures(&sceneryMaterials, context->resourceRegistry->archives,
-					                                           context->resourceRegistry->archiveCount);
 				sceneryMaterialsSource = context->materialTable;
 				sceneryMaterialsCount = SlipBytes_ReadLE32(context->materialTable);
 			}
@@ -11832,11 +11135,10 @@ static bool TrackView_DrawShape(const SlipResourcePayload *residentShape, TrackV
 		}
 
 		(void)TrackView_DrawVehicleViewShape(
-		    residentShape, context->resourceRegistry->archives, context->resourceRegistry->archiveCount, shapeName,
 		    viewMatrix, viewPosition, (SlipView3DVec32){origin.origin.x, origin.origin.y, origin.origin.z},
 		    (SlipView3DVec32){context->drawStateRecord->lightVector.x, context->drawStateRecord->lightVector.y,
 		                      context->drawStateRecord->lightVector.z},
-		    context->projectState, NULL, 0, materials, context->ambientLight, context->directLight, context);
+		    context->projectState, materials, context->ambientLight, context->directLight, context);
 	}
 	return true;
 }
@@ -11852,9 +11154,9 @@ bool TrackViewDrawSceneryShape(TrackViewRawBspContext *context, const uint8_t *r
 	memcpy(shapeName, record, SLIP_TRK_SHAPE_NAME_BYTES);
 	shapeName[SLIP_TRK_SHAPE_NAME_BYTES] = '\0';
 	const uint16_t savedResource = context->hostShapeResource;
-	if (context->resourceRegistry->hostResources)
-		context->hostShapeResource = SlipBytes_ReadLE16(record + SLIP_TRK_SHAPE_HANDLE_OFFSET);
-	bool result = TrackView_DrawShape(NULL, context, shapeName, objectMatrix, viewMatrix, viewPosition, worldPosition);
+	context->hostShapeResource = SlipBytes_ReadLE16(record + SLIP_TRK_SHAPE_HANDLE_OFFSET);
+	bool result =
+	    TrackView_DrawShape(context, shapeName[0] == '\0', objectMatrix, viewMatrix, viewPosition, worldPosition);
 	context->hostShapeResource = savedResource;
 	return result;
 }
@@ -11896,11 +11198,9 @@ bool TrackView_DrawShapeEffect(TrackViewRawBspContext *context, uint32_t objectR
 		return true;
 	}
 	const uint16_t savedResource = context->hostShapeResource;
-	if (context->resourceRegistry->hostResources)
-		context->hostShapeResource = (uint16_t)shapeHandle.drawData;
+	context->hostShapeResource = (uint16_t)shapeHandle.drawData;
 	bool result = TrackView_DrawShape(
-	    NULL, context, TrackView_ResourceNameFromHandle(context->resourceRegistry, (uint16_t)shapeHandle.drawData),
-	    &objectMatrix, drawMatrix, view,
+	    context, false, &objectMatrix, drawMatrix, view,
 	    (SlipView3DVec32){(int32_t)position.positionX, (int32_t)position.positionY, (int32_t)position.positionZ});
 	context->hostShapeResource = savedResource;
 	return result;
@@ -11931,11 +11231,8 @@ bool TrackView_DrawWeaponProjectile(TrackViewRawBspContext *context, uint32_t ob
 	                                         context->projectState))
 		return true;
 	const uint16_t savedResource = context->hostShapeResource;
-	if (context->resourceRegistry->hostResources)
-		context->hostShapeResource = (uint16_t)shapeHandle.drawData;
-	bool result = TrackView_DrawShape(
-	    NULL, context, TrackView_ResourceNameFromHandle(context->resourceRegistry, (uint16_t)shapeHandle.drawData),
-	    &objectMatrix, drawMatrix, view, world);
+	context->hostShapeResource = (uint16_t)shapeHandle.drawData;
+	bool result = TrackView_DrawShape(context, false, &objectMatrix, drawMatrix, view, world);
 	context->hostShapeResource = savedResource;
 	return result;
 }
@@ -11956,7 +11253,6 @@ bool TrackView_DrawDoor(TrackViewRawBspContext *context, uint32_t object) {
 	    doorOffset / SLIP_TRACK_DOOR_RECORD_BYTES >= SLIP_TRACK_DOOR_CAPACITY)
 		return false;
 	const SlipTrackDoorRecord *const door = &SlipTrackWorld_doors[doorOffset / SLIP_TRACK_DOOR_RECORD_BYTES];
-	SlipResourcePayload payload = SlipResourceHost_Payload(door->shapeHandle);
 	clipDirection = (SlipView3DVec16){door->directionX, door->directionY, door->directionZ};
 	if (!SlipObject_Position(context->objectTable, context->objectTableBytes, 0, &cameraPosition) ||
 	    !SlipObject_MatrixCopy(context->objectTable, context->objectTableBytes, 0, &cameraMatrix, &copied))
@@ -11984,9 +11280,7 @@ bool TrackView_DrawDoor(TrackViewRawBspContext *context, uint32_t object) {
 		if (!TrackView_SphereCullCallback(view, radius, &context->frustum)) {
 			const uint16_t previousResource = context->hostShapeResource;
 			context->hostShapeResource = door->shapeHandle;
-			/* Refresh the consumed payload after the original lock query. */
-			payload = SlipResourceHost_Payload(door->shapeHandle);
-			ok = TrackView_DrawShape(&payload, context, NULL, &objectMatrix, drawMatrix, view,
+			ok = TrackView_DrawShape(context, false, &objectMatrix, drawMatrix, view,
 			                         (SlipView3DVec32){(int32_t)position.positionX, (int32_t)position.positionY,
 			                                           (int32_t)position.positionZ});
 			context->hostShapeResource = previousResource;
@@ -12053,92 +11347,6 @@ bool TrackView_SceneryCallback(uint32_t recordAddress, uint16_t resourceHandleIn
 	return result;
 }
 
-static SlipActorRecord *TrackView_PreviewActor(void *context, uint16_t object) {
-	(void)object;
-	return &((VehicleArtActor *)context)->record;
-}
-
-static const SlipView3DMatrix *TrackView_PreviewMatrix(void *context, uint16_t object) {
-	VehicleArtActor *const actor = context;
-	return object == 0 ? &actor->cameraMatrix : &actor->objectMatrix;
-}
-
-static SlipView3DVec32 TrackView_PreviewPosition(void *context, uint16_t object) {
-	VehicleArtActor *const actor = context;
-	return object == 0 ? actor->cameraPosition : actor->position;
-}
-
-static SlipView3DVec32 TrackView_PreviewViewPosition(void *context, uint16_t object) {
-	(void)object;
-	VehicleArtActor *const actor = context;
-	SlipView3DVec32 delta = {(int32_t)((uint32_t)actor->position.x - (uint32_t)actor->cameraPosition.x),
-	                         (int32_t)((uint32_t)actor->position.y - (uint32_t)actor->cameraPosition.y),
-	                         (int32_t)((uint32_t)actor->position.z - (uint32_t)actor->cameraPosition.z)};
-	return SlipView3D_TransformPositionByRows(&actor->cameraMatrix, delta);
-}
-
-static uint32_t TrackView_PreviewReciprocal(void *context) {
-	return ((VehicleArtActor *)context)->projection->inverseProjectionScale;
-}
-
-static void TrackView_PreviewDrawPart(void *context, SlipActorPartRecord *part) {
-	VehicleArtActor *const actor = context;
-	if (!part->hasDrawShape)
-		return;
-	VehicleArtSlot *const slot = &actor->slots[part - actor->parts];
-	SlipView3DVec32 delta = {
-	    (int32_t)((uint32_t)actor->cameraPosition.x - (uint32_t)actor->position.x - (uint32_t)part->worldPosition.x),
-	    (int32_t)((uint32_t)actor->cameraPosition.y - (uint32_t)actor->position.y - (uint32_t)part->worldPosition.y),
-	    (int32_t)((uint32_t)actor->cameraPosition.z - (uint32_t)actor->position.z - (uint32_t)part->worldPosition.z)};
-	SlipView3DVec32 origin = SlipView3D_TransformPositionByRows(&part->worldMatrix, delta);
-	SlipView3DVec32 light = SlipView3D_TransformVector(&part->worldMatrix, actor->light);
-	actor->drawn += TrackView_DrawVehicleViewShape(
-	    NULL, actor->archives, actor->archiveCount, slot->bodyShapes[actor->render.shapeLodIndex], &part->drawMatrix,
-	    part->drawPosition, origin, light, actor->projection, actor, (int)actor->render.shapeLodIndex, actor->materials,
-	    actor->trackContext->ambientLight, actor->trackContext->directLight, actor->trackContext);
-}
-
-static void TrackView_BindPreviewActor(VehicleArtActor *actor) {
-	actor->record.ownerObject = 1; /* Native identity of the preview object; zero is the camera. */
-	actor->record.childrenInSortTree = !actor->drawChildrenAfterParent;
-	actor->record.partCount = (uint32_t)actor->slotCount;
-	for (size_t lod = 0; lod < VEHICLE_ART_SHAPE_LOD_COUNT; ++lod)
-		actor->record.lodDistances[lod] = (uint32_t)actor->lodRanges[lod];
-	for (size_t index = 0; index < actor->slotCount; ++index) {
-		VehicleArtSlot *const slot = &actor->slots[index];
-		SlipActorPartRecord *const part = &actor->parts[index];
-		actor->record.parts[index] = part;
-		part->tag = slot->nameTag;
-		part->localPosition = (SlipView3DVec32){slot->localX, slot->localY, slot->localZ};
-		part->angle = (uint16_t)slot->animationAngle;
-		part->rotationCallbackOffset = slot->rotationCallbackOffset;
-		for (size_t lod = 0; lod < VEHICLE_ART_SHAPE_LOD_COUNT; ++lod)
-			part->shapes[lod] =
-			    slot->bodyShapes[lod][0] != 0 ? (uint16_t)(index * VEHICLE_ART_SHAPE_LOD_COUNT + lod + 1) : 0;
-		if (slot->firstChild != NULL) {
-			part->firstChild = &actor->parts[slot->firstChild - actor->slots];
-			SlipActorPartRecord *previous = NULL;
-			for (VehicleArtSlot *child = slot->firstChild; child != NULL; child = child->nextSibling) {
-				SlipActorPartRecord *const native = &actor->parts[child - actor->slots];
-				native->parent = part;
-				native->previousSibling = previous;
-				if (previous != NULL)
-					previous->nextSibling = native;
-				previous = native;
-			}
-			previous->nextSibling = part->firstChild;
-			part->firstChild->previousSibling = previous;
-		}
-	}
-	actor->record.parts[0] = &actor->parts[actor->root - actor->slots];
-	actor->calls = (SlipActorRenderCalls){.transform = {.access = {actor, TrackView_PreviewActor},
-	                                                    .getObjectPosition = TrackView_PreviewPosition,
-	                                                    .getObjectMatrix = TrackView_PreviewMatrix},
-	                                      .viewPosition = TrackView_PreviewViewPosition,
-	                                      .projectionReciprocal = TrackView_PreviewReciprocal,
-	                                      .drawPart = TrackView_PreviewDrawPart};
-}
-
 static uint8_t *TrackView_ArticPointer(TrackViewRawBspContext *context, uint32_t partAddress, size_t requiredBytes) {
 	uint32_t offset;
 
@@ -12162,18 +11370,6 @@ static void TrackView_ArticWriteMatrix(uint8_t *destination, const SlipView3DMat
 	for (size_t i = 0; i < sizeof(matrix->m) / sizeof(matrix->m[0]); ++i) {
 		TrackView_WriteLE16(destination + i * sizeof(matrix->m[0]), (uint16_t)matrix->m[i]);
 	}
-}
-
-static const char *TrackView_ResourceNameFromHandle(const TrackViewResourceHandleRegistry *registry, uint16_t handle) {
-	if (registry == NULL || handle == 0) {
-		return NULL;
-	}
-	for (size_t i = 0; i < registry->entryCount; ++i) {
-		if ((uint16_t)registry->entries[i].resourceHandle == handle) {
-			return registry->entries[i].name;
-		}
-	}
-	return NULL;
 }
 
 static uint32_t TrackView_ProjectionReciprocal(const TrackViewRawBspContext *context) {
@@ -12273,7 +11469,6 @@ static bool TrackView_ArticPrepare(TrackViewRawBspContext *context, uint8_t *par
 
 static bool TrackView_ArticDrawOne(TrackViewRawBspContext *context, uint8_t *part) {
 	uint32_t shapeHandle;
-	const char *shapeName;
 	SlipView3DMatrix localMatrix;
 	SlipView3DMatrix drawMatrix;
 	SlipView3DVec32 drawPosition;
@@ -12292,9 +11487,7 @@ static bool TrackView_ArticDrawOne(TrackViewRawBspContext *context, uint8_t *par
 	if (shapeHandle == UINT32_MAX) {
 		return true;
 	}
-	shapeName = TrackView_ResourceNameFromHandle(context->resourceRegistry, (uint16_t)shapeHandle);
-	if (shapeName == NULL ||
-	    !SlipObject_Position(context->objectTable, context->objectTableBytes, 0, &cameraPosition)) {
+	if (!SlipObject_Position(context->objectTable, context->objectTableBytes, 0, &cameraPosition)) {
 		return false;
 	}
 	TrackView_ArticReadMatrix(part + offsetof(SlipArticPartRecord, worldMatrix), &localMatrix);
@@ -12322,12 +11515,9 @@ static bool TrackView_ArticDrawOne(TrackViewRawBspContext *context, uint8_t *par
 	savedSortCallback = context->articSortCallback;
 	context->articSortCallback = true;
 	const uint16_t savedResource = context->hostShapeResource;
-	if (context->resourceRegistry->hostResources)
-		context->hostShapeResource = (uint16_t)shapeHandle;
-	(void)TrackView_DrawVehicleViewShape(NULL, context->resourceRegistry->archives,
-	                                     context->resourceRegistry->archiveCount, shapeName, &drawMatrix, drawPosition,
-	                                     origin, light, context->projectState, NULL, (int)context->articSelectedLod,
-	                                     NULL, context->ambientLight, context->directLight, context);
+	context->hostShapeResource = (uint16_t)shapeHandle;
+	(void)TrackView_DrawVehicleViewShape(&drawMatrix, drawPosition, origin, light, context->projectState, NULL,
+	                                     context->ambientLight, context->directLight, context);
 	context->hostShapeResource = savedResource;
 	context->articSortCallback = savedSortCallback;
 	return !context->failed;
@@ -12618,10 +11808,8 @@ static bool TrackView_ShadowPolygon(TrackViewRawBspContext *context, VehicleView
 	           SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT, &raster) != 0;
 }
 
-static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t resource, const char *name,
-                                  const SlipView3DMatrix *matrix, SlipView3DVec32 translation, SlipView3DVec32 origin,
-                                  SlipView3DVec32 light) {
-
+static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t resource, const SlipView3DMatrix *matrix,
+                                  SlipView3DVec32 translation, SlipView3DVec32 origin, SlipView3DVec32 light) {
 	context->drawStateRecord->matrix = *matrix;
 	context->drawStateRecord->origin = (SlipDraw3DVec32){origin.x, origin.y, origin.z};
 	context->drawStateRecord->lightVector = (SlipDraw3DVec32){light.x, light.y, light.z};
@@ -12629,13 +11817,8 @@ static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t reso
 	SlipResourcePayload payload = {0};
 	SlipShape3D shape;
 	uint16_t vertexCount;
-	bool hostResource = context->resourceRegistry->hostResources;
-	if (hostResource) {
-		(void)SlipResourceHost_Lock(NULL, resource);
-		payload = SlipResourceHost_Payload(resource);
-	} else if (!SlipResource_LoadByName(context->resourceRegistry->archives, context->resourceRegistry->archiveCount,
-	                                    name, &payload))
-		return false;
+	(void)SlipResourceHost_Lock(NULL, resource);
+	payload = SlipResourceHost_Payload(resource);
 	if (!SlipShape3D_FromPayload(payload.data, payload.size, &shape) || shape.version != SLIP_SHAPE_VERSION ||
 	    !SlipShape3D_GetVertexCount(&shape, &vertexCount))
 		return false;
@@ -12648,28 +11831,16 @@ static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t reso
 	if (!TrackView_ShadowBounds(context, &shape, &view, &rejected))
 		return false;
 	if (rejected) {
-		if (hostResource)
-			SlipResourceHost_Unlock(NULL, resource);
+		SlipResourceHost_Unlock(NULL, resource);
 		return true;
 	}
 	view.projectState.renderFlags = shape.scaleShift == 0 ? 0 : SLIP_SHAPE_SHORT_COORDINATES;
 	view.vertexRecordCount = vertexCount;
-	bool ok;
-	if (context->hostRenderer != NULL) {
-		ok = TrackView_BuildVertexRecords(context, TRACK_VIEW_DIAGNOSTIC_PREVIEW_BUILD_VERTEX_RECORDS,
-		                                  shape.data + shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
-		                                  shape.size - shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES, vertexCount,
-		                                  SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL);
-		view.vertexRecords = context->vertexRecords;
-	} else {
-		view.vertexRecords = malloc((size_t)vertexCount * sizeof(*view.vertexRecords));
-		if (view.vertexRecords == NULL)
-			return false;
-		ok = SlipDraw3D_BuildVertexRecords(view.vertexRecords, vertexCount,
-		                                   shape.data + shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
-		                                   shape.size - shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES, vertexCount,
-		                                   SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL, 0, 0, NULL) != 0;
-	}
+	bool ok = TrackView_BuildVertexRecords(context, TRACK_VIEW_DIAGNOSTIC_PREVIEW_BUILD_VERTEX_RECORDS,
+	                                       shape.data + shape.vertexOffset + SLIP_SHAPE_TABLE_COUNT_BYTES,
+	                                       shape.size - shape.vertexOffset - SLIP_SHAPE_TABLE_COUNT_BYTES, vertexCount,
+	                                       SLIP_SHAPE_VERTEX_BYTES, NULL, NULL, NULL);
+	view.vertexRecords = context->vertexRecords;
 	if (ok && shape.primitiveOffset != 0) {
 		if ((shape.primitiveOffset > shape.size || shape.size - shape.primitiveOffset < SLIP_SHAPE_TABLE_COUNT_BYTES)) {
 			ok = false;
@@ -12687,14 +11858,9 @@ static bool TrackView_ShadowShape(TrackViewRawBspContext *context, uint16_t reso
 		}
 	}
 
-	if (hostResource)
-		SlipResourceHost_Unlock(NULL, resource);
-	if (context->hostRenderer != NULL)
-		ok =
-		    TrackView_RestoreVertexBufferCursor(context, TRACK_VIEW_DIAGNOSTIC_VEHICLE_PREVIEW_RESTORE_VERTEX_CURSOR) &&
-		    ok;
-	else
-		free(view.vertexRecords);
+	SlipResourceHost_Unlock(NULL, resource);
+	ok =
+	    TrackView_RestoreVertexBufferCursor(context, TRACK_VIEW_DIAGNOSTIC_VEHICLE_PREVIEW_RESTORE_VERTEX_CURSOR) && ok;
 	return ok;
 }
 
@@ -12717,7 +11883,6 @@ bool TrackView_ExecuteArticDrawCallback(TrackViewRawBspContext *context, uint32_
 	uint8_t *rootPart;
 	uint16_t shapeHandle;
 	bool shapeCarry;
-	const char *shapeName;
 	SlipView3DVec32 cameraDelta;
 	SlipView3DVec32 origin;
 	SlipView3DVec32 light;
@@ -12764,9 +11929,7 @@ bool TrackView_ExecuteArticDrawCallback(TrackViewRawBspContext *context, uint32_
 	if (shapeCarry) {
 		return true;
 	}
-	shapeName = TrackView_ResourceNameFromHandle(context->resourceRegistry, shapeHandle);
-	if (shapeName == NULL ||
-	    !SlipObject_Position(context->objectTable, context->objectTableBytes, objectOffset, &actorPosition) ||
+	if (!SlipObject_Position(context->objectTable, context->objectTableBytes, objectOffset, &actorPosition) ||
 	    !SlipObject_Position(context->objectTable, context->objectTableBytes, 0, &cameraPosition)) {
 		return false;
 	}
@@ -12778,7 +11941,7 @@ bool TrackView_ExecuteArticDrawCallback(TrackViewRawBspContext *context, uint32_
 	light = TrackView_DrawStateLightVector(context);
 	if (context->directLight != 0)
 		light = SlipView3D_TransformVector(&objectMatrix, context->lightInput);
-	return TrackView_ShadowShape(context, shapeHandle, shapeName, &drawMatrix, originalPosition, origin, light);
+	return TrackView_ShadowShape(context, shapeHandle, &drawMatrix, originalPosition, origin, light);
 }
 
 bool TrackView_ExecuteSlotDrawCallback(TrackViewRawBspContext *context, uint32_t objectRecord) {
@@ -12827,207 +11990,6 @@ static int TrackView_ArticSortCallback(VehicleViewRenderContext *ctx, const Slip
 	return TrackView_ArticDrawOne(context, part) ? 1 : 0;
 }
 
-static int TrackView_VehicleViewDrawSortChild(VehicleViewRenderContext *ctx, uint32_t childIndex) {
-	if (ctx == NULL || ctx->actor == NULL || ctx->actor->drawChildrenAfterParent ||
-	    childIndex >= ctx->actor->slotCount) {
-		return 1;
-	}
-
-	VehicleArtActor *const actor = (VehicleArtActor *)ctx->actor;
-	TrackView_PreviewDrawPart(actor, &actor->parts[childIndex]);
-	return 1;
-}
-
-bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DMatrix *actorObjectMatrix,
-                                    uint16_t frameStep) {
-	SlipShape3D_Initialize();
-	char secondaryPath[SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES];
-	const char *archives[2];
-	size_t archiveCount;
-	SlipResourcePayload artPayload = {0};
-	SlipResourcePayload materialPayload = {0};
-	SlipView3DMaths maths = {0};
-	VehicleArtActor actor;
-	VehicleViewMaterialTable materials = {0};
-	const VehicleViewMaterialTable *materialTable = NULL;
-	SlipDraw3DMaterialFrameSlots materialFrameSlots;
-	TrackViewResourceHandleRegistry resourceRegistry;
-	SlipDraw3DRecordPool drawRecordPool;
-	SlipDraw3DRecordPoolInit drawRecordPoolInit;
-	TrackViewRawBspContext trackContext;
-	SlipDraw3DStateRecord drawStateRecord;
-	SlipDraw3DRefreshMode0Projection refresh;
-	SlipView3DMatrix staticActorObjectMatrix;
-	SlipView3DMatrix cameraMatrix;
-	SlipDraw3DProjectState projectState;
-	SlipView3DVec32 actorPosition = {SLIP_VIEWER_OBJECT_X, SLIP_VIEWER_OBJECT_Y, SLIP_VIEWER_OBJECT_Z};
-	SlipView3DVec32 cameraPosition;
-	SlipView3DVec32 cameraOffset;
-	char artName[SLIP_VEHICLE_PREVIEW_RESOURCE_NAME_BYTES];
-	char materialName[SLIP_VEHICLE_PREVIEW_RESOURCE_NAME_BYTES];
-	const int16_t angle = 0;
-	bool ok = false;
-
-	if (driver < 0 || driver >= kDriverCount) {
-		return false;
-	}
-	archiveCount = SlipMenu_BuildArchiveList(resPath, secondaryPath, archives);
-	if (archiveCount == 0 || !TrackView_LoadMaths(&maths, archives, archiveCount)) {
-		return false;
-	}
-
-	SlipMenu_MakeDriverSpriteName(artName, sizeof(artName), "RACER", driver, ".ART");
-	if (!SlipResource_LoadByName(archives, archiveCount, artName, &artPayload)) {
-		return false;
-	}
-	if (!TrackView_VehicleArtActorFromPayload(&artPayload, &actor)) {
-		return false;
-	}
-	SlipMenu_MakeDriverSpriteName(materialName, sizeof(materialName), "VIEW", driver, ".MAT");
-	if (SlipResource_LoadByName(archives, archiveCount, materialName, &materialPayload) &&
-	    TrackView_VehicleViewMaterialsFromPayload(&materialPayload, &materials)) {
-		memset(&resourceRegistry, 0, sizeof(resourceRegistry));
-		resourceRegistry.archives = archives;
-		resourceRegistry.archiveCount = archiveCount;
-		if (!SlipDraw3D_LoadMaterialFrameSlots(materials.expandedTable, materials.expandedTableBytes,
-		                                       TrackView_LoadNamedResource, &resourceRegistry, &materialFrameSlots)) {
-			TrackView_VehicleViewMaterialsFreeTextures(&materials);
-			return false;
-		}
-		TrackView_VehicleViewMaterialsLoadTextures(&materials, archives, archiveCount);
-		materialTable = &materials;
-	}
-	if (actorObjectMatrix == NULL) {
-		staticActorObjectMatrix = TrackView_VehicleViewIdentityMatrix();
-		actorObjectMatrix = &staticActorObjectMatrix;
-	}
-	TrackView_VehicleViewUpdateArtAnimations(&actor, frameStep);
-	TrackView_VehicleViewActorCallback(actorObjectMatrix, &maths, frameStep);
-	SlipDraw3D_InitDefaultProjectState(&projectState);
-
-	SlipView3D_BuildYawMatrix(&maths, angle, &cameraMatrix);
-	SlipView3D_ApplyPitchMatrix(&maths, g_vehicleViewParams[driver].pitchAngle, &cameraMatrix);
-	SlipView3D_OrthonormalizeForwardBasis(&cameraMatrix);
-	cameraOffset = SlipView3D_TransformPositionByColumns(
-	    &cameraMatrix, (SlipView3DVec32){0, 0, -(int32_t)g_vehicleViewParams[driver].distanceLowWord});
-	cameraPosition.x = actorPosition.x + cameraOffset.x;
-	cameraPosition.y = actorPosition.y + cameraOffset.y;
-	cameraPosition.z = actorPosition.z + cameraOffset.z;
-
-	SlipDraw3D_SetViewport(&projectState, SLIP_VEHICLE_PREVIEW_VIEWPORT_LEFT, SLIP_VEHICLE_PREVIEW_VIEWPORT_TOP,
-	                       SLIP_VEHICLE_PREVIEW_VIEWPORT_RIGHT, SLIP_VEHICLE_PREVIEW_VIEWPORT_BOTTOM,
-	                       SLIP_VEHICLE_PREVIEW_VIEWPORT_CENTER_X,
-	                       SLIP_VEHICLE_PREVIEW_VIEWPORT_CENTER_Y + g_vehicleViewParams[driver].centerYOffset);
-	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh) ||
-	    !SlipDraw3D_InitRecordPool(&drawRecordPool, &drawRecordPoolInit)) {
-		if (materialTable != NULL) {
-			TrackView_VehicleViewMaterialsFreeTextures(&materials);
-		}
-		return false;
-	}
-	memset(&drawStateRecord, 0, sizeof(drawStateRecord));
-	memset(&trackContext, 0, sizeof(trackContext));
-	trackContext.materialTable = materials.expandedTable;
-	trackContext.materialTableBytes = materials.expandedTableBytes;
-	trackContext.materialGlobal = materials.materialResourceHandle;
-	trackContext.drawRecordPool = &drawRecordPool;
-	trackContext.projectState = &projectState;
-	trackContext.drawStateRecord = &drawStateRecord;
-	trackContext.resourceRegistry = &resourceRegistry;
-	trackContext.frustum = (SlipTrackWorldProjectFrustum){
-	    refresh.maxXStep,        refresh.minXStep,       refresh.minYStep,           refresh.maxYStep,
-	    refresh.minXPlaneDepthQ, refresh.minXPlaneNegXQ, refresh.maxXPlaneNegDepthQ, refresh.maxXPlaneXQ,
-	    refresh.maxYPlaneDepthQ, refresh.maxYPlaneYQ,    refresh.minYPlaneNegDepthQ, refresh.minYPlaneNegYQ,
-	    projectState.minZ,       projectState.maxZ};
-	trackContext.rendererFlags = projectState.renderFlags;
-	trackContext.ambientLight = TrackView_VehicleViewNormalizedLightAmbient();
-	trackContext.directLight = TrackView_VehicleViewNormalizedLightDirect();
-	trackContext.lightInput =
-	    (SlipView3DVec32){SLIP_VEHICLE_PREVIEW_LIGHT_DIAGONAL_Q14, SLIP_VEHICLE_PREVIEW_LIGHT_DIAGONAL_Q14, 0};
-
-	Raster_SetClipRect(SLIP_VEHICLE_PREVIEW_VIEWPORT_LEFT, SLIP_VEHICLE_PREVIEW_VIEWPORT_TOP,
-	                   SLIP_VEHICLE_PREVIEW_VIEWPORT_RIGHT, SLIP_VEHICLE_PREVIEW_VIEWPORT_BOTTOM);
-	if (actor.slotCount > SLIP_VEHICLE_PREVIEW_ORIGINAL_PART_CAPACITY)
-		SlipRuntime_Fatal("ART exceeds the original sixteen-part actor table");
-	actor.objectMatrix = *actorObjectMatrix;
-	actor.cameraMatrix = cameraMatrix;
-	actor.position = actorPosition;
-	actor.cameraPosition = cameraPosition;
-	actor.light = trackContext.lightInput;
-	actor.archives = archives;
-	actor.archiveCount = archiveCount;
-	actor.projection = &projectState;
-	actor.materials = materialTable;
-	actor.trackContext = &trackContext;
-	TrackView_BindPreviewActor(&actor);
-	SlipActorPool pool = {0};
-	SlipActor_Draw(&actor.render, &pool, actor.record.ownerObject, &maths, &actor.calls);
-	ok = actor.drawn > 0;
-	Raster_SetClipRect(0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
-
-	if (materialTable != NULL) {
-		TrackView_VehicleViewMaterialsFreeTextures(&materials);
-	}
-	return ok;
-}
-
-static bool TrackView_MaterialPayloadExpandedBytes(const SlipResourcePayload *payload, size_t *expandedBytes) {
-	uint16_t count;
-
-	if (payload == NULL || payload->data == NULL || expandedBytes == NULL || payload->size < SLIP_MAT_HEADER_BYTES ||
-	    SlipBytes_ReadLE16(payload->data + SLIP_MAT_VERSION_OFFSET) != SLIP_MAT_VERSION) {
-		return false;
-	}
-	count = SlipBytes_ReadLE16(payload->data);
-	if ((size_t)count > (payload->size - SLIP_MAT_HEADER_BYTES) / SLIP_DRAW3D_RAW_MATERIAL_RECORD_SIZE) {
-		return false;
-	}
-	*expandedBytes =
-	    SLIP_DRAW3D_MATERIAL_TABLE_HEADER_BYTES + (size_t)count * SLIP_DRAW3D_EXPANDED_MATERIAL_RECORD_SIZE;
-	return true;
-}
-
-static bool TrackView_BuildGlobeMaterialTable(const char *const *archives, size_t archiveCount,
-                                              const char *materialName, uint8_t **materialTable,
-                                              size_t *materialTableBytes, uint16_t *materialGlobal,
-                                              SlipDraw3DMaterialInstall *install,
-                                              SlipDraw3DMaterialFrameSlots *frameSlots,
-                                              TrackViewResourceHandleRegistry *resourceRegistry) {
-	SlipResourcePayload materialPayload = {0};
-	size_t expandedBytes;
-	uint8_t *expandedTable = NULL;
-
-	if (archives == NULL || materialName == NULL || materialTable == NULL || materialTableBytes == NULL ||
-	    materialGlobal == NULL || install == NULL || frameSlots == NULL || resourceRegistry == NULL) {
-		return false;
-	}
-	*materialTable = NULL;
-	*materialTableBytes = 0;
-	*materialGlobal = 0;
-	memset(install, 0, sizeof(*install));
-	memset(frameSlots, 0, sizeof(*frameSlots));
-	memset(resourceRegistry, 0, sizeof(*resourceRegistry));
-	resourceRegistry->archives = archives;
-	resourceRegistry->archiveCount = archiveCount;
-	if (!SlipResource_LoadByName(archives, archiveCount, materialName, &materialPayload) ||
-	    !TrackView_MaterialPayloadExpandedBytes(&materialPayload, &expandedBytes)) {
-		return false;
-	}
-	expandedTable = (uint8_t *)malloc(expandedBytes);
-	if (expandedTable == NULL ||
-	    !SlipDraw3D_SetMaterialsNoExisting(materialPayload.data, materialPayload.size, 0, 1u, expandedTable,
-	                                       expandedBytes, install) ||
-	    !SlipDraw3D_LoadMaterialFrameSlots(expandedTable, expandedBytes, TrackView_LoadNamedResource, resourceRegistry,
-	                                       frameSlots)) {
-		free(expandedTable);
-		return false;
-	}
-	*materialTable = expandedTable;
-	*materialTableBytes = expandedBytes;
-	*materialGlobal = install->storedMaterialGlobal;
-	return true;
-}
-
 bool TrackView_BuildTrackMaterialTable(const char *const *archives, size_t archiveCount, uint8_t resourceIndexMinus,
                                        uint8_t **materialTable, size_t *materialTableBytes, uint16_t *materialGlobal,
                                        TrackViewResourceHandleRegistry *resourceRegistryOut) {
@@ -13054,7 +12016,6 @@ bool TrackView_BuildTrackMaterialTable(const char *const *archives, size_t archi
 	memset(resourceRegistryOut, 0, sizeof(*resourceRegistryOut));
 	resourceRegistryOut->archives = archives;
 	resourceRegistryOut->archiveCount = archiveCount;
-	resourceRegistryOut->hostResources = true;
 	return true;
 }
 
@@ -13071,8 +12032,6 @@ enum {
 	SLIP_GLOBE_FLAG_PASS_DEPTH_THRESHOLD = 5500,
 	SLIP_GLOBE_RADIUS = 2000,
 	SLIP_GLOBE_FLAG_RETRACTION_DISTANCE = 640,
-	SLIP_GLOBE_VIEWPORT_CENTRE_X = 91,
-	SLIP_GLOBE_VIEWPORT_CENTRE_Y = 109,
 	SLIP_GLOBE_AMBIENT_LIGHT_Q14 = 0x1800,
 	SLIP_GLOBE_DIRECT_LIGHT_Q14 = 0x2800
 };
@@ -13117,20 +12076,13 @@ static void TrackView_TrackGlobeUpdateMatrix(const SlipView3DMaths *maths, uint1
 
 bool SlipTrackGlobe_UpdateGivenMatrix(const char *resPath, uint16_t trackResourceHandle, SlipView3DMatrix *matrix,
                                       uint32_t rotationArgument) {
-	char secondaryPath[SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES];
-	const char *archives[2];
-	size_t archiveCount;
-	SlipView3DMaths maths = {0};
-
-	archiveCount = SlipMenu_BuildArchiveList(resPath, secondaryPath, archives);
-	if (archiveCount == 0 || !TrackView_LoadMaths(&maths, archives, archiveCount)) {
-		return false;
-	}
+	(void)resPath;
+	const SlipView3DMaths *const maths = SlipMathsHost_Tables();
 #ifdef SLIP_REPLAY_HARNESS
 	extern void SlipUiCapture_TraceMatrix(const SlipView3DMatrix *matrix, bool after);
 	SlipUiCapture_TraceMatrix(matrix, false);
 #endif
-	TrackView_TrackGlobeUpdateMatrix(&maths, trackResourceHandle, matrix, rotationArgument);
+	TrackView_TrackGlobeUpdateMatrix(maths, trackResourceHandle, matrix, rotationArgument);
 #ifdef SLIP_REPLAY_HARNESS
 	SlipUiCapture_TraceMatrix(matrix, true);
 #endif
@@ -13184,22 +12136,14 @@ static bool TrackView_TrackGlobeShouldDrawFlagPass(const SlipView3DMatrix *matri
 	return secondPass ? depthTest < 0 : depthTest >= 0;
 }
 
-static int TrackView_DrawTrackSelectFlag(const char *const *archives, size_t archiveCount,
-                                         const SlipView3DMatrix *matrix, SlipView3DVec32 flagTranslation,
-                                         SlipView3DVec32 clipPlaneOrigin, SlipView3DVec32 flagBspOrigin,
-                                         SlipDraw3DProjectState *projectState, TrackViewRawBspContext *trackContext,
-                                         uint16_t flagResource) {
-	SlipDraw3DProjectState flagProjectState = *projectState;
-
-	const SlipView3DVec32 flagLight = SlipView3D_TransformVector(matrix, trackContext->lightInput);
-
-	SlipDraw3D_SetAuxiliaryClipPlane(&flagProjectState,
+static void TrackView_DrawTrackSelectFlag(const SlipView3DMatrix *matrix, SlipView3DVec32 flagPosition,
+                                          SlipView3DVec32 clipPlaneOrigin, uint16_t flagResource) {
+	SlipDraw3D_SetAuxiliaryClipPlane(&SlipRendererHost_state.projection,
 	                                 (SlipDraw3DVec32){clipPlaneOrigin.x, clipPlaneOrigin.y, clipPlaneOrigin.z},
 	                                 matrix->m[3], matrix->m[4], matrix->m[5]);
-	trackContext->hostShapeResource = flagResource;
-	return TrackView_DrawVehicleViewShape(NULL, archives, archiveCount, "FLAG.SHP", matrix, flagTranslation,
-	                                      flagBspOrigin, flagLight, &flagProjectState, NULL, 0, NULL,
-	                                      SLIP_GLOBE_AMBIENT_LIGHT_Q14, SLIP_GLOBE_DIRECT_LIGHT_Q14, trackContext);
+	SlipShapeHost_drawCalls.setup(&SlipShapeHost_state, flagPosition, flagPosition);
+	SlipShape_Draw(&SlipShapeHost_state, flagResource, matrix, matrix, &SlipShapeHost_drawCalls);
+	SlipDraw3D_ClearAuxiliaryClipPlane(&SlipRendererHost_state.projection);
 }
 
 static int16_t TrackView_TrackGlobeScaleAxisQ14(uint16_t grow, int16_t axis) {
@@ -13211,140 +12155,33 @@ static int16_t TrackView_TrackGlobeScaleAxisQ14(uint16_t grow, int16_t axis) {
 static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackResourceHandle, uint16_t growAmount,
                                          const SlipView3DMatrix *matrix, uint16_t globeResource,
                                          uint16_t flagResource) {
-	if (globeResource == 0)
-		SlipShape3D_Initialize();
-	char secondaryPath[SLIP_TRACK_RESOURCE_SECONDARY_PATH_BYTES];
-	const char *archives[2];
-	size_t archiveCount;
-	SlipView3DMaths maths = {0};
-	SlipDraw3DProjectState projectState;
-	SlipDraw3DRefreshMode0Projection refresh;
-	SlipDraw3DMaterialInstall materialInstall;
-	SlipDraw3DMaterialFrameSlots materialFrameSlots;
-	TrackViewResourceHandleRegistry resourceRegistry;
-	SlipDraw3DRecordPool localRecordPool;
-	SlipDraw3DRecordPool *drawRecordPool = &localRecordPool;
-	SlipDraw3DRecordPoolInit drawRecordPoolInit;
-	TrackViewRawBspContext trackContext;
-	SlipDraw3DStateRecord drawStateRecord;
-	uint8_t *materialTable = NULL;
-	size_t materialTableBytes = 0;
-	uint16_t materialGlobal = 0;
-	SlipView3DVec32 translation = {0, 0, SLIP_GLOBE_VIEW_DISTANCE};
-	SlipView3DVec32 originDelta = {0, 0, -SLIP_GLOBE_VIEW_DISTANCE};
+	(void)resPath;
+	const SlipView3DMaths *const maths = SlipMathsHost_Tables();
+	const SlipView3DVec32 globePosition = {0, 0, SLIP_GLOBE_VIEW_DISTANCE};
 	SlipView3DVec32 flagSurface;
-	SlipView3DVec32 flagTranslation;
+	SlipView3DVec32 flagPosition;
 	SlipView3DVec32 flagClipPlaneOrigin;
-	SlipView3DVec32 flagOutward;
-	SlipView3DVec32 flagOriginDelta;
-	SlipView3DVec32 flagBspOrigin;
 	SlipView3DMatrix flagMatrix = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
-	SlipView3DVec32 bspOrigin;
-	SlipView3DVec32 lightVector;
 	uint16_t growDisplacement;
-	bool ok = false;
 
-	archiveCount = SlipMenu_BuildArchiveList(resPath, secondaryPath, archives);
-	if (archiveCount == 0 || !TrackView_LoadMaths(&maths, archives, archiveCount))
+	if (trackResourceHandle > kDriverCount)
 		return false;
-	if (globeResource != 0) {
-		materialGlobal = SlipMaterialHost_residency.resource;
-		SlipResourcePayload payload = SlipResourceHost_Payload(materialGlobal);
-		materialTable = payload.data;
-		materialTableBytes = payload.size;
-		TrackView_MaterialBytes(materialTable, SlipMaterialHost_residency.table);
-		memset(&resourceRegistry, 0, sizeof(resourceRegistry));
-		resourceRegistry.hostResources = true;
-		drawRecordPool =
-		    SlipResourceStorage_RecordPool(SlipResource_handles[SlipRendererHost_state.polygonResource].block);
-	} else if (!TrackView_BuildGlobeMaterialTable(archives, archiveCount, "GLOBE.MAT", &materialTable,
-	                                              &materialTableBytes, &materialGlobal, &materialInstall,
-	                                              &materialFrameSlots, &resourceRegistry)) {
-		return false;
-	}
-	if (!SlipDraw3D_InitRecordPool(drawRecordPool, &drawRecordPoolInit)) {
-		if (globeResource == 0)
-			free(materialTable);
-		return false;
-	}
-
-	SlipDraw3D_InitDefaultProjectState(&projectState);
-	if (globeResource != 0) {
-		projectState.minZ = (int32_t)SlipDraw3D_minimumDepth;
-		projectState.maxZ = (int32_t)SlipDraw3D_maximumDepth;
-	}
-	SlipDraw3D_SetViewport(&projectState, 0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1,
-	                       SLIP_GLOBE_VIEWPORT_CENTRE_X, SLIP_GLOBE_VIEWPORT_CENTRE_Y);
-	projectState.renderFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh)) {
-		if (globeResource == 0)
-			free(materialTable);
-		return false;
-	}
-	memset(&drawStateRecord, 0, sizeof(drawStateRecord));
-	memset(&trackContext, 0, sizeof(trackContext));
-	trackContext.materialTable = materialTable;
-	trackContext.materialTableBytes = materialTableBytes;
-	trackContext.materialGlobal = materialGlobal;
-	trackContext.materialFrameIndex = 0;
-	trackContext.drawRecordPool = drawRecordPool;
-	trackContext.projectState = &projectState;
-	trackContext.drawStateRecord = &drawStateRecord;
-	trackContext.resourceRegistry = &resourceRegistry;
-	if (globeResource != 0) {
-		trackContext.hostRenderer = &SlipRendererHost_state;
-		trackContext.hostShapeResource = globeResource;
-		trackContext.drawStateRecords = SlipResourceStorage_DrawStateRecords(
-		    SlipResource_handles[SlipRendererHost_state.stateResource].block, SlipRendererHost_state.stateCount);
-		trackContext.drawStateRecordCount = SlipRendererHost_state.stateCount;
-		trackContext.drawStateRecord = trackContext.drawStateRecords;
-		trackContext.vertexBufferBase = SlipRendererHost_state.vertexBase;
-		trackContext.vertexBufferRecordCapacity = SlipRendererHost_state.vertexCapacity;
-		trackContext.vertexBufferLimit = SlipRendererHost_state.vertexCapacity * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-	}
-
-	trackContext.frustum = (SlipTrackWorldProjectFrustum){
-	    refresh.maxXStep,        refresh.minXStep,       refresh.minYStep,           refresh.maxYStep,
-	    refresh.minXPlaneDepthQ, refresh.minXPlaneNegXQ, refresh.maxXPlaneNegDepthQ, refresh.maxXPlaneXQ,
-	    refresh.maxYPlaneDepthQ, refresh.maxYPlaneYQ,    refresh.minYPlaneNegDepthQ, refresh.minYPlaneNegYQ,
-	    projectState.minZ,       projectState.maxZ};
-	trackContext.rendererFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	trackContext.directLight = SLIP_GLOBE_DIRECT_LIGHT_Q14;
-	trackContext.lightInput = (SlipView3DVec32){0, -SLIP_Q14_ONE, 0};
-	trackContext.ambientLight = SLIP_GLOBE_AMBIENT_LIGHT_Q14;
-
-	bspOrigin = SlipView3D_TransformPositionByRows(matrix, originDelta);
-	lightVector = SlipView3D_TransformVector(matrix, (SlipView3DVec32){0, -SLIP_Q14_ONE, 0});
-
 	if (trackResourceHandle == 0) {
-		trackContext.hostShapeResource = globeResource;
-		ok = TrackView_DrawVehicleViewShape(NULL, archives, archiveCount, "GLOBE.SHP", matrix, translation, bspOrigin,
-		                                    lightVector, &projectState, NULL, 0, NULL, SLIP_GLOBE_AMBIENT_LIGHT_Q14,
-		                                    SLIP_GLOBE_DIRECT_LIGHT_Q14, &trackContext) > 0;
-		if (globeResource == 0)
-			free(materialTable);
-		return ok;
-	}
-
-	if (trackResourceHandle > kDriverCount) {
-		if (globeResource == 0)
-			free(materialTable);
-		return false;
+		SlipShapeHost_drawCalls.setup(&SlipShapeHost_state, globePosition, globePosition);
+		SlipShape_Draw(&SlipShapeHost_state, globeResource, matrix, matrix, &SlipShapeHost_drawCalls);
+		return true;
 	}
 
 	growDisplacement =
 	    (uint16_t)(((uint32_t)(uint16_t)(SLIP_Q14_ONE - growAmount) * SLIP_GLOBE_FLAG_RETRACTION_DISTANCE) >>
 	               SLIP_Q14_FRACTION_BITS);
-	flagSurface = TrackView_TrackGlobeFlagSurfacePoint(&maths, trackResourceHandle);
-
+	flagSurface = TrackView_TrackGlobeFlagSurfacePoint(maths, trackResourceHandle);
 	flagSurface.x = (int16_t)(uint16_t)((flagSurface.x * SLIP_GLOBE_RADIUS) >> SLIP_Q14_FRACTION_BITS);
 	flagSurface.y = (int16_t)(uint16_t)((flagSurface.y * SLIP_GLOBE_RADIUS) >> SLIP_Q14_FRACTION_BITS);
 	flagSurface.z = (int16_t)(uint16_t)((flagSurface.z * SLIP_GLOBE_RADIUS) >> SLIP_Q14_FRACTION_BITS);
-	flagOutward = SlipView3D_TransformPositionByColumns(matrix, flagSurface);
-	flagTranslation = flagOutward;
-	flagTranslation.z += SLIP_GLOBE_VIEW_DISTANCE;
-
-	flagClipPlaneOrigin = flagTranslation;
+	flagPosition = SlipView3D_TransformPositionByColumns(matrix, flagSurface);
+	flagPosition.z = (int32_t)((uint32_t)flagPosition.z + SLIP_GLOBE_VIEW_DISTANCE);
+	flagClipPlaneOrigin = flagPosition;
 
 	{
 		SlipView3DNormalizeLength3D flagNormal;
@@ -13355,48 +12192,28 @@ static bool TrackView_DrawGlobeResources(const char *resPath, uint16_t trackReso
 		(void)SlipView3D_BuildMatrixFromVector(&flagBasis, (int16_t)(uint16_t)flagNormal.unitXQ14,
 		                                       (int16_t)(uint16_t)flagNormal.unitYQ14,
 		                                       (int16_t)(uint16_t)flagNormal.unitZQ14);
-		SlipView3D_ApplyPitchMatrix(&maths, -SLIP_ANGLE_QUARTER_TURN, &flagBasis);
+		SlipView3D_ApplyPitchMatrix(maths, -SLIP_ANGLE_QUARTER_TURN, &flagBasis);
 		SlipView3D_MultiplyMatrix(&flagBasis, matrix, &flagMatrix);
 	}
 
-	flagTranslation.x -= TrackView_TrackGlobeScaleAxisQ14(growDisplacement, flagMatrix.m[3]);
-	flagTranslation.y -= TrackView_TrackGlobeScaleAxisQ14(growDisplacement, flagMatrix.m[4]);
-	flagTranslation.z -= TrackView_TrackGlobeScaleAxisQ14(growDisplacement, flagMatrix.m[5]);
-	flagOriginDelta.x = -flagTranslation.x;
-	flagOriginDelta.y = -flagTranslation.y;
-	flagOriginDelta.z = -flagTranslation.z;
-	flagBspOrigin = SlipView3D_TransformPositionByRows(&flagMatrix, flagOriginDelta);
-	if (TrackView_TrackGlobeShouldDrawFlagPass(matrix, flagSurface, false)) {
-		ok = TrackView_DrawTrackSelectFlag(archives, archiveCount, &flagMatrix, flagTranslation, flagClipPlaneOrigin,
-		                                   flagBspOrigin, &projectState, &trackContext, flagResource) > 0;
-	}
-	trackContext.hostShapeResource = globeResource;
-	ok = TrackView_DrawVehicleViewShape(NULL, archives, archiveCount, "GLOBE.SHP", matrix, translation, bspOrigin,
-	                                    lightVector, &projectState, NULL, 0, NULL, SLIP_GLOBE_AMBIENT_LIGHT_Q14,
-	                                    SLIP_GLOBE_DIRECT_LIGHT_Q14, &trackContext) > 0;
-	if (TrackView_TrackGlobeShouldDrawFlagPass(matrix, flagSurface, true)) {
-		ok = TrackView_DrawTrackSelectFlag(archives, archiveCount, &flagMatrix, flagTranslation, flagClipPlaneOrigin,
-		                                   flagBspOrigin, &projectState, &trackContext, flagResource) > 0 ||
-		     ok;
-	}
-
-	if (globeResource == 0)
-		free(materialTable);
-	return ok;
+	flagPosition.x = (int32_t)((uint32_t)flagPosition.x -
+	                           (uint32_t)TrackView_TrackGlobeScaleAxisQ14(growDisplacement, flagMatrix.m[3]));
+	flagPosition.y = (int32_t)((uint32_t)flagPosition.y -
+	                           (uint32_t)TrackView_TrackGlobeScaleAxisQ14(growDisplacement, flagMatrix.m[4]));
+	flagPosition.z = (int32_t)((uint32_t)flagPosition.z -
+	                           (uint32_t)TrackView_TrackGlobeScaleAxisQ14(growDisplacement, flagMatrix.m[5]));
+	if (TrackView_TrackGlobeShouldDrawFlagPass(matrix, flagSurface, false))
+		TrackView_DrawTrackSelectFlag(&flagMatrix, flagPosition, flagClipPlaneOrigin, flagResource);
+	SlipShapeHost_drawCalls.setup(&SlipShapeHost_state, globePosition, globePosition);
+	SlipShape_Draw(&SlipShapeHost_state, globeResource, matrix, matrix, &SlipShapeHost_drawCalls);
+	if (TrackView_TrackGlobeShouldDrawFlagPass(matrix, flagSurface, true))
+		TrackView_DrawTrackSelectFlag(&flagMatrix, flagPosition, flagClipPlaneOrigin, flagResource);
+	return true;
 }
 
 bool SlipTrackGlobe_DrawGivenResources(const char *resPath, uint16_t track, uint16_t grow,
                                        const SlipView3DMatrix *matrix, uint16_t globe, uint16_t flag) {
 	return TrackView_DrawGlobeResources(resPath, track, grow, matrix, globe, flag);
-}
-
-bool SlipTrackGlobe_DrawGivenMatrix(const char *resPath, uint16_t track, uint16_t grow,
-                                    const SlipView3DMatrix *matrix) {
-	return TrackView_DrawGlobeResources(resPath, track, grow, matrix, 0, 0);
-}
-
-bool SlipTrackGlobe_Draw(const char *resPath, uint16_t track, uint16_t grow) {
-	return SlipTrackGlobe_DrawGivenMatrix(resPath, track, grow, &g_trackSelectGlobeMatrix);
 }
 
 bool SlipTrackGlobe_DrawRetained(const char *resPath, uint16_t track, uint16_t grow, uint16_t globeResource,
@@ -13591,8 +12408,7 @@ void TrackView_MaterialBytes(uint8_t *bytes, const SlipDraw3DMaterialTable *tabl
 	}
 }
 
-static bool TrackView_StartupIntroMaterials(uint8_t **table, size_t *bytes, uint16_t *resource,
-                                            TrackViewResourceHandleRegistry *registry) {
+static bool TrackView_StartupIntroMaterials(void) {
 	uint16_t sourceResource;
 	if (!SlipResourceHost_Load(NULL, "SPDTEST.MAT", &sourceResource))
 		return false;
@@ -13601,13 +12417,6 @@ static bool TrackView_StartupIntroMaterials(uint8_t **table, size_t *bytes, uint
 	SlipMaterial_MakeResident(&SlipMaterialHost_residency, &SlipMaterialHost_residencyCalls);
 	SlipResourceHost_Unlock(NULL, sourceResource);
 	SlipResourceHost_Release(NULL, sourceResource);
-	*resource = SlipMaterialHost_residency.resource;
-	SlipResourcePayload payload = SlipResourceHost_Payload(*resource);
-	*table = payload.data;
-	*bytes = payload.size;
-	TrackView_MaterialBytes(*table, SlipMaterialHost_residency.table);
-	memset(registry, 0, sizeof(*registry));
-	registry->hostResources = true;
 	return true;
 }
 
@@ -13620,19 +12429,9 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	uint16_t logoResource = 0;
 	uint16_t globeResource = 0;
 	uint16_t soundResource = 0;
-	SlipView3DMaths maths = {0};
+	const SlipView3DMaths *const maths = SlipMathsHost_Tables();
 	SlipView3DMatrix globeMatrix = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
-	SlipDraw3DProjectState projectState;
-	SlipDraw3DRefreshMode0Projection refresh;
-	TrackViewResourceHandleRegistry resourceRegistry;
-	SlipDraw3DRecordPool *drawRecordPool;
-	SlipDraw3DRecordPoolInit drawRecordPoolInit;
-	TrackViewRawBspContext trackContext;
-	SlipDraw3DStateRecord *drawStateRecords;
 	SlipStartupIntroTimedValue globeDistanceAnimation = {0};
-	uint8_t *materialTable = NULL;
-	size_t materialTableBytes = 0;
-	uint16_t materialGlobal = 0;
 	const char *credits = phelanCredits ? g_startupIntroPhelanCredits : g_startupIntroCredits;
 	int32_t creditsTime = SLIP_STARTUP_CREDITS_DURATION_MS;
 	uint32_t textureScroll = 0;
@@ -13664,8 +12463,6 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	SlipText_SetStyle(&SlipText_state, SLIP_TEXT_CENTERED, UINT16_MAX, 0, SLIPSTREAM_SCREEN_WIDTH - 1);
 	if (!SlipResourceHost_Load(NULL, "SOFTLOGO.SPR", &logoResource))
 		SlipGame_ResourceFailure();
-	if (!TrackView_LoadMaths(&maths, archives, archiveCount))
-		SlipRuntime_Fatal("Invalid host startup maths view");
 	TrackView_StartupIntroSprite(logoResource, true);
 	SlipRenderer_Initialize(&SlipRendererHost_state, SLIP_STARTUP_VERTEX_CAPACITY, &SlipRendererHost_lifecycleCalls);
 	SlipDraw3D_SetMinimumDepth(SLIP_STARTUP_MINIMUM_DEPTH);
@@ -13675,51 +12472,16 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 	SlipDraw3D_SetLightVector(SLIP_STARTUP_LIGHT_DIAGONAL_Q14, -SLIP_STARTUP_LIGHT_DIAGONAL_Q14,
 	                          SLIP_STARTUP_LIGHT_DIAGONAL_Q14, SLIP_GLOBE_DIRECT_LIGHT_Q14);
 	SlipDraw3D_SetDepthFade(0, 0, 0);
+	SlipRenderer_SetFlags(&SlipRendererHost_state, SLIP_RENDER_ALTERNATE_TEXTURE_RASTER);
+	const SlipView3DMatrix cameraIdentity = {{SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE, 0, 0, 0, SLIP_Q14_ONE}};
+	SlipRenderer_SetCamera(&SlipRendererHost_state, (SlipView3DVec32){0, 0, 0}, &cameraIdentity);
 	SlipShape3D_Initialize();
-	if (!TrackView_StartupIntroMaterials(&materialTable, &materialTableBytes, &materialGlobal, &resourceRegistry) ||
-	    !SlipResourceHost_Load(NULL, "GLOBE.SHP", &globeResource)) {
+	if (!TrackView_StartupIntroMaterials() || !SlipResourceHost_Load(NULL, "GLOBE.SHP", &globeResource)) {
 		SlipGame_ResourceFailure();
 	}
-	drawRecordPool = SlipResourceStorage_RecordPool(SlipResource_handles[SlipRendererHost_state.polygonResource].block);
-	if (!SlipDraw3D_InitRecordPool(drawRecordPool, &drawRecordPoolInit))
-		SlipRuntime_Fatal("Invalid startup polygon workspace");
-	SlipDraw3D_InitDefaultProjectState(&projectState);
-	projectState.minZ = SLIP_STARTUP_MINIMUM_DEPTH;
-	projectState.maxZ = INT32_MAX;
-	SlipDraw3D_SetViewport(&projectState, 0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1,
-	                       SLIP_STARTUP_VIEWPORT_CENTRE_X, SLIP_STARTUP_VIEWPORT_CENTRE_Y);
-	projectState.renderFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	if (!SlipDraw3D_RefreshProjectFrustum(&projectState, 0, &refresh)) {
-		SlipRuntime_Fatal("Invalid host startup projection view");
-	}
-	drawStateRecords = SlipResourceStorage_DrawStateRecords(
-	    SlipResource_handles[SlipRendererHost_state.stateResource].block, SlipRendererHost_state.stateCount);
-	memset(&trackContext, 0, sizeof(trackContext));
-	trackContext.materialTable = materialTable;
-	trackContext.materialTableBytes = materialTableBytes;
-	trackContext.materialGlobal = materialGlobal;
-	trackContext.drawRecordPool = drawRecordPool;
-	trackContext.hostRenderer = &SlipRendererHost_state;
-	trackContext.hostShapeResource = globeResource;
-	trackContext.projectState = &projectState;
-	trackContext.drawStateRecords = drawStateRecords;
-	trackContext.drawStateRecordCount = SlipRendererHost_state.stateCount;
-	trackContext.drawStateRecord = drawStateRecords;
-	trackContext.vertexBufferBase = SlipRendererHost_state.vertexBase;
-	trackContext.vertexBufferRecordCapacity = SlipRendererHost_state.vertexCapacity;
-	trackContext.vertexBufferCursor = 0;
-	trackContext.vertexBufferLimit = SlipRendererHost_state.vertexCapacity * SLIP_DRAW3D_VERTEX_RECORD_SIZE;
-	trackContext.resourceRegistry = &resourceRegistry;
-	trackContext.frustum = (SlipTrackWorldProjectFrustum){
-	    refresh.maxXStep,        refresh.minXStep,       refresh.minYStep,           refresh.maxYStep,
-	    refresh.minXPlaneDepthQ, refresh.minXPlaneNegXQ, refresh.maxXPlaneNegDepthQ, refresh.maxXPlaneXQ,
-	    refresh.maxYPlaneDepthQ, refresh.maxYPlaneYQ,    refresh.minYPlaneNegDepthQ, refresh.minYPlaneNegYQ,
-	    projectState.minZ,       projectState.maxZ};
-	trackContext.rendererFlags = SLIP_RENDER_ALTERNATE_TEXTURE_RASTER;
-	trackContext.directLight = SLIP_GLOBE_DIRECT_LIGHT_Q14;
-	trackContext.lightInput = (SlipView3DVec32){SLIP_STARTUP_LIGHT_DIAGONAL_Q14, -SLIP_STARTUP_LIGHT_DIAGONAL_Q14,
-	                                            SLIP_STARTUP_LIGHT_DIAGONAL_Q14};
-	trackContext.ambientLight = SLIP_GLOBE_AMBIENT_LIGHT_Q14;
+	SlipDraw3D_SetViewport(&SlipRendererHost_state.projection, 0, 0, SLIPSTREAM_SCREEN_WIDTH - 1,
+	                       SLIPSTREAM_SCREEN_HEIGHT - 1, SLIP_STARTUP_VIEWPORT_CENTRE_X,
+	                       SLIP_STARTUP_VIEWPORT_CENTRE_Y);
 	TrackView_StartupIntroStartTimedValue(&globeDistanceAnimation, SLIP_STARTUP_GLOBE_DISTANCE_START,
 	                                      SLIP_STARTUP_GLOBE_DISTANCE_END, SLIP_STARTUP_GLOBE_DISTANCE_TICKS, 0);
 	SlipFrameTimer_Reset();
@@ -13728,14 +12490,8 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 		SlipFrameTimerValues timerValues;
 		uint16_t globeAngle;
 		uint32_t globeDistance;
-		SlipView3DVec32 translation;
-		SlipView3DVec32 bspOrigin;
-		SlipView3DVec32 lightVector;
+		SlipView3DVec32 globePosition;
 
-		host->pollEvents(host->context);
-		if (!TrackView_StartupIntroHostRunning(host)) {
-			break;
-		}
 		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
 		timerValues = SlipFrameTimer_Values();
 		timedValueTicks += timerValues.deltaMilliseconds * startupTimedClockRate;
@@ -13745,8 +12501,8 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 		}
 		globeAngle = (uint16_t)(((uint32_t)SLIP_STARTUP_GLOBE_ROTATION_STEP * (uint16_t)timerValues.stepQ14) >>
 		                        SLIP_Q14_FRACTION_BITS);
-		SlipView3D_ApplyColumn0Column2Rotation(&maths, (int16_t)globeAngle, &globeMatrix);
-		SlipView3D_ApplyPitchMatrix(&maths, (int16_t)globeAngle, &globeMatrix);
+		SlipView3D_ApplyColumn0Column2Rotation(maths, (int16_t)globeAngle, &globeMatrix);
+		SlipView3D_ApplyPitchMatrix(maths, (int16_t)globeAngle, &globeMatrix);
 		SlipView3D_OrthonormalizeForwardBasis(&globeMatrix);
 		TrackView_StartupIntroSprite(logoResource, false);
 		textureScroll += (uint32_t)(((uint64_t)SLIP_STARTUP_TEXTURE_SCROLL_STEP_Q14 * timerValues.stepQ14) >>
@@ -13764,22 +12520,20 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 				break;
 			}
 		}
-		trackContext.textureScrollPhase = textureScroll;
+		Raster_SetTextureRowScroll((uint16_t)textureScroll);
 		globeDistance = (uint32_t)globeDistanceAnimation.fadeValue;
 		if ((int32_t)globeDistance < SLIP_STARTUP_GLOBE_MINIMUM_DISTANCE) {
 			globeDistance = SLIP_STARTUP_GLOBE_MINIMUM_DISTANCE;
 		}
-		translation = (SlipView3DVec32){0, 0, (int32_t)globeDistance};
-		bspOrigin = SlipView3D_TransformPositionByRows(&globeMatrix, (SlipView3DVec32){0, 0, -(int32_t)globeDistance});
-		lightVector = SlipView3D_TransformVector(&globeMatrix, (SlipView3DVec32){SLIP_STARTUP_LIGHT_DIAGONAL_Q14,
-		                                                                         -SLIP_STARTUP_LIGHT_DIAGONAL_Q14,
-		                                                                         SLIP_STARTUP_LIGHT_DIAGONAL_Q14});
-		(void)TrackView_DrawVehicleViewShape(NULL, archives, archiveCount, "GLOBE.SHP", &globeMatrix, translation,
-		                                     bspOrigin, lightVector, &projectState, NULL, 0, NULL,
-		                                     SLIP_GLOBE_AMBIENT_LIGHT_Q14, SLIP_GLOBE_DIRECT_LIGHT_Q14, &trackContext);
+		globePosition = (SlipView3DVec32){0, 0, (int32_t)globeDistance};
+		SlipShapeHost_drawCalls.setup(&SlipShapeHost_state, globePosition, globePosition);
+		SlipShape_Draw(&SlipShapeHost_state, globeResource, &globeMatrix, &globeMatrix, &SlipShapeHost_drawCalls);
 		SlipTextPosition creditsPosition = {0, SLIP_STARTUP_CREDITS_Y};
 		SlipText_Draw(&SlipText_state, credits, NULL, &creditsPosition);
 		host->presentFrame(host->context);
+		host->pollEvents(host->context);
+		if (!TrackView_StartupIntroHostRunning(host))
+			break;
 		if (host->testAndClearInput(host->context, SLIP_INPUT_SCAN_ENTER) ||
 		    host->testAndClearInput(host->context, SLIP_INPUT_MOUSE_LEFT)) {
 			ok = true;
@@ -13787,6 +12541,7 @@ static bool SlipStartupIntro_RunGlobeCredits(const char *resPath, const SlipStar
 		}
 	}
 
+	Raster_SetTextureRowScroll(0);
 	if (logoResource != 0)
 		SlipResourceHost_Release(NULL, logoResource);
 	if (globeResource != 0)
@@ -13829,10 +12584,6 @@ bool SlipStartupIntro_Run(const char *resPath, const SlipStartupIntroHost *host)
 	while (TrackView_StartupIntroHostRunning(host)) {
 		SlipInputCode inputEventCode;
 
-		host->pollEvents(host->context);
-		if (!TrackView_StartupIntroHostRunning(host)) {
-			break;
-		}
 		SlipFrameTimer_Update((uint32_t)SlipSdl_TicksMs());
 		TrackView_StartupIntroSprite(logoResource, false);
 		if (host->inputHeld(host->context, SLIP_INPUT_SCAN_V)) {
@@ -13840,6 +12591,10 @@ bool SlipStartupIntro_Run(const char *resPath, const SlipStartupIntroHost *host)
 			SlipText_Draw(&SlipText_state, "Version ID: 24/04/95@14:36:40/CD", NULL, &versionPosition);
 		}
 		host->presentFrame(host->context);
+		host->pollEvents(host->context);
+		if (!TrackView_StartupIntroHostRunning(host)) {
+			break;
+		}
 		inputEventCode = host->popInput(host->context);
 		if (inputEventCode != SLIP_INPUT_SCAN_NONE) {
 			if (*hiddenSequenceCursor == inputEventCode) {

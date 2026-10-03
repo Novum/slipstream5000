@@ -6,6 +6,7 @@
 #include "material_format.h"
 #include "raster/raster.h"
 #include "renderer_flags.h"
+#include "renderer_host.h"
 #include "shape_format.h"
 
 #include "runtime.h"
@@ -40,10 +41,9 @@ static const uint32_t SLIP_DRAW3D_UPPER_WORD_MASK = UINT32_MAX ^ UINT16_MAX;
 static const uint32_t SLIP_DRAW3D_DWORD_SIGN_BIT = UINT32_C(1) << 31;
 static const uint32_t SLIP_DRAW3D_EVEN_SHIFT_COUNT_MASK = UINT32_MAX & ~1u;
 
-static uint8_t standalonePointBuffer[SLIP_DRAW3D_RECORD_POOL_USABLE_COUNT * sizeof(RasterTexturedPoint)];
-static uint8_t *boundPointBuffer = standalonePointBuffer;
+static uint8_t *boundPointBuffer;
 
-void SlipDraw3D_BindPointBuffer(uint8_t *points) { boundPointBuffer = points != NULL ? points : standalonePointBuffer; }
+void SlipDraw3D_BindPointBuffer(uint8_t *points) { boundPointBuffer = points; }
 
 uint8_t *SlipDraw3D_PointBuffer(void) { return boundPointBuffer; }
 
@@ -92,8 +92,6 @@ uint16_t g_spriteScaleX;
 uint16_t g_spriteScaleY;
 uint16_t g_spriteHalfWidth;
 uint16_t g_spriteHalfHeight;
-uint32_t SlipDraw3D_minimumDepth;
-uint32_t SlipDraw3D_maximumDepth;
 uint32_t SlipDraw3D_fadeStart;
 uint32_t SlipDraw3D_fadeEnd;
 uint32_t SlipDraw3D_fadeRange;
@@ -107,9 +105,17 @@ int32_t SlipDraw3D_lightZ;
 static void SlipDraw3D_RefreshPerspectiveScale(SlipDraw3DProjectState *state);
 static void SlipDraw3D_RefreshProjectionState(SlipDraw3DProjectState *state);
 
-void SlipDraw3D_SetMinimumDepth(uint32_t minimumDepth) { SlipDraw3D_minimumDepth = minimumDepth; }
+void SlipDraw3D_SetMinimumDepth(uint32_t minimumDepth) {
+	SlipRendererHost_state.projection.minZ = (int32_t)minimumDepth;
+}
 
-void SlipDraw3D_SetMaximumDepth(uint32_t maximumDepth) { SlipDraw3D_maximumDepth = maximumDepth; }
+void SlipDraw3D_SetMaximumDepth(uint32_t maximumDepth) {
+	SlipRendererHost_state.projection.maxZ = (int32_t)maximumDepth;
+}
+
+uint32_t SlipDraw3D_GetMinimumDepth(void) { return (uint32_t)SlipRendererHost_state.projection.minZ; }
+
+uint32_t SlipDraw3D_GetMaximumDepth(void) { return (uint32_t)SlipRendererHost_state.projection.maxZ; }
 
 void SlipDraw3D_SetDepthFade(uint32_t fadeStart, uint32_t fadeEnd, uint16_t fadeColour) {
 	SlipDraw3D_fadeStart = fadeStart;
@@ -2475,10 +2481,10 @@ int32_t SlipDraw3D_ClassifyPoints(const SlipDraw3DVec32 *const *points, uint16_t
 		if (points[pointIndex] == NULL) {
 			return -1;
 		}
-		if (points[pointIndex]->z < (int32_t)SlipDraw3D_minimumDepth) {
+		if (points[pointIndex]->z < (int32_t)SlipDraw3D_GetMinimumDepth()) {
 			depthClipMask |= SLIP_BOX_CLIP_NEAR;
 		}
-		if (points[pointIndex]->z > (int32_t)SlipDraw3D_maximumDepth) {
+		if (points[pointIndex]->z > (int32_t)SlipDraw3D_GetMaximumDepth()) {
 			depthClipMask |= SLIP_BOX_CLIP_FAR;
 		}
 		allMasks &= depthClipMask;
@@ -2504,7 +2510,7 @@ int32_t SlipDraw3D_ClassifyPoints(const SlipDraw3DVec32 *const *points, uint16_t
 static uint16_t SlipDraw3D_pointColor;
 
 void SlipDraw3D_DrawPoint(SlipDraw3DVec32 point, uint16_t color, const SlipDraw3DProjectState *state) {
-	if (point.z < (int32_t)SlipDraw3D_minimumDepth || point.z > (int32_t)SlipDraw3D_maximumDepth)
+	if (point.z < (int32_t)SlipDraw3D_GetMinimumDepth() || point.z > (int32_t)SlipDraw3D_GetMaximumDepth())
 		return;
 	SlipDraw3D_pointColor = color;
 	if ((uint16_t)state->projectMask(point, state) != 0)
@@ -2521,8 +2527,8 @@ void SlipDraw3D_DrawPoint(SlipDraw3DVec32 point, uint16_t color, const SlipDraw3
 
 int SlipDraw3D_ProjectVisiblePoint(SlipDraw3DVec32 point, const SlipDraw3DProjectState *state, int32_t *screenX,
                                    int32_t *screenY) {
-	if (state == NULL || screenX == NULL || screenY == NULL || point.z < (int32_t)SlipDraw3D_minimumDepth ||
-	    point.z > (int32_t)SlipDraw3D_maximumDepth) {
+	if (state == NULL || screenX == NULL || screenY == NULL || point.z < (int32_t)SlipDraw3D_GetMinimumDepth() ||
+	    point.z > (int32_t)SlipDraw3D_GetMaximumDepth()) {
 		return 0;
 	}
 
@@ -8419,37 +8425,12 @@ int SlipDraw3D_PolygonColor(const SlipDraw3DMaterialRecord *material, int16_t no
 	return 1;
 }
 
-static uint16_t standaloneSpecularTable[SLIP_Q14_ONE + 1];
-static const uint16_t *boundSpecularTable = standaloneSpecularTable;
+static const uint16_t *boundSpecularTable;
 static uint32_t specularThreshold;
 
 void SlipDraw3D_BindSpecularTable(const uint16_t *table, uint32_t threshold) {
-	boundSpecularTable = table != NULL ? table : standaloneSpecularTable;
+	boundSpecularTable = table;
 	specularThreshold = threshold;
-}
-
-void SlipDraw3D_InstallSpecularTable(void) {
-	boundSpecularTable = standaloneSpecularTable;
-	uint32_t value = 0;
-	uint32_t power;
-	do {
-		power = value;
-		for (unsigned step = 0; step < SLIP_DRAW3D_SPECULAR_SQUARING_STEPS; ++step) {
-			const uint16_t doubled = (uint16_t)(power << 1);
-			power = ((uint32_t)doubled * doubled) >> SLIP_WORD_BITS;
-		}
-		if (power == 0)
-			++value;
-	} while (power == 0);
-	specularThreshold = value;
-	for (; value <= SLIP_Q14_ONE; ++value) {
-		power = value;
-		for (unsigned step = 0; step < SLIP_DRAW3D_SPECULAR_SQUARING_STEPS; ++step) {
-			const uint16_t doubled = (uint16_t)(power << 1);
-			power = ((uint32_t)doubled * doubled) >> SLIP_WORD_BITS;
-		}
-		standaloneSpecularTable[value - specularThreshold] = (uint16_t)power;
-	}
 }
 
 static uint16_t SlipDraw3D_Specular(SlipDraw3DVec32 relative, int16_t normalX, int16_t normalY, int16_t normalZ,

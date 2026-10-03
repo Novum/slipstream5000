@@ -181,7 +181,6 @@ typedef struct SlipView3DDotProductQ14 {
 
 void SlipView3D_FreeMaths(SlipView3DMaths *maths);
 int SlipView3D_InitMathsFromPayload(SlipView3DMaths *maths, const uint8_t *data, size_t size);
-int SlipView3D_LoadMathsFromArchives(SlipView3DMaths *maths, const char *const *resPaths, size_t resPathCount);
 
 int16_t SlipView3D_SinQ14(const SlipView3DMaths *maths, int16_t angle);
 int16_t SlipView3D_CosQ14(const SlipView3DMaths *maths, int16_t angle);

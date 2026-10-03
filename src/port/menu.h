@@ -16,13 +16,12 @@ bool SlipMenu_DebugAcceptChampionship(void);
 bool SlipMenu_DebugAcceptSplitDrivers(void);
 bool SlipMenu_DebugSplitGarage(const char *resPath);
 bool SlipMenu_PollInput(void);
-bool SlipMenu_GarageActive(void);
+bool SlipMenu_PollsOwnInput(void);
 void SlipMenu_PresentFrame(void);
 void SlipMenu_UpdateSystemCursor(void);
 bool SlipMenu_CampaignPresenter(uint16_t track, uint32_t afterPreview);
 
 const char *SlipMenu_FindResPath(int argc, char **argv);
-bool SlipMenu_LoadMainMenuModel(const char *resPath);
 void SlipMenu_Init(const char *resPath, SDL_Window *window, SDL_Renderer *renderer,
                    SlipMenuSdlPresentFrame presentFrame, void *presentFrameContext);
 void SlipMenu_HandleEvent(const char *resPath, SDL_Window *window, SDL_Renderer *renderer, const SDL_Event *event,

@@ -281,7 +281,6 @@ void SlipRaceCollision_SetCallbacks(SlipRaceCollisionSegmentQuery segmentQuery, 
                                     SlipRaceCollisionLineOfSight lineOfSight, SlipRaceCollisionTrackQuery trackQuery,
                                     SlipRaceCollisionPostStep postStep);
 
-void SlipRaceCollision_InitializeVertexPool(void);
 void SlipRaceCollision_InitializeResourceVertices(SlipRaceCollisionVertex *pool);
 
 void SlipRaceCollision_ResetBodyLists(void);
@@ -380,8 +379,6 @@ void SlipRaceCollision_InitializeBodyLists(void);
 void SlipRaceCollision_AdvanceUncollidableObjects(void);
 
 bool SlipRaceCollision_RemoveBody(uint16_t object);
-
-void SlipRaceCollision_Shutdown(void);
 
 uint32_t SlipRaceCollision_RemoveBodyIfFlagged(uint32_t eventCode, uint32_t eventPayload, uint32_t eventValue,
                                                uint32_t eventFlags, uint16_t object, uintptr_t dispatchData,

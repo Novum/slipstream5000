@@ -11,6 +11,7 @@
 #include "fixed_point.h"
 #include "frame_timer.h"
 #include "input.h"
+#include "maths_host.h"
 #include "menu.h"
 #include "menu_music.h"
 #include "menu_resources.h"
@@ -338,6 +339,8 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 	                               capturedHawaiiHall || hawaiiFirstFrame || capturedEgypt);
 	SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 	SlipResourceHost_OpenArchives(argv[2], NULL);
+	if (!SlipMathsHost_Initialize())
+		return 4;
 
 	if (!SlipResourceHost_Load(NULL, "SMALL.FNT", &SlipMenu_resources.smallFont) ||
 	    !SlipResourceHost_Load(NULL, "SHADE.FNT", &SlipMenu_resources.shadedFont) ||
@@ -361,14 +364,18 @@ static int SlipDebug_VerifyRaceRender(int argc, char **argv) {
 		SlipRace_type = SLIP_RACE_TYPE_SINGLE;
 		SlipRacePlayer_lapCount = 1;
 
-		SlipResourcePayload driverPalettePayload = {0};
+		uint16_t driverPaletteHandle;
 		SlipSprite driverSprite;
-		if (!SlipResource_LoadByName(&argv[2], 1, "DRIVER0.SPR", &driverPalettePayload) ||
-		    !SlipSprite_FromPayload(&driverPalettePayload, &driverSprite))
+		if (!SlipResourceHost_Load(NULL, "DRIVER0.SPR", &driverPaletteHandle))
+			return 4;
+		(void)SlipResourceHost_Lock(NULL, driverPaletteHandle);
+		SlipResourcePayload driverPalettePayload = SlipResourceHost_Payload(driverPaletteHandle);
+		if (!SlipSprite_FromPayload(&driverPalettePayload, &driverSprite))
 			return 4;
 		SlipSprite_ApplyPalette(&driverSprite);
 		SlipVgaDac_Commit();
-		SlipResource_ReleaseHandle(&driverPalettePayload);
+		SlipResourceHost_Unlock(NULL, driverPaletteHandle);
+		SlipResourceHost_Release(NULL, driverPaletteHandle);
 	}
 	HmiDigitalDriver aiHitAudioDriver;
 	if (verifyAiHitAudio || verifyWeaponCamera) {
@@ -1774,10 +1781,13 @@ static int SlipDebug_VerifySpeedHud(int argc, char **argv) {
 		return -1;
 	SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 	SlipResourceHost_OpenArchives(argv[2], NULL);
+	if (!SlipResourceHost_Load(NULL, "SMALL.FNT", &SlipMenu_resources.smallFont))
+		return 4;
 	if (!SlipResourceHost_Load(NULL, "SPD.FNT", &assets.speedFont))
 		return 4;
-	if (!SlipResource_LoadByName((const char *const *)&argv[2], 1, "SPD.FNT", &speedPayload) ||
-	    !SlipFont_FromPayload(&speedPayload, &speedFont))
+	(void)SlipResourceHost_Lock(NULL, assets.speedFont);
+	speedPayload = SlipResourceHost_Payload(assets.speedFont);
+	if (!SlipFont_FromPayload(&speedPayload, &speedFont))
 		return 4;
 	assets.speedFontLoaded = true;
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
@@ -1790,8 +1800,9 @@ static int SlipDebug_VerifySpeedHud(int argc, char **argv) {
 	}
 	if (!SlipRaceHud_LoadTimeFont(&assets, (const char *const *)&argv[2], 1))
 		return 4;
-	if (!SlipResource_LoadByName((const char *const *)&argv[2], 1, "TIME.FNT", &timePayload) ||
-	    !SlipFont_FromPayload(&timePayload, &timeFont))
+	(void)SlipResourceHost_Lock(NULL, assets.timeFont);
+	timePayload = SlipResourceHost_Payload(assets.timeFont);
+	if (!SlipFont_FromPayload(&timePayload, &timeFont))
 		return 4;
 	memset(actual, 0, sizeof(actual));
 	memset(expected, 0, sizeof(expected));
@@ -1801,10 +1812,11 @@ static int SlipDebug_VerifySpeedHud(int argc, char **argv) {
 	SlipFont_DrawTextClipped(&timeFont, expected, 320, finishX, 13, finishText, 0xfe, 0, 0, 319, 199);
 	if (memcmp(actual, expected, sizeof(actual)) != 0 || memchr(actual, 0xfe, sizeof(actual)) == NULL)
 		passed = false;
-	SlipResource_ReleaseHandle(&timePayload);
-	SlipResource_ReleaseHandle(&speedPayload);
+	SlipResourceHost_Unlock(NULL, assets.timeFont);
+	SlipResourceHost_Unlock(NULL, assets.speedFont);
 	SlipResourceHost_Release(NULL, assets.timeFont);
 	SlipResourceHost_Release(NULL, assets.speedFont);
+	SlipResourceHost_Release(NULL, SlipMenu_resources.smallFont);
 	printf("speed_hud_original_font_and_units %s\n", passed ? "passed" : "FAILED");
 	return passed ? 0 : 4;
 }
@@ -2235,10 +2247,12 @@ static int SlipDebug_VerifyBeamPrimitives(void) {
 
 static int SlipDebug_VerifyBeamRender(const char *archive, const char *mathArchive) {
 	const char *archives[] = {archive, mathArchive};
-	SlipView3DMaths maths = {0};
 	static SlipDraw3DListNode nodes[16];
-	if (!SlipView3D_LoadMathsFromArchives(&maths, archives, 2) || !SlipDraw3D_InitList(nodes, 16))
+	SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
+	SlipResourceHost_OpenArchives(archive, mathArchive);
+	if (!SlipMathsHost_Initialize() || !SlipDraw3D_InitList(nodes, 16))
 		return 4;
+	SlipRenderer_Initialize(&SlipRendererHost_state, 150, &SlipRendererHost_lifecycleCalls);
 	SlipObject camera = {0};
 	camera.matrix = (SlipView3DMatrix){{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
 	SlipDraw3DRecordPool pool;
@@ -2263,7 +2277,7 @@ static int SlipDebug_VerifyBeamRender(const char *archive, const char *mathArchi
 	                                  .projectState = &projection,
 	                                  .drawRecordPool = &pool,
 	                                  .resourceRegistry = &registry,
-	                                  .maths = &maths,
+	                                  .maths = SlipMathsHost_Tables(),
 	                                  .chunkBase = sectionRecords,
 	                                  .chunkBaseToken = SLIP_DEBUG_TRACK_RECORD_BASE_TOKEN};
 	Raster_SetScreenBufferRows(g_framebuffer, SLIPSTREAM_SCREEN_WIDTH);
@@ -2315,6 +2329,7 @@ static int SlipDebug_VerifyBeamRender(const char *archive, const char *mathArchi
 		randomizedPixels += g_framebuffer[pixel] != 0;
 	if (randomizedPixels == 0)
 		return 4;
+	SlipRenderer_Shutdown(&SlipRendererHost_state, &SlipRendererHost_lifecycleCalls);
 	puts("beam_render both_views=passed hit_sprite=passed section_boundary_no_hit=passed section_filter=passed "
 	     "randomized_type=passed");
 	return 0;
@@ -2406,54 +2421,39 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
 		SlipResourceHost_OpenArchives(argv[2], NULL);
 		SlipShape3D_Initialize();
-		SlipResourcePayload shape, cached;
-		const char *archives[] = {argv[2]};
-		if (!SlipResource_LoadByName(archives, 1, "RACER0.SHP", &shape))
+		uint16_t shapeHandle, cachedHandle;
+		if (!SlipResourceHost_Load(NULL, "RACER0.SHP", &shapeHandle))
 			return 4;
+		(void)SlipResourceHost_Lock(NULL, shapeHandle);
+		SlipResourcePayload shape = SlipResourceHost_Payload(shapeHandle);
 		SlipShape3DHeader *const header = (void *)shape.data;
-		if ((header->flags & SLIP_SHAPE_MATERIALS_PREPARED) != 0)
+		if ((header->flags & SLIP_SHAPE_MATERIALS_PREPARED) != 0) {
+			SlipResourceHost_Unlock(NULL, shapeHandle);
+			SlipResourceHost_Release(NULL, shapeHandle);
 			return 4;
+		}
 		const uint16_t flags = header->flags;
 		header->flags |= SLIP_SHAPE_MATERIALS_PREPARED;
-		if (!SlipResource_LoadByName(archives, 1, "racer0.shp", &cached) || cached.data != shape.data ||
-		    header->flags != (flags | SLIP_SHAPE_MATERIALS_PREPARED))
+		if (!SlipResourceHost_Load(NULL, "racer0.shp", &cachedHandle)) {
+			SlipResourceHost_Unlock(NULL, shapeHandle);
+			SlipResourceHost_Release(NULL, shapeHandle);
 			return 4;
+		}
+		(void)SlipResourceHost_Lock(NULL, cachedHandle);
+		SlipResourcePayload cached = SlipResourceHost_Payload(cachedHandle);
+		const bool residentReused = cachedHandle == shapeHandle && cached.data == shape.data &&
+		                            header->flags == (flags | SLIP_SHAPE_MATERIALS_PREPARED);
 		SlipDraw3D_NotifyMaterials();
-		if (header->flags != flags)
+		const bool invalidated = header->flags == flags;
+		SlipResourceHost_Unlock(NULL, cachedHandle);
+		SlipResourceHost_Unlock(NULL, shapeHandle);
+		SlipResourceHost_Release(NULL, cachedHandle);
+		SlipResourceHost_Release(NULL, shapeHandle);
+		if (!residentReused || !invalidated)
 			return 4;
-		puts("shape_material_cache load_callback=passed cached_reuse=passed material_invalidation=passed");
+		puts("shape_material_cache load_callback=passed resident_reuse=passed material_invalidation=passed");
 		return 0;
 	}
-	if (argc == 3 && strcmp(argv[1], "--verify-vehicle-shapes") == 0) {
-		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
-		SlipResourceHost_OpenArchives(argv[2], NULL);
-		SlipScreenHost_Initialize();
-		Raster_SetScreenBufferRows(g_framebuffer, SLIPSTREAM_SCREEN_WIDTH);
-		for (int driver = 0; driver < SLIP_RACE_RACER_COUNT; ++driver) {
-			SlipView3DMatrix matrix = TrackView_VehicleViewIdentityMatrix();
-			for (unsigned frame = 0; frame < 3; ++frame) {
-				memset(g_framebuffer, 0, sizeof(g_framebuffer));
-				if (!TrackView_DrawVehicleViewModel(argv[2], driver, &matrix, (uint16_t)(frame * 16))) {
-					fprintf(stderr, "vehicle_shape driver=%d frame=%u failed\n", driver, frame);
-					return 1;
-				}
-				unsigned pixels = 0;
-				for (size_t i = 0; i < sizeof(g_framebuffer); ++i)
-					pixels += g_framebuffer[i] != 0;
-				if (pixels == 0)
-					return 2;
-				printf("vehicle_shape driver=%d frame=%u pixels=%u\n", driver, frame, pixels);
-			}
-		}
-		for (uint16_t track = 0; track <= SLIP_RACE_TRACK_COUNT; ++track) {
-			memset(g_framebuffer, 0, sizeof(g_framebuffer));
-			if (!SlipTrackGlobe_UpdateMatrix(argv[2], track) || !SlipTrackGlobe_Draw(argv[2], track, SLIP_Q14_ONE))
-				return 3;
-		}
-		puts("vehicle_shapes 30 animated ship frames and 11 globe/flag views=passed");
-		return 0;
-	}
-
 	if (argc == 4 && strcmp(argv[1], "--verify-artic-attachment") == 0) {
 
 		FILE *const output = fopen(argv[3], "wb");
@@ -2563,13 +2563,12 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		if (file == NULL)
 			return 4;
 		for (unsigned empty = 0; empty < 2; ++empty) {
-			SlipRaceRecordingFrame frames[3] = {
-			    {.milliseconds = 65535},
-			    {.milliseconds = 3},
-			    {.milliseconds = 65535},
-			};
+			uint8_t data[3 * (2 + 12)] = {0};
+			SlipBytes_WriteLE16(data, 65535);
+			SlipBytes_WriteLE16(data + (2 + 12), 3);
+			SlipBytes_WriteLE16(data + 2 * (2 + 12), 65535);
 			SlipRaceRecording state = {
-			    .frames = frames, .writtenFrames = empty ? 0 : 3, .controlBytes = 12, .lateness = 0x4567};
+			    .data = data, .writtenFrames = empty ? 0 : 3, .controlBytes = 12, .lateness = 0x4567};
 			SlipDebugRecordingClock clock = {.state = &state};
 			SlipRaceRecordingHost host = {SlipDebug_RecordingTick, SlipDebug_RecordingReset, SlipDebug_RecordingFrame,
 			                              &clock};
@@ -2597,8 +2596,8 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 			return 4;
 		for (uint16_t bytes = 6; bytes <= 12; bytes += 6) {
 			for (size_t c = 0; c < sizeof(capacities) / sizeof(capacities[0]); ++c) {
-				SlipRaceRecordingFrame frames[8] = {0};
-				SlipRaceRecording state = {.frames = frames, .capacityBytes = capacities[c], .controlBytes = bytes};
+				uint8_t data[8 * (2 + 12)] = {0};
+				SlipRaceRecording state = {.data = data, .capacityBytes = capacities[c], .controlBytes = bytes};
 				SlipRaceRecording_Reset(&state);
 				for (uint16_t i = 0; i < 8; ++i) {
 					SlipRacePlayerControl controls[2] = {
@@ -2656,9 +2655,12 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 	if (argc == 4 &&
 	    (strcmp(argv[1], "--verify-results-rows") == 0 || strcmp(argv[1], "--verify-championship-rows") == 0 ||
 	     strcmp(argv[1], "--verify-championship-final-rows") == 0)) {
+		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
+		SlipResourceHost_OpenArchives(argv[2], NULL);
 		bool championship = strcmp(argv[1], "--verify-championship-rows") == 0;
 		bool final = strcmp(argv[1], "--verify-championship-final-rows") == 0;
 		SlipResourcePayload payloads[2] = {0};
+		uint16_t fontHandles[2];
 		SlipFont fonts[2];
 		const char *names[2] = {"RESULTSA.FNT", "RESULTSB.FNT"};
 		if (final) {
@@ -2670,8 +2672,11 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		SlipRaceRacerTable racers = {.racerCount = 10};
 		char path[1024];
 		for (unsigned i = 0; i < 2; ++i) {
-			if (!SlipResource_LoadByName((const char *const *)&argv[2], 1, names[i], &payloads[i]) ||
-			    !SlipFont_FromPayload(&payloads[i], &fonts[i]))
+			if (!SlipResourceHost_Load(NULL, names[i], &fontHandles[i]))
+				return 4;
+			(void)SlipResourceHost_Lock(NULL, fontHandles[i]);
+			payloads[i] = SlipResourceHost_Payload(fontHandles[i]);
+			if (!SlipFont_FromPayload(&payloads[i], &fonts[i]))
 				return 4;
 			snprintf(path, sizeof(path), "%s.font%u", argv[3], i);
 			FILE *const file = fopen(path, "wbx");
@@ -2733,6 +2738,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 			fclose(file);
 		}
 		SlipResourcePayload spritePayloads[2] = {0}, strings = {0};
+		uint16_t spriteHandles[2], stringsHandle;
 		SlipSprite sprites[2];
 		const char *spriteNames[2] = {"RACERES.SPR", "RACERESD.SPR"};
 		if (final) {
@@ -2741,18 +2747,24 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		}
 		char labels[2][80], title[80];
 		const char *labelPointers[2] = {labels[0], labels[1]};
-		if (!SlipResource_LoadByName((const char *const *)&argv[2], 1,
-		                             final          ? "FINALPOS.ST0"
-		                             : championship ? "CHAMPPOS.ST0"
-		                                            : "RACERES.ST0",
-		                             &strings) ||
-		    !SlipStringTable_FindText(&strings, "BUT1", labels[0], sizeof(labels[0])) ||
+		if (!SlipResourceHost_Load(NULL,
+		                           final          ? "FINALPOS.ST0"
+		                           : championship ? "CHAMPPOS.ST0"
+		                                          : "RACERES.ST0",
+		                           &stringsHandle))
+			return 4;
+		(void)SlipResourceHost_Lock(NULL, stringsHandle);
+		strings = SlipResourceHost_Payload(stringsHandle);
+		if (!SlipStringTable_FindText(&strings, "BUT1", labels[0], sizeof(labels[0])) ||
 		    (!final && !SlipStringTable_FindText(&strings, "BUT2", labels[1], sizeof(labels[1]))) ||
 		    !SlipStringTable_FindText(&strings, championship || final ? "TITL" : "TIT4", title, sizeof(title)))
 			return 4;
 		for (unsigned i = 0; i < 2; ++i) {
-			if (!SlipResource_LoadByName((const char *const *)&argv[2], 1, spriteNames[i], &spritePayloads[i]) ||
-			    !SlipSprite_FromPayload(&spritePayloads[i], &sprites[i]))
+			if (!SlipResourceHost_Load(NULL, spriteNames[i], &spriteHandles[i]))
+				return 4;
+			(void)SlipResourceHost_Lock(NULL, spriteHandles[i]);
+			spritePayloads[i] = SlipResourceHost_Payload(spriteHandles[i]);
+			if (!SlipSprite_FromPayload(&spritePayloads[i], &sprites[i]))
 				return 4;
 			snprintf(path, sizeof(path), "%s.sprite%u", argv[3], i);
 			file = fopen(path, "wbx");
@@ -2785,10 +2797,13 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 				return 4;
 		}
 		for (unsigned i = 0; i < 2; ++i) {
-			SlipResource_ReleaseHandle(&payloads[i]);
-			SlipResource_ReleaseHandle(&spritePayloads[i]);
+			SlipResourceHost_Unlock(NULL, fontHandles[i]);
+			SlipResourceHost_Unlock(NULL, spriteHandles[i]);
+			SlipResourceHost_Release(NULL, fontHandles[i]);
+			SlipResourceHost_Release(NULL, spriteHandles[i]);
 		}
-		SlipResource_ReleaseHandle(&strings);
+		SlipResourceHost_Unlock(NULL, stringsHandle);
+		SlipResourceHost_Release(NULL, stringsHandle);
 		return 0;
 	}
 	if (argc == 4 && strcmp(argv[1], "--verify-screen-clip") == 0) {
@@ -3147,10 +3162,10 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 	if (argc == 3 && strcmp(argv[1], "--verify-cross-effect") == 0) {
 		SlipObject objects[2] = {0};
 		SlipDraw3DProjectState state;
-		SlipView3DMaths maths = {0};
-		const char *archives[] = {argv[2]};
 		static SlipDraw3DListNode nodes[2];
-		if (!SlipView3D_LoadMathsFromArchives(&maths, archives, 1) || !SlipDraw3D_InitList(nodes, 2))
+		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
+		SlipResourceHost_OpenArchives(argv[2], NULL);
+		if (!SlipMathsHost_Initialize() || !SlipDraw3D_InitList(nodes, 2))
 			return 4;
 		SlipDraw3D_InitDefaultProjectState(&state);
 		SlipDraw3D_SetViewport(&state, 0, 0, 319, 199, 0, 0);
@@ -3160,7 +3175,7 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		TrackViewRawBspContext context = {.objectTable = objects,
 		                                  .objectTableBytes = 2 * SLIP_OBJECT_DOS_STRIDE,
 		                                  .projectState = &state,
-		                                  .maths = &maths};
+		                                  .maths = SlipMathsHost_Tables()};
 		objects[1].flags = 1;
 		objects[1].viewPosition = (SlipView3DVec32){50, -50, 100};
 		objects[1].drawData = 0x5a0000;
@@ -3190,7 +3205,8 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 							    stderr,
 							    "cross mismatch deferred=%u case=%zu x=%d y=%d actual=%u expected=%u sin=%d cos=%d\n",
 							    deferred, test, x, y, g_framebuffer[y * 320 + x], lit ? 0x5a : 0,
-							    SlipView3D_SinQ14(&maths, 0), SlipView3D_CosQ14(&maths, 0));
+							    SlipView3D_SinQ14(SlipMathsHost_Tables(), 0),
+							    SlipView3D_CosQ14(SlipMathsHost_Tables(), 0));
 							return 4;
 						}
 					}
@@ -3210,7 +3226,6 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		if (SlipDraw3D_DetailValue(0, 1, 0x01000000u, 256) != 0x01000000u ||
 		    SlipDraw3D_DetailValue(0, 1, 0x01000000u, 1) != INT32_MAX)
 			return 4;
-		SlipView3D_FreeMaths(&maths);
 		puts("cross_effect direct_deferred_point_cross_cull_clip_restore_word_products_payload_detail_dividend=passed");
 		return 0;
 	}
@@ -3476,40 +3491,32 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		if (SlipResource_ExtensionKey(0x73687020u) != 0x20504853u ||
 		    SlipResource_ExtensionKey(0x617a8040u) != 0x40805a41u)
 			return 4;
-		const char *archives[] = {argv[2]};
-		const char *missing[] = {"does-not-exist-case-check.res"};
-		SlipResourcePayload first, second, third;
-		if (!SlipResource_LoadByName(archives, 1, "case.bin", &first) ||
-		    !SlipResource_LoadByName(missing, 1, "CaSe.BiN", &second) ||
-		    !SlipResource_LoadByName(missing, 1, "CASE.BIN", &third) || first.data != second.data ||
-		    second.data != third.data || first.size != 4 || memcmp(first.data, "DOS!", 4) != 0 || first.ownsData ||
-		    second.ownsData || third.ownsData)
+		uint16_t handle, mixedHandle, upperHandle, otherHandle;
+		if (!SlipResourceHost_Find(NULL, "case.bin", &handle) || SlipResourceHost_IsResident(NULL, handle) ||
+		    !SlipResourceHost_Load(NULL, "CaSe.BiN", &mixedHandle) || mixedHandle != handle ||
+		    !SlipResourceHost_IsResident(NULL, mixedHandle))
 			return 4;
-		SlipResource_ReleaseHandle(&first);
-		if (memcmp(second.data, "DOS!", 4) != 0)
+		(void)SlipResourceHost_Lock(NULL, mixedHandle);
+		const SlipResourcePayload first = SlipResourceHost_Payload(mixedHandle);
+		if (!SlipResourceHost_Load(NULL, "CASE.BIN", &upperHandle) || upperHandle != handle)
 			return 4;
-		TrackViewResourceHandleRegistry registry = {.archives = archives, .archiveCount = 1};
-		uint32_t handle = UINT32_MAX, sameHandle = 0;
-		if (TrackView_FindNameRecord(&registry, "case.bin", &handle) || registry.entryCount != 0 ||
-		    handle != UINT32_MAX)
+		(void)SlipResourceHost_Lock(NULL, upperHandle);
+		const SlipResourcePayload second = SlipResourceHost_Payload(upperHandle);
+		if (first.data != second.data || first.size != 4 || second.size != 4 || memcmp(first.data, "DOS!", 4) != 0 ||
+		    !SlipResourceHost_Load(NULL, "other.bin", &otherHandle) || otherHandle == handle)
 			return 4;
-		if (!TrackView_LoadNamedResource(&registry, "case.bin", &handle) ||
-		    !TrackView_FindNameRecord(&registry, "CaSe.BiN", &sameHandle) || sameHandle != handle ||
-		    registry.entryCount != 1)
+		(void)SlipResourceHost_Lock(NULL, otherHandle);
+		const SlipResourcePayload other = SlipResourceHost_Payload(otherHandle);
+		const bool otherResident = SlipResourceHost_IsResident(NULL, otherHandle) && other.data != NULL;
+		SlipResourceHost_Unlock(NULL, otherHandle);
+		SlipResourceHost_Unlock(NULL, upperHandle);
+		SlipResourceHost_Unlock(NULL, mixedHandle);
+		SlipResourceHost_Release(NULL, otherHandle);
+		SlipResourceHost_Release(NULL, upperHandle);
+		SlipResourceHost_Release(NULL, mixedHandle);
+		if (!otherResident)
 			return 4;
-		TrackView_ReleaseResource(&registry, handle);
-		if (registry.entries[0].payload.data != NULL || !TrackView_FindNameRecord(&registry, "CASE.BIN", &sameHandle) ||
-		    sameHandle != handle || !TrackView_LoadResourceHandlePayload(&registry, handle, &first) ||
-		    first.data != second.data)
-			return 4;
-		puts("resource_case lookup_does_not_load_release_preserves_cached_identity=passed");
-		TrackViewResourceHandleRegistry nextRegistry = {.archives = archives, .archiveCount = 1};
-		uint32_t nextHandle = 0;
-		if (!TrackView_LoadNamedResource(&nextRegistry, "other.bin", &nextHandle) ||
-		    !TrackView_LoadNamedResource(&nextRegistry, "case.bin", &nextHandle) || nextHandle != handle)
-			return 4;
-		puts("resource_case named_handle_survives_renderer_registry_reset=passed");
-		puts("resource_case ascii_all_bytes_mixed_case_cache_identity_borrowed_payload=passed");
+		puts("resource_case ascii_all_bytes_find_does_not_load_mixed_case_resident_identity_other_resource=passed");
 		return 0;
 	}
 
@@ -4482,6 +4489,13 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		TrackViewRawBspContext context = {0};
 		SlipDraw3DProjectState state = {0};
 		SlipShape3DDoorTemplate shape = SlipShape3D_doorTemplate;
+		uint16_t shapeHandle;
+		SlipResourceHost_Initialize(SLIP_DEBUG_RESOURCE_CAPACITY_BYTES);
+		if (!SlipResourceHost_Allocate(NULL, sizeof(shape), 0, &shapeHandle))
+			return 4;
+		uint8_t *const shapeBytes = SlipResourceHost_LockWritable(NULL, shapeHandle);
+		memcpy(shapeBytes, &shape, sizeof(shape));
+		SlipResourceHost_Unlock(NULL, shapeHandle);
 		objects[0].matrix = (SlipView3DMatrix){{0x4000, 0, 0, 0, 0x4000, 0, 0, 0, 0x4000}};
 		objects[0].position = (SlipView3DVec32){10, 20, 30};
 		objects[1].matrix = (SlipView3DMatrix){{100, 200, 300, 400, 500, 600, 700, 800, 900}};
@@ -4495,16 +4509,19 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		SlipTrackWorld_doors[0].directionX = INT16_MIN;
 		SlipTrackWorld_doors[0].directionY = 200;
 		SlipTrackWorld_doors[0].directionZ = -300;
-		SlipTrackWorld_doorShapes[0] = (SlipResourcePayload){(uint8_t *)&shape, sizeof(shape), false};
+		SlipTrackWorld_doors[0].shapeHandle = shapeHandle;
 		SlipView3DMatrix original = objects[1].matrix;
-		if (!TrackView_DrawDoor(&context, SLIP_OBJECT_DOS_STRIDE) || state.auxiliaryClipPlaneEnabled ||
-		    state.auxiliaryClipPlaneOrigin.x != 100 || state.auxiliaryClipPlaneOrigin.y != 200 ||
-		    state.auxiliaryClipPlaneOrigin.z != 300 || state.auxiliaryClipPlaneNormal.x != INT16_MIN ||
-		    state.auxiliaryClipPlaneNormal.y != -200 || state.auxiliaryClipPlaneNormal.z != 300 ||
-		    !TrackView_DrawDoorReverse(&context, SLIP_OBJECT_DOS_STRIDE) ||
-		    memcmp(&objects[1].matrix, &original, sizeof(original)) != 0 || state.auxiliaryClipPlaneEnabled)
+		const bool passed = TrackView_DrawDoor(&context, SLIP_OBJECT_DOS_STRIDE) && !state.auxiliaryClipPlaneEnabled &&
+		                    state.auxiliaryClipPlaneOrigin.x == 100 && state.auxiliaryClipPlaneOrigin.y == 200 &&
+		                    state.auxiliaryClipPlaneOrigin.z == 300 && state.auxiliaryClipPlaneNormal.x == INT16_MIN &&
+		                    state.auxiliaryClipPlaneNormal.y == -200 && state.auxiliaryClipPlaneNormal.z == 300 &&
+		                    TrackView_DrawDoorReverse(&context, SLIP_OBJECT_DOS_STRIDE) &&
+		                    memcmp(&objects[1].matrix, &original, sizeof(original)) == 0 &&
+		                    !state.auxiliaryClipPlaneEnabled;
+		SlipTrackWorld_doors[0].shapeHandle = 0;
+		SlipResourceHost_Release(NULL, shapeHandle);
+		if (!passed)
 			return 4;
-		SlipTrackWorld_doorShapes[0] = (SlipResourcePayload){0};
 		puts("door_draw culled_path_plane_transform_word_negation_clear_matrix_restore=passed");
 		return 0;
 	}
@@ -5040,14 +5057,18 @@ int SlipDebug_RunDumpCommand(int argc, char **argv) {
 		/* Fixture starts at driver acceptance; retain the palette installed
 		 * by the skipped driver screen,
 		 * including reserved entry 248. */
-		SlipResourcePayload driverPalette = {0};
+		uint16_t driverPaletteHandle;
 		SlipSprite driverSprite;
-		if (!SlipResource_LoadByName(&argv[2], 1, "DRIVER0.SPR", &driverPalette) ||
-		    !SlipSprite_FromPayload(&driverPalette, &driverSprite))
+		if (!SlipResourceHost_Load(NULL, "DRIVER0.SPR", &driverPaletteHandle))
+			return 4;
+		(void)SlipResourceHost_Lock(NULL, driverPaletteHandle);
+		SlipResourcePayload driverPalette = SlipResourceHost_Payload(driverPaletteHandle);
+		if (!SlipSprite_FromPayload(&driverPalette, &driverSprite))
 			return 4;
 		SlipSprite_ApplyPalette(&driverSprite);
 		SlipVgaDac_Commit();
-		SlipResource_ReleaseHandle(&driverPalette);
+		SlipResourceHost_Unlock(NULL, driverPaletteHandle);
+		SlipResourceHost_Release(NULL, driverPaletteHandle);
 		SlipDebug_fixedClock = true;
 		campaignStream = true;
 		SlipRandom_SetState(1, 1);

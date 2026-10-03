@@ -54,13 +54,11 @@ static void SlipLapRecordsHost_Renderer(void *context, uint32_t vertices, uint32
 static void SlipLapRecordsHost_MinimumDepth(void *context, uint32_t value) {
 	(void)context;
 	SlipDraw3D_SetMinimumDepth(value);
-	SlipRendererHost_state.projection.minZ = (int32_t)value;
 }
 
 static void SlipLapRecordsHost_MaximumDepth(void *context, uint32_t value) {
 	(void)context;
 	SlipDraw3D_SetMaximumDepth(value);
-	SlipRendererHost_state.projection.maxZ = (int32_t)value;
 }
 
 static void SlipLapRecordsHost_ResetLighting(void *context) {

@@ -66,19 +66,14 @@ bool SlipRaceDrone_Initialize(const char *const *archives, size_t archiveCount,
                               TrackViewResourceHandleRegistry *resourceRegistry, SlipResourcePayload *artPayload,
                               uint16_t *artHandle) {
 	uint32_t resourceHandle;
+	(void)archives;
+	(void)archiveCount;
 
 	if (!TrackView_LoadNamedResource(resourceRegistry, "DRONE.ART", &resourceHandle))
 		return false;
 	*artHandle = (uint16_t)resourceHandle;
-	if (resourceRegistry->hostResources) {
-
-		SlipActor_PreloadResources(*artHandle, &SlipActorHost_resourceCalls);
-		*artPayload = SlipResourceHost_Payload(*artHandle);
-	} else {
-		if (!SlipResource_LoadByName(archives, archiveCount, "DRONE.ART", artPayload))
-			return false;
-		SlipArticSlot_PreloadResources(artPayload->data, TrackView_LoadNamedResource, resourceRegistry);
-	}
+	SlipActor_PreloadResources(*artHandle, &SlipActorHost_resourceCalls);
+	*artPayload = SlipResourceHost_Payload(*artHandle);
 	SlipRaceDrone_spawnTimer = SLIP_RACE_DRONE_INITIAL_SPAWN_DELAY_MS;
 	SlipRaceDrone_activeCount = 0;
 	SlipRaceDrone_alternateFlags = 0;
@@ -87,14 +82,10 @@ bool SlipRaceDrone_Initialize(const char *const *archives, size_t archiveCount,
 
 void SlipRaceDrone_Shutdown(uint16_t artHandle, SlipResourcePayload *artPayload,
                             TrackViewResourceHandleRegistry *registry) {
-	if (registry->hostResources) {
-
-		SlipActor_ReleaseResources(artHandle, &SlipActorHost_resourceCalls);
-		SlipResourceHost_Release(NULL, artHandle);
-	} else {
-		SlipArticSlot_ReleaseResources(artPayload->data, TrackView_FindNameRecord, TrackView_ReleaseResource, registry);
-		SlipResource_ReleaseHandle(artPayload);
-	}
+	(void)artPayload;
+	(void)registry;
+	SlipActor_ReleaseResources(artHandle, &SlipActorHost_resourceCalls);
+	SlipResourceHost_Release(NULL, artHandle);
 }
 
 static void SlipRaceDrone_TrackPointAhead(uint32_t traversalDirection, uint16_t objectOffset, uint32_t recordCount,

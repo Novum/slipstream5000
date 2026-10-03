@@ -35,7 +35,6 @@ extern const SlipRaceTrackFrameCallback g_trackViewFrameCallbacks[];
 typedef struct TrackViewResourceHandleEntry {
 	char name[SLIP_RESOURCE_NAME_BUFFER_BYTES];
 	uint32_t resourceHandle;
-	SlipResourcePayload payload; /* Host binding of this named resource reference. */
 } TrackViewResourceHandleEntry;
 
 /* Host representation conversion of the actual typed material resource. */
@@ -46,14 +45,10 @@ typedef struct TrackViewResourceHandleRegistry {
 	size_t archiveCount;
 	TrackViewResourceHandleEntry entries[SLIP_TRACK_VIEW_RESOURCE_HANDLE_CAPACITY];
 	size_t entryCount;
-	bool hostResources;
 } TrackViewResourceHandleRegistry;
 
 void TrackView_ReleaseResource(void *registry, uint32_t handle);
 void TrackView_ReleaseSequence(TrackViewResourceHandleRegistry *registry, const uint16_t *handles, uint16_t count);
-
-bool TrackView_LoadResourceHandlePayload(const TrackViewResourceHandleRegistry *registry, uint32_t handle,
-                                         SlipResourcePayload *payload);
 
 typedef struct TrackViewMaterialInit {
 	uint16_t cage;
@@ -82,7 +77,6 @@ int TrackView_ResolveComponentMaterials(uint8_t *componentBase, size_t component
 
 void TrackView_MaterialAnimationTick(void);
 
-int TrackView_FindNameRecord(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint32_t *handle);
 int TrackView_LoadNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint32_t *resourceHandle);
 int TrackView_FindNamedResource(void *user, const char name[SLIP_RESOURCE_NAME_BUFFER_BYTES], uint32_t *resourceHandle);
 
@@ -537,7 +531,6 @@ bool TrackView_BuildTrackMaterialTable(const char *const *archives, size_t archi
                                        uint8_t **materialTable, size_t *materialTableBytes, uint16_t *materialGlobal,
                                        TrackViewResourceHandleRegistry *resourceRegistryOut);
 
-void TrackView_VehicleViewResetActorState(void);
 void TrackView_TrackGlobeResetActorState(void);
 
 void TrackViewNormalizePrimitiveFlags(uint8_t *componentBase, size_t componentBaseBytes, const uint8_t *materialTable,
@@ -613,7 +606,6 @@ typedef struct TrackViewCloudDrawContext {
 } TrackViewCloudDrawContext;
 
 void TrackView_DrawClouds(void *userData);
-uint16_t TrackView_VehicleViewFrameStep(uint32_t deltaMs);
 uint16_t TrackView_TrackGlobeFrameTimerUpdate(void);
 void TrackView_RenderSetDiagnostics(bool enabled);
 bool TrackView_RenderDiagnosticsEnabled(void);
@@ -622,13 +614,9 @@ bool SlipTrackGlobe_UpdateGivenMatrix(const char *resPath, uint16_t track, SlipV
                                       uint32_t rotationArgument);
 bool SlipTrackGlobe_DrawGivenResources(const char *resPath, uint16_t track, uint16_t grow,
                                        const SlipView3DMatrix *matrix, uint16_t globe, uint16_t flag);
-bool SlipTrackGlobe_DrawGivenMatrix(const char *resPath, uint16_t track, uint16_t grow, const SlipView3DMatrix *matrix);
 bool SlipTrackGlobe_UpdateMatrix(const char *resPath, uint16_t trackResourceHandle);
-bool SlipTrackGlobe_Draw(const char *resPath, uint16_t trackResourceHandle, uint16_t growAmount);
 bool SlipTrackGlobe_DrawRetained(const char *resPath, uint16_t trackResourceHandle, uint16_t growAmount,
                                  uint16_t globeResource, uint16_t flagResource);
-bool TrackView_DrawVehicleViewModel(const char *resPath, int driver, SlipView3DMatrix *actorObjectMatrix,
-                                    uint16_t frameStep);
 
 bool TrackView_ApplyComponentLight(void *context, const SlipTrackWorldComponentTail *tail);
 bool TrackView_RestoreComponentLight(void *context, const SlipTrackWorldComponentTail *tail);

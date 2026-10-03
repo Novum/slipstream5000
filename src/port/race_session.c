@@ -6,6 +6,7 @@
 #include "game_music.h"
 #include "guided_projectile_creation.h"
 #include "material_host.h"
+#include "maths_host.h"
 #include "menu_resources.h"
 #include "race_display.h"
 #include "race_voice.h"
@@ -206,7 +207,6 @@ static uint8_t *SlipRaceSession_cellTableHost;
 static SlipTrackWorldCellTableVisit SlipRaceSession_cellVisitsHost[SLIP_RACE_CELL_VISIT_CAPACITY];
 static SlipArticSlotPool SlipRaceSession_articPool;
 static SlipTrackAssetBundle SlipRaceSession_trackBundle;
-SlipView3DMaths SlipRaceSession_maths;
 static SlipResourcePayload SlipRaceSession_racerArtPayload[SLIP_RACE_RACER_COUNT];
 static SlipResourcePayload SlipRaceSession_droneArtPayload;
 static uint16_t SlipRaceSession_droneArtHandle;
@@ -462,24 +462,15 @@ static bool SlipRaceSession_GuidedProjectileBody(void *context, uint16_t object,
 static void SlipRaceSession_GuidedProjectileShapeBounds(void *context, uint16_t shape, SlipView3DVec32 *minimum,
                                                         SlipView3DVec32 *maximum) {
 	(void)context;
-	SlipResourcePayload payload;
-	if (SlipRaceSession_resourceRegistry.hostResources) {
-
-		const uint8_t *const data = SlipResourceHost_Lock(NULL, shape);
-		payload = SlipResourceHost_Payload(shape);
-		payload.data = (uint8_t *)data;
-	} else if (!TrackView_LoadResourceHandlePayload(&SlipRaceSession_resourceRegistry, shape, &payload))
-		SlipRuntime_Fatal("Guided projectile shape binding failed");
+	(void)SlipResourceHost_Lock(NULL, shape);
+	SlipResourcePayload payload = SlipResourceHost_Payload(shape);
 	if (payload.data == NULL || payload.size < sizeof(SlipShape3DHeader))
 		SlipRuntime_Fatal("Guided projectile shape binding failed");
 
 	const SlipShape3DHeader *const header = (const SlipShape3DHeader *)(const void *)payload.data;
 	*minimum = (SlipView3DVec32){header->minimumX, header->minimumY, header->minimumZ};
 	*maximum = (SlipView3DVec32){header->maximumX, header->maximumY, header->maximumZ};
-	if (SlipRaceSession_resourceRegistry.hostResources)
-		SlipResourceHost_Unlock(NULL, shape);
-	else
-		SlipResource_ReleaseHandle(&payload);
+	SlipResourceHost_Unlock(NULL, shape);
 }
 
 static void SlipRaceSession_GuidedProjectileBodyBounds(void *context, uint16_t object, SlipView3DVec32 minimum,
@@ -1561,7 +1552,7 @@ uint32_t SlipRaceSession_DebrisEvent(uint32_t eventCode, uint32_t eventPayload, 
 	    (int16_t)((uint32_t)((int32_t)state->rotationRateZ * (int16_t)step) >> SLIP_Q14_FRACTION_BITS);
 	SlipObjectRotate rotated;
 	(void)SlipObject_Rotate(SlipRaceSession_objectTableHost, SLIP_OBJECT_TABLE_DOS_BYTES, object, rotateX, rotateY,
-	                        rotateZ, 0, &SlipRaceSession_maths, &rotated);
+	                        rotateZ, 0, SlipMathsHost_Tables(), &rotated);
 	SlipObjectPosition original;
 	(void)SlipObject_Position(SlipRaceSession_objectTableHost, SLIP_OBJECT_TABLE_DOS_BYTES, object, &original);
 	step = (uint16_t)SlipFrameTimer_Step();
@@ -1866,8 +1857,8 @@ static void SlipRaceSession_DrawCockpitSight(uint16_t craftObject) {
 			if (SlipObject_ViewPosition(SlipRaceSession_objectTableHost, SLIP_OBJECT_TABLE_DOS_BYTES, targetObject,
 			                            &targetView)) {
 				targetPoint = (SlipDraw3DVec32){targetView.x, targetView.y, targetView.z};
-				if (targetView.z >= (int32_t)SlipDraw3D_minimumDepth &&
-				    targetView.z <= (int32_t)SlipDraw3D_maximumDepth) {
+				if (targetView.z >= (int32_t)SlipDraw3D_GetMinimumDepth() &&
+				    targetView.z <= (int32_t)SlipDraw3D_GetMaximumDepth()) {
 					targetClipMask = TrackView_ProjectMask(targetView, &SlipRaceSession_lastTrackViewContext.frustum);
 					if (targetClipMask == 0 && SlipDraw3D_ProjectScreen(targetPoint, &SlipRendererHost_state.projection,
 					                                                    &targetScreenX, &targetScreenY)) {
@@ -2427,10 +2418,6 @@ static bool SlipRaceSession_LoadWorld(uint16_t axTrack, const char *const *archi
 	}
 	SlipShape3D_Initialize();
 	SlipRaceSession_LoadPalette(SlipRace_paletteNames[axTrack - 1]);
-	SlipView3D_FreeMaths(&SlipRaceSession_maths);
-	if (!SlipView3D_LoadMathsFromArchives(&SlipRaceSession_maths, archives, archiveCount)) {
-		return false;
-	}
 
 	SlipRaceSession_materialTable = NULL;
 	SlipRaceSession_materialTableBytes = 0;
@@ -2864,11 +2851,6 @@ void SlipRaceSession_Begin(const char *resPath, uint16_t axTrack, SlipRaceRacerT
 	    SlipRaceSession_slotDrawHost, (SLIP_TRACK_SLOT_DRAW_RECORD_COUNT * SLIP_RACE_SLOT_DRAW_BYTES),
 	    slotDraw.baseAddress, SlipRaceSession_objectTableHost, SLIP_OBJECT_TABLE_DOS_BYTES);
 
-	SlipView3D_FreeMaths(&SlipRaceSession_maths);
-	if (!SlipView3D_LoadMathsFromArchives(&SlipRaceSession_maths, archives, archiveCount)) {
-		return;
-	}
-
 	if (!SlipTrackWorld_FindDoors(1, SlipRaceSession_trackBundle.trdPayload.data,
 	                              SlipRaceSession_trackBundle.trdPayload.size, SlipRaceSession_trackBundle.trdBaseToken,
 	                              SlipRaceSession_trackBundle.trcPayload.data,
@@ -2891,8 +2873,6 @@ void SlipRaceSession_Begin(const char *resPath, uint16_t axTrack, SlipRaceRacerT
 	        SlipRaceSession_materialTableBytes)) {
 		return;
 	}
-	(void)SlipMenu_ApplyPaletteResource(archives, archiveCount, SlipRace_paletteNames[axTrack - 1u]);
-
 	Raster_SetClipRect(0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 	Raster_FillRectClipped(0, 0, 0, SLIPSTREAM_SCREEN_WIDTH - 1, SLIPSTREAM_SCREEN_HEIGHT - 1);
 	SlipMenu_PresentFrame();
@@ -2935,7 +2915,7 @@ void SlipRaceSession_Begin(const char *resPath, uint16_t axTrack, SlipRaceRacerT
 	SlipRaceSession_resourceRegistry.archives = SlipRaceSession_archivesHost;
 	SlipRaceSession_resourceRegistry.archiveCount = SlipRaceSession_archiveCountHost;
 	for (i = 0; i < SLIP_RACE_RACER_COUNT; ++i) {
-		SlipResource_ReleaseHandle(&SlipRaceSession_racerArtPayload[i]);
+		SlipRaceSession_racerArtPayload[i] = (SlipResourcePayload){0};
 		SlipRaceSession_racerArtHandles[i] = 0;
 		if (SlipRace_FindRacer(racerTable, (uint16_t)(i + 1u)).racerNotFound) {
 			continue;
@@ -2970,7 +2950,7 @@ void SlipRaceSession_Begin(const char *resPath, uint16_t axTrack, SlipRaceRacerT
 	SlipRaceSession_playerContext.aiSpeedScale = SlipRacePlayer_aiSpeedScale;
 	SlipRaceSession_playerContext.aiSpeedTableCount =
 	    sizeof(SlipRacePlayer_aiBaseSpeed) / sizeof(SlipRacePlayer_aiBaseSpeed[0]);
-	SlipRaceSession_playerContext.maths = &SlipRaceSession_maths;
+	SlipRaceSession_playerContext.maths = SlipMathsHost_Tables();
 	SlipRaceSession_playerContext.slotListBase = (uint8_t *)(void *)SlipRaceSession_trackSlots;
 	SlipRaceSession_playerContext.slotListBytes = (SLIP_RACE_TRACK_SLOT_RECORD_COUNT * sizeof(SlipTrackSlotRecord));
 	SlipRaceSession_playerContext.slotListBaseOffset = slotList.baseAddress;
@@ -3088,7 +3068,7 @@ void SlipRaceSession_Begin(const char *resPath, uint16_t axTrack, SlipRaceRacerT
 	SlipRaceSession_InitializeEffects();
 
 	trackLifecycle =
-	    (TrackViewTrackLifecycleArgs){&SlipRaceSession_cloudState, archives, archiveCount, &SlipRaceSession_maths};
+	    (TrackViewTrackLifecycleArgs){&SlipRaceSession_cloudState, archives, archiveCount, SlipMathsHost_Tables()};
 	SlipRaceHud_Shutdown(&SlipRaceSession_hudAssets, SlipRaceSession_cleanupCallback, &trackLifecycle);
 	SlipRaceSession_frameCallback = g_trackViewFrameCallbacks[axTrack - 1u];
 	if (!SlipRaceCamera_LoadPositions(&SlipRaceSession_cameraState, archives, archiveCount, axTrack))
@@ -3367,7 +3347,7 @@ static bool SlipRaceSession_DrawTrackFrame(uint16_t overlayEnable) {
 	context.articSlotPool = SlipRaceSession_articPool.allocation;
 	context.articSlotPoolBytes = SlipRaceSession_articPool.allocationBytes;
 	context.articSlotPoolAddress = SlipRaceSession_articPool.allocationAddress;
-	context.maths = &SlipRaceSession_maths;
+	context.maths = SlipMathsHost_Tables();
 	context.trackCellTable = SlipRaceSession_cellTableHost;
 	context.trackCellTableBytes = (SLIP_TRACK_WORLD_CELL_TABLE_BYTES);
 	if (SlipRacePlayer_refuelSection != 0)
@@ -3398,7 +3378,7 @@ static bool SlipRaceSession_DrawTrackFrame(uint16_t overlayEnable) {
 		TrackViewNormalizePrimitiveFlags((uint8_t *)context.componentBase, context.componentBaseBytes,
 		                                 SlipRaceSession_materialTable, SlipRaceSession_materialTableBytes,
 		                                 SlipRaceSession_materialGlobal, SlipRaceSession_renderMode,
-		                                 &SlipRaceSession_resourceRegistry, &SlipRaceSession_maths,
+		                                 &SlipRaceSession_resourceRegistry, SlipMathsHost_Tables(),
 		                                 (SlipView3DVec32){0, (int32_t)SLIP_RACE_LIGHT_Y_WORD, 0});
 	}
 
@@ -3477,7 +3457,7 @@ static bool SlipRaceSession_DrawTrackFrame(uint16_t overlayEnable) {
 	cloudViewMatrix = SlipRaceSession_cameraWorldMatrix;
 	cloudDraw = (TrackViewCloudDrawContext){
 	    &context,
-	    &SlipRaceSession_maths,
+	    SlipMathsHost_Tables(),
 	    &cloudViewMatrix,
 	    SlipRaceSession_renderMode,
 	    (uint16_t)(SlipRace_cloudScrollPhase >> SLIP_RACE_CLOUD_PHASE_FRACTION_BITS),
@@ -3490,7 +3470,7 @@ static bool SlipRaceSession_DrawTrackFrame(uint16_t overlayEnable) {
 	background.cloudSetting = (uint32_t)SlipConfig_CloudsEnabled();
 	background.cloudHook = TrackView_DrawClouds;
 	background.cloudHookUserData = &cloudDraw;
-	background.maths = &SlipRaceSession_maths;
+	background.maths = SlipMathsHost_Tables();
 	background.projectState = &SlipRendererHost_state.projection;
 	background.pool = drawRecordPool;
 	background.cameraHeight = cameraPosition.positionY;
@@ -3539,7 +3519,6 @@ static bool SlipRaceSession_DrawTrackFrame(uint16_t overlayEnable) {
 
 	savedTrackMinZ = SlipRendererHost_state.projection.minZ;
 	SlipDraw3D_SetMinimumDepth(SLIP_TRACK_MINIMUM_RENDER_DEPTH);
-	SlipRendererHost_state.projection.minZ = SLIP_TRACK_MINIMUM_RENDER_DEPTH;
 	frustum.minZ = SLIP_TRACK_MINIMUM_RENDER_DEPTH;
 	context.frustum.minZ = SLIP_TRACK_MINIMUM_RENDER_DEPTH;
 	context.minDepth = SLIP_TRACK_MINIMUM_RENDER_DEPTH;
@@ -3576,7 +3555,6 @@ static bool SlipRaceSession_DrawTrackFrame(uint16_t overlayEnable) {
 	    TrackView_SphereCull, &frustum, TrackView_SceneryCallback, &context, TrackView_ApplyComponentLight,
 	    TrackView_RestoreComponentLight, &context, &frame);
 	SlipDraw3D_SetMinimumDepth((uint32_t)savedTrackMinZ);
-	SlipRendererHost_state.projection.minZ = savedTrackMinZ;
 	frustum.minZ = savedTrackMinZ;
 	context.frustum.minZ = savedTrackMinZ;
 	context.minDepth = (uint32_t)savedTrackMinZ;
@@ -3831,7 +3809,7 @@ static void SlipRaceSession_DrawView(uint16_t view, uint32_t windowSize, const b
 			(void)SlipRaceCamera_IntroZoom(
 			    &SlipRaceSession_cameraState, SlipRaceSession_objectTableHost, SLIP_OBJECT_TABLE_DOS_BYTES,
 			    viewCraftObject, view, (uint16_t)SlipFrameTimer_Step(), SlipRace_flybyChaseEnabled,
-			    SlipRace_demoChaseEnabled, &SlipRaceSession_maths, SlipRaceSession_trackBundle.trdPayload.data,
+			    SlipRace_demoChaseEnabled, SlipMathsHost_Tables(), SlipRaceSession_trackBundle.trdPayload.data,
 			    SlipRaceSession_trackBundle.trdPayload.size, SlipRaceSession_trackBundle.trcPayload.data,
 			    SlipRaceSession_trackBundle.trcPayload.size, SlipRaceSession_cellTableHost,
 			    (SLIP_TRACK_WORLD_CELL_TABLE_BYTES), SlipRaceSession_trackBundle.trdBaseToken,
@@ -3848,7 +3826,7 @@ static void SlipRaceSession_DrawView(uint16_t view, uint32_t windowSize, const b
 		} else if (dispatchedMode == SLIP_RACE_CAMERA_MODE_CHASE) {
 			(void)SlipRaceCamera_Chase(
 			    &SlipRaceSession_cameraState, SlipRaceSession_objectTableHost, SLIP_OBJECT_TABLE_DOS_BYTES,
-			    viewCraftObject, view, &SlipRaceSession_maths, SlipRaceSession_trackBundle.trdPayload.data,
+			    viewCraftObject, view, SlipMathsHost_Tables(), SlipRaceSession_trackBundle.trdPayload.data,
 			    SlipRaceSession_trackBundle.trdPayload.size, SlipRaceSession_trackBundle.trcPayload.data,
 			    SlipRaceSession_trackBundle.trcPayload.size, SlipRaceSession_cellTableHost,
 			    (SLIP_TRACK_WORLD_CELL_TABLE_BYTES), SlipRaceSession_trackBundle.trdBaseToken);
@@ -3892,7 +3870,7 @@ static void SlipRaceSession_DrawView(uint16_t view, uint32_t windowSize, const b
 			    SlipRaceSession_playerContext.articSlotPool, SlipRaceSession_playerContext.articSlotPoolBytes,
 			    SlipRaceSession_playerContext.articSlotPoolOffset, SlipRaceSession_playerContext.articData,
 			    SlipRaceSession_playerContext.articDataBytes, SlipRaceSession_playerContext.articDataOffset,
-			    &SlipRaceSession_maths);
+			    SlipMathsHost_Tables());
 		} else if (dispatchedMode == SLIP_RACE_CAMERA_MODE_DROPPED) {
 			(void)SlipRaceCamera_Dropped(&SlipRaceSession_cameraState, SlipRaceSession_objectTableHost,
 			                             SLIP_OBJECT_TABLE_DOS_BYTES, viewCraftObject, view);
@@ -3905,7 +3883,7 @@ static void SlipRaceSession_DrawView(uint16_t view, uint32_t windowSize, const b
 			    SlipRaceSession_articPool.allocation, SlipRaceSession_articPool.allocationBytes,
 			    SlipRaceSession_articPool.allocationAddress, SlipRaceSession_playerContext.articData,
 			    SlipRaceSession_playerContext.articDataBytes, SlipRaceSession_playerContext.articDataOffset,
-			    &SlipRaceSession_maths, &cockpit);
+			    SlipMathsHost_Tables(), &cockpit);
 
 			if (cockpitReady) {
 				uint16_t light;
@@ -3950,11 +3928,11 @@ static void SlipRaceSession_DrawView(uint16_t view, uint32_t windowSize, const b
 		}
 		if (dispatchedMode == SLIP_RACE_CAMERA_MODE_EXTERNAL || dispatchedMode == SLIP_RACE_CAMERA_MODE_DESTROYED)
 			SlipRaceCamera_ExternalControls(&SlipRaceSession_cameraState, (uint16_t)SlipFrameTimer_Step(), inputHeld,
-			                                &SlipRaceSession_maths);
+			                                SlipMathsHost_Tables());
 		if (dispatchedMode == SLIP_RACE_CAMERA_MODE_CHASE) {
 			(void)SlipRaceCamera_UpdateChaseMatrix(&SlipRaceSession_cameraState, SlipRaceSession_objectTableHost,
 			                                       SLIP_OBJECT_TABLE_DOS_BYTES, viewCraftObject, view,
-			                                       (uint16_t)SlipFrameTimer_Step(), &SlipRaceSession_maths);
+			                                       (uint16_t)SlipFrameTimer_Step(), SlipMathsHost_Tables());
 		}
 
 		SlipRaceHud_PublishHandlerResult(&SlipRaceSession_hudState, handlerReturn,
@@ -3996,7 +3974,7 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 			SlipRaceMap_Draw(SlipRaceSession_mapCameraDistances[SlipRacePlayer_track], SLIP_RACE_MAP_ROUTE_COLOUR,
 			                 SLIP_RACE_MAP_FINISH_COLOUR, SLIP_RACE_MAP_OBJECT_COLOUR, SlipRacePlayer_playerOneObject,
 			                 rivalObject, (int16_t)(center & UINT16_MAX), (int16_t)(center >> 16),
-			                 SLIP_RACE_MAP_PLAYER_COLOUR, SLIP_RACE_MAP_RIVAL_COLOUR, &SlipRaceSession_maths,
+			                 SLIP_RACE_MAP_PLAYER_COLOUR, SLIP_RACE_MAP_RIVAL_COLOUR, SlipMathsHost_Tables(),
 			                 &SlipRendererHost_state.projection, SlipRaceSession_objectTableHost,
 			                 SLIP_OBJECT_TABLE_DOS_BYTES, SlipRaceSession_trackBundle.trkPayload.data,
 			                 SlipRaceSession_trackBundle.trkPayload.size, SlipRaceSession_trackBundle.trdPayload.data,
@@ -4246,7 +4224,7 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 		    &SlipRaceSession_cloudState,
 		    SlipRaceSession_archivesHost,
 		    SlipRaceSession_archiveCountHost,
-		    &SlipRaceSession_maths,
+		    SlipMathsHost_Tables(),
 		};
 
 		for (racerIndex = 0; racerIndex < SLIP_RACE_RACER_COUNT; ++racerIndex) {
@@ -4254,7 +4232,7 @@ SlipRaceFrameResult SlipRaceSession_RunFrame(uint32_t tick, const bool inputHeld
 
 				SlipActor_ReleaseResources(SlipRaceSession_racerArtHandles[racerIndex], &SlipActorHost_resourceCalls);
 				SlipResourceHost_Release(NULL, SlipRaceSession_racerArtHandles[racerIndex]);
-				SlipResource_ReleaseHandle(&SlipRaceSession_racerArtPayload[racerIndex]);
+				SlipRaceSession_racerArtPayload[racerIndex] = (SlipResourcePayload){0};
 			}
 		}
 
@@ -4441,7 +4419,7 @@ void SlipRaceSession_PlayIntro(const char *resPath, uint16_t axTrack, uint16_t s
 	SlipRaceSession_playerContext.aiSpeedScale = SlipRacePlayer_aiSpeedScale;
 	SlipRaceSession_playerContext.aiSpeedTableCount =
 	    sizeof(SlipRacePlayer_aiBaseSpeed) / sizeof(SlipRacePlayer_aiBaseSpeed[0]);
-	SlipRaceSession_playerContext.maths = &SlipRaceSession_maths;
+	SlipRaceSession_playerContext.maths = SlipMathsHost_Tables();
 	SlipRaceSession_playerContext.slotListBase = (uint8_t *)(void *)SlipRaceSession_trackSlots;
 	SlipRaceSession_playerContext.slotListBytes = (SLIP_RACE_TRACK_SLOT_RECORD_COUNT * sizeof(SlipTrackSlotRecord));
 	SlipRaceSession_playerContext.slotListBaseOffset = slotList.baseAddress;
@@ -4505,7 +4483,7 @@ void SlipRaceSession_PlayIntro(const char *resPath, uint16_t axTrack, uint16_t s
 	SlipRaceSession_InitializeEffects();
 
 	trackLifecycle =
-	    (TrackViewTrackLifecycleArgs){&SlipRaceSession_cloudState, archives, archiveCount, &SlipRaceSession_maths};
+	    (TrackViewTrackLifecycleArgs){&SlipRaceSession_cloudState, archives, archiveCount, SlipMathsHost_Tables()};
 	SlipRaceHud_Shutdown(&SlipRaceSession_hudAssets, SlipRaceSession_cleanupCallback, &trackLifecycle);
 	SlipRaceSession_frameCallback = g_trackViewFrameCallbacks[axTrack - 1u];
 	if (!SlipRaceCamera_LoadPositions(&SlipRaceSession_cameraState, archives, archiveCount, axTrack))
@@ -4587,7 +4565,7 @@ void SlipRaceSession_PlayIntro(const char *resPath, uint16_t axTrack, uint16_t s
 			SlipRaceMap_Draw(SlipRaceSession_mapCameraDistances[SlipRacePlayer_track], SLIP_RACE_MAP_ROUTE_COLOUR,
 			                 SLIP_RACE_MAP_FINISH_COLOUR, SLIP_RACE_MAP_OBJECT_COLOUR, SlipRacePlayer_playerOneObject,
 			                 rivalObject, (int16_t)(center & UINT16_MAX), (int16_t)(center >> 16),
-			                 SLIP_RACE_MAP_PLAYER_COLOUR, SLIP_RACE_MAP_RIVAL_COLOUR, &SlipRaceSession_maths,
+			                 SLIP_RACE_MAP_PLAYER_COLOUR, SLIP_RACE_MAP_RIVAL_COLOUR, SlipMathsHost_Tables(),
 			                 &SlipRendererHost_state.projection, SlipRaceSession_objectTableHost,
 			                 SLIP_OBJECT_TABLE_DOS_BYTES, SlipRaceSession_trackBundle.trkPayload.data,
 			                 SlipRaceSession_trackBundle.trkPayload.size, SlipRaceSession_trackBundle.trdPayload.data,
@@ -4692,7 +4670,7 @@ void SlipRaceSession_PlayIntro(const char *resPath, uint16_t axTrack, uint16_t s
 
 	SlipActor_ReleaseResources(SlipRaceSession_racerArtHandles[0], &SlipActorHost_resourceCalls);
 	SlipResourceHost_Release(NULL, SlipRaceSession_racerArtHandles[0]);
-	SlipResource_ReleaseHandle(&SlipRaceSession_racerArtPayload[0]);
+	SlipRaceSession_racerArtPayload[0] = (SlipResourcePayload){0};
 
 	SlipRaceSession_ShutdownWorld();
 	SlipRace_flybyChaseEnabled = 0;

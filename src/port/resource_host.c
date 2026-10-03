@@ -103,7 +103,6 @@ void SlipResourceHost_VisitResident(uint32_t extension, SlipResourceResidentCall
 	                                         .name = SlipResourceHost_ResidentName,
 	                                         .payload = SlipResourceHost_ResidentPayload};
 	SlipResource_VisitResident(extension, callback, &calls);
-	SlipResource_VisitResident(extension, callback, &SlipResource_cachedResidentCalls);
 }
 
 static bool SlipResourceHost_NamedSize(void *context, const char *name, uint32_t *size) {
